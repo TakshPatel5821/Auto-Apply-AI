@@ -166,51 +166,108 @@ export class ScrapingOrchestrator {
 
     const unanalyzedJobs = await prisma.job.findMany({
       where: { status: "FOUND", isBlacklisted: false, isSpam: false, isDuplicate: false },
-      take: 100,
+      take: 150,
     });
 
-    if (unanalyzedJobs.length === 0) return;
-    await Logger.info("ANALYZER", `Analyzing ${unanalyzedJobs.length} jobs (batch mode)`);
+    if (unanalyzedJobs.length === 0) {
+      await Logger.info("ANALYZER", "No new jobs to analyze");
+      return;
+    }
+    await Logger.info("ANALYZER", `Analyzing ${unanalyzedJobs.length} jobs`);
 
     const { fastFilter } = await import("@/lib/matching/fast-filter");
     const { claudeBatchMatchJobs } = await import("@/lib/ai/claude");
+    const { generateEmbedding, cosineSimilarity } = await import("@/lib/ai/ollama");
     const resumeData = resume.parsedData as Record<string, unknown>;
     const candidateSkills = resume.skills || [];
     const candidateTech = resume.technologies || [];
     const searchKeywords = (process.env.JOB_SEARCH_KEYWORDS || "Software Engineer")
       .split(",").map((k) => k.trim());
 
-    // Step 1: instant pre-filter (no AI)
-    const toAiScore: typeof unanalyzedJobs = [];
+    // Step 1: Fast keyword filter (instant, no AI)
+    const toSemanticScore: typeof unanalyzedJobs = [];
 
     for (const job of unanalyzedJobs) {
       const filter = fastFilter(job.jobTitle, job.description, candidateSkills, candidateTech, searchKeywords);
-
       if (filter.skip) {
         await prisma.job.update({
           where: { id: job.id },
           data: {
-            matchScore: 10,
-            atsScore: 1,
-            confidenceLevel: 0.9,
-            requiredSkills: [],
-            missingSkills: filter.missingKeywords,
-            matchingSkills: filter.matchedKeywords,
-            matchReason: filter.reason,
+            matchScore: 10, atsScore: 1, confidenceLevel: 0.9,
+            requiredSkills: [], missingSkills: filter.missingKeywords,
+            matchingSkills: filter.matchedKeywords, matchReason: filter.reason,
             status: "ANALYZED",
           },
         });
       } else {
-        toAiScore.push(job);
+        toSemanticScore.push(job);
+      }
+    }
+    await Logger.info("ANALYZER", `Fast-filter: ${unanalyzedJobs.length - toSemanticScore.length} skipped, ${toSemanticScore.length} proceeding`);
+
+    if (toSemanticScore.length === 0) return;
+
+    // Step 2: Semantic scoring with nomic-embed-text (fast, no tokens needed)
+    const resumeText = [
+      (resumeData.summary as string) || "",
+      candidateSkills.slice(0, 20).join(" "),
+      candidateTech.slice(0, 20).join(" "),
+      ((resumeData.experience as Array<{ title: string; bullets: string[] }>) || [])
+        .slice(0, 2).map((e) => `${e.title} ${e.bullets?.slice(0, 3).join(" ")}`).join(" "),
+    ].join(" ").trim();
+
+    const semanticScores = new Map<string, number>();
+
+    if (resumeText.length > 50) {
+      await Logger.info("ANALYZER", "Computing semantic similarity scores...");
+      try {
+        const resumeEmbedding = await generateEmbedding(resumeText);
+        let semanticSkipped = 0;
+
+        for (const job of toSemanticScore) {
+          try {
+            const jobText = `${job.jobTitle} ${job.companyName} ${job.description}`.slice(0, 4000);
+            const jobEmbedding = await generateEmbedding(jobText);
+            const sim = cosineSimilarity(resumeEmbedding, jobEmbedding);
+            semanticScores.set(job.id, sim);
+
+            // Hard skip: semantically unrelated (sim < 0.3 = basically unrelated)
+            if (sim < 0.3) {
+              semanticSkipped++;
+              await prisma.job.update({
+                where: { id: job.id },
+                data: {
+                  matchScore: 9, atsScore: 2, confidenceLevel: 0.85,
+                  matchReason: `Low semantic similarity (${(sim * 100).toFixed(0)}%)`,
+                  status: "ANALYZED",
+                },
+              });
+            }
+          } catch {
+            // Embedding failed for this job — still send to AI
+            semanticScores.set(job.id, 0.5);
+          }
+        }
+        await Logger.info("ANALYZER", `Semantic filter: ${semanticSkipped} more skipped`);
+      } catch (e) {
+        await Logger.warn("ANALYZER", `Semantic scoring unavailable: ${e} — falling back to AI scoring only`);
       }
     }
 
-    await Logger.info("ANALYZER", `Pre-filter: ${unanalyzedJobs.length - toAiScore.length} skipped, ${toAiScore.length} going to AI`);
+    // Step 3: AI batch scoring — only jobs that passed semantic filter
+    const toAiScore = toSemanticScore.filter(
+      (j) => !["ANALYZED"].includes(j.status) && (semanticScores.get(j.id) ?? 0.5) >= 0.3
+    );
 
-    // Step 2: batch AI scoring (5 jobs per call)
+    // Sort by semantic similarity descending (best candidates first)
+    toAiScore.sort((a, b) => (semanticScores.get(b.id) ?? 0.5) - (semanticScores.get(a.id) ?? 0.5));
+
+    await Logger.info("ANALYZER", `Sending ${toAiScore.length} jobs to AI for detailed scoring`);
+
     const BATCH = 5;
     for (let i = 0; i < toAiScore.length; i += BATCH) {
       const batch = toAiScore.slice(i, i + BATCH);
+      await Logger.info("ANALYZER", `AI batch ${Math.floor(i / BATCH) + 1}/${Math.ceil(toAiScore.length / BATCH)} (${batch.length} jobs)...`);
 
       try {
         const result = await claudeBatchMatchJobs(
@@ -219,12 +276,15 @@ export class ScrapingOrchestrator {
         );
 
         for (const scored of result.results || []) {
+          const semSim = semanticScores.get(scored.id) ?? 0.5;
+          // Blend AI score with semantic score for confidence
+          const confidence = Math.min(0.95, 0.6 + semSim * 0.35);
           await prisma.job.update({
             where: { id: scored.id },
             data: {
               matchScore: scored.matchScore,
               atsScore: scored.atsScore,
-              confidenceLevel: 0.75,
+              confidenceLevel: confidence,
               requiredSkills: [],
               missingSkills: scored.missingSkills || [],
               matchingSkills: scored.matchingSkills || [],
@@ -232,19 +292,22 @@ export class ScrapingOrchestrator {
               status: "ANALYZED",
             },
           });
-          await Logger.info("ANALYZER", `Scored: ${scored.matchReason} → ${scored.matchScore}/10`);
+          await Logger.info("ANALYZER", `  ${scored.matchScore}/10 — ${scored.matchReason?.slice(0, 80)}`);
         }
       } catch (e) {
-        // Fallback: mark batch as analyzed with neutral score
         for (const job of batch) {
           await prisma.job.update({
             where: { id: job.id },
-            data: { matchScore: 5, atsScore: 5, status: "ANALYZED", matchReason: "Scoring failed, manual review needed" },
+            data: { matchScore: 5, atsScore: 5, status: "ANALYZED", matchReason: "AI scoring failed — manual review needed" },
           });
         }
-        await Logger.warn("ANALYZER", `Batch ${i / BATCH + 1} failed: ${e}`);
+        await Logger.warn("ANALYZER", `Batch ${i / BATCH + 1} AI scoring failed: ${e}`);
       }
     }
+
+    const analyzed = await prisma.job.count({ where: { status: "ANALYZED" } });
+    const good = await prisma.job.count({ where: { status: "ANALYZED", matchScore: { lte: 4 } } });
+    await Logger.success("ANALYZER", `Analysis complete — ${good} strong matches found out of ${analyzed} total analyzed`);
   }
 
   private isCompanyBlacklisted(company: string): boolean {

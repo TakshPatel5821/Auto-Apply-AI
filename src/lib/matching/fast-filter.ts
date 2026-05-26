@@ -1,9 +1,9 @@
-// Instant keyword-based pre-filter — runs before any AI call
-// Eliminates obvious mismatches without touching Ollama
+// Instant keyword-based pre-filter — runs BEFORE any AI or embedding call.
+// Eliminates obvious mismatches in microseconds.
 
 export interface FilterResult {
-  score: number;       // 0–100, higher = better
-  skip: boolean;       // true = don't bother AI scoring
+  score: number;
+  skip: boolean;
   reason: string;
   matchedKeywords: string[];
   missingKeywords: string[];
@@ -23,61 +23,65 @@ export function fastFilter(
   } = {}
 ): FilterResult {
   const jobText = `${jobTitle} ${jobDescription}`.toLowerCase();
+  const titleLower = jobTitle.toLowerCase();
   const candidateSet = new Set(
     [...candidateSkills, ...candidateTech].map((s) => s.toLowerCase())
   );
 
-  // Hard skip: spam signals
+  // ─── Hard skips ────────────────────────────────────────────────────────────
+
   const spamPhrases = [
-    "mlm", "pyramid", "unlimited earning", "work from home opportunity",
-    "no experience required", "be your own boss", "100% commission only",
+    "mlm", "pyramid", "unlimited earning", "be your own boss",
+    "100% commission only", "no experience required to earn",
+    "work from home opportunity - earn", "make money from home",
   ];
   if (spamPhrases.some((p) => jobText.includes(p))) {
-    return { score: 0, skip: true, reason: "Spam job detected", matchedKeywords: [], missingKeywords: [] };
+    return { score: 0, skip: true, reason: "Spam/MLM detected", matchedKeywords: [], missingKeywords: [] };
   }
 
-  // Hard skip: sponsorship mismatch
   if (!options.requireSponsorship) {
-    const noSponsorPhrases = ["no sponsorship", "must be authorized", "citizens only", "gc or citizen"];
-    if (noSponsorPhrases.some((p) => jobText.includes(p))) {
-      return { score: 0, skip: true, reason: "No sponsorship available", matchedKeywords: [], missingKeywords: [] };
+    const noSponsor = ["no sponsorship", "must be authorized to work", "citizens only", "gc or citizen", "no h1b", "no h-1b", "not eligible for sponsorship"];
+    if (noSponsor.some((p) => jobText.includes(p))) {
+      return { score: 0, skip: true, reason: "No visa sponsorship available", matchedKeywords: [], missingKeywords: [] };
     }
   }
 
-  // Hard skip: senior/staff/principal required but candidate is entry/mid
-  const seniorRequired = /\b(10\+|8\+|staff engineer|principal engineer|vp of|director of)\b/.test(jobText);
-  if (seniorRequired) {
-    return { score: 0, skip: true, reason: "Requires 8+ years / staff level", matchedKeywords: [], missingKeywords: [] };
+  // Skip true senior/executive roles (be careful not to skip senior-friendly intern postings)
+  const strictSeniorPattern = /\b(10\+\s*years|8\+\s*years|staff engineer|principal engineer|vp of engineering|director of engineering|cto |chief technology|svp |evp )\b/i;
+  if (strictSeniorPattern.test(jobText)) {
+    return { score: 0, skip: true, reason: "Requires 8+ years or executive level", matchedKeywords: [], missingKeywords: [] };
   }
 
-  // Keyword matching
+  // ─── Intern/Entry-level boost ───────────────────────────────────────────────
+  const internSignals = ["intern", "internship", "co-op", "coop", "new grad", "entry level", "entry-level", "junior", "0-2 years", "0-1 year", "recent graduate", "graduating"];
+  const isInternPosting = internSignals.some((s) => jobText.includes(s));
+  const internBonus = isInternPosting ? 25 : 0;
+
+  // ─── Search keyword matching ────────────────────────────────────────────────
   const matchedKeywords: string[] = [];
   const missingKeywords: string[] = [];
-
   for (const kw of searchKeywords) {
-    if (jobText.includes(kw.toLowerCase())) {
-      matchedKeywords.push(kw);
-    } else {
-      missingKeywords.push(kw);
-    }
+    (jobText.includes(kw.toLowerCase()) ? matchedKeywords : missingKeywords).push(kw);
   }
 
-  // Skill matching
+  // ─── Tech skill matching ────────────────────────────────────────────────────
   const techKeywords = [
     "react", "typescript", "javascript", "python", "node", "nodejs",
     "java", "go", "golang", "rust", "c++", "c#", "sql", "postgresql",
     "mongodb", "redis", "aws", "gcp", "azure", "docker", "kubernetes",
-    "graphql", "rest", "api", "git", "ci/cd", "agile", "nextjs", "vue",
-    "angular", "django", "fastapi", "spring", "rails", "flutter",
+    "graphql", "rest", "api", "git", "ci/cd", "agile", "next.js", "nextjs",
+    "vue", "angular", "django", "fastapi", "spring", "rails", "flutter",
+    "tensorflow", "pytorch", "machine learning", "ml", "data science",
+    "devops", "linux", "bash", "terraform", "ansible",
   ];
 
   let skillMatches = 0;
-  let totalRelevantSkills = 0;
+  let techMentioned = 0;
   const matchedSkills: string[] = [];
 
   for (const tech of techKeywords) {
     if (jobText.includes(tech)) {
-      totalRelevantSkills++;
+      techMentioned++;
       if (candidateSet.has(tech)) {
         skillMatches++;
         matchedSkills.push(tech);
@@ -85,24 +89,24 @@ export function fastFilter(
     }
   }
 
-  const skillScore = totalRelevantSkills > 0
-    ? Math.round((skillMatches / Math.min(totalRelevantSkills, 8)) * 100)
+  const skillScore = techMentioned > 0
+    ? Math.round((skillMatches / Math.min(techMentioned, 8)) * 100)
     : 50;
 
-  // Title relevance bonus
+  // Title relevance: check if search keyword root appears in title
   const titleRelevant = searchKeywords.some((kw) =>
-    jobTitle.toLowerCase().includes(kw.toLowerCase().split(" ")[0])
+    titleLower.includes(kw.toLowerCase().split(" ")[0])
   );
   const titleBonus = titleRelevant ? 20 : 0;
 
-  const finalScore = Math.min(100, skillScore + titleBonus);
+  const finalScore = Math.min(100, skillScore + titleBonus + internBonus);
 
-  // Skip if clearly not relevant (score < 20 means almost no skill overlap)
-  if (finalScore < 20 && totalRelevantSkills > 3) {
+  // Skip if very low overlap AND no intern signals AND has many tech requirements
+  if (finalScore < 15 && !isInternPosting && techMentioned > 4) {
     return {
       score: finalScore,
       skip: true,
-      reason: `Low skill overlap (${skillMatches}/${totalRelevantSkills} tech skills matched)`,
+      reason: `Low skill overlap (${skillMatches}/${techMentioned} tech matched)`,
       matchedKeywords: matchedSkills,
       missingKeywords,
     };
@@ -111,7 +115,7 @@ export function fastFilter(
   return {
     score: finalScore,
     skip: false,
-    reason: `${skillMatches} skill matches, title ${titleRelevant ? "relevant" : "tangential"}`,
+    reason: `${skillMatches} skill matches${isInternPosting ? " [intern posting +boost]" : ""}, title ${titleRelevant ? "relevant" : "tangential"}`,
     matchedKeywords: [...matchedKeywords, ...matchedSkills],
     missingKeywords,
   };

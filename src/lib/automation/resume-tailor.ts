@@ -8,6 +8,7 @@ import {
 import { getApplicationFolder, saveApplicationFiles } from "@/lib/storage/file-manager";
 import { Logger } from "@/lib/logging/logger";
 import { TailoredResumeResult, CoverLetterResult } from "@/types";
+import { compileLatexToPDF } from "./overleaf";
 
 const DEFAULT_LATEX_TEMPLATE = `\\documentclass[10pt,letterpaper]{article}
 \\usepackage[margin=0.5in]{geometry}
@@ -137,12 +138,27 @@ export async function tailorResumeForJob(
     },
   });
 
+  // Compile to PDF via Overleaf
+  await Logger.info("TAILOR", "Compiling tailored resume to PDF via Overleaf...");
+  let pdfPath: string | null = null;
+  try {
+    pdfPath = await compileLatexToPDF(tailored.latexContent, folderPath);
+    if (pdfPath) {
+      await Logger.success("TAILOR", `Resume PDF ready: ${pdfPath}`);
+    } else {
+      await Logger.warn("TAILOR", "Overleaf compilation returned null — .tex saved, PDF unavailable");
+    }
+  } catch (e) {
+    await Logger.warn("TAILOR", `PDF compilation error: ${e} — continuing without PDF`);
+  }
+
   const tailoredResume = await prisma.tailoredResume.create({
     data: {
       resumeId,
       jobId,
       latexContent: tailored.latexContent,
       texPath: paths.resumeTex || null,
+      pdfPath: pdfPath || null,
       atsScore: tailored.atsScore,
       keywordsAdded: tailored.keywordsAdded || [],
       sectionsModified: tailored.sectionsModified || [],

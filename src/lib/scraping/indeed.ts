@@ -1,4 +1,3 @@
-import type { ElementHandle } from "playwright";
 import { BaseScraper } from "./base-scraper";
 import { ScrapedJob } from "@/types";
 import { Logger } from "@/lib/logging/logger";
@@ -12,25 +11,19 @@ export class IndeedScraper extends BaseScraper {
   ): Promise<ScrapedJob[]> {
     const allJobs: ScrapedJob[] = [];
 
-    await Logger.info("INDEED", "Launching Edge with persistent profile...");
+    await Logger.info("INDEED", "Launching browser with persistent profile...");
     await this.init("indeed");
 
     try {
-      const kwList = keywords.slice(0, 3);
-      const locList = locations.slice(0, 2);
-
-      for (const keyword of kwList) {
-        for (const location of locList) {
-          await Logger.info("INDEED", `=== Search: "${keyword}" | "${location}" ===`);
+      for (const keyword of keywords.slice(0, 3)) {
+        for (const location of locations.slice(0, 2)) {
+          await Logger.info("INDEED", `=== Searching: "${keyword}" in "${location}" ===`);
           const jobs = await this.scrapeSearch(keyword, location);
           allJobs.push(...jobs);
-          if (kwList.indexOf(keyword) < kwList.length - 1 || locList.indexOf(location) < locList.length - 1) {
-            await this.delay(5000, 9000);
-          }
+          await this.delay(3000, 6000);
         }
       }
-
-      await Logger.success("INDEED", `Session complete — ${allJobs.length} new jobs collected`);
+      await Logger.success("INDEED", `Session done — ${allJobs.length} new jobs collected`);
     } finally {
       await this.cleanup();
     }
@@ -42,227 +35,225 @@ export class IndeedScraper extends BaseScraper {
     const jobs: ScrapedJob[] = [];
 
     await Logger.info("INDEED", "Opening indeed.com ...");
-    const ok = await this.safeNavigate("https://www.indeed.com", 30000);
-    if (!ok) {
-      await Logger.error("INDEED", "Failed to open Indeed homepage");
-      return jobs;
-    }
-    await this.delay(2000, 3500);
+    let onResultsPage = false;
 
-    // Detect bot wall / CAPTCHA
-    if (await this.detectBotWall()) {
-      const cleared = await this.waitForUserIntervention("INDEED");
-      if (!cleared) return jobs;
-    }
+    try {
+      await this.page!.goto("https://www.indeed.com", { waitUntil: "domcontentloaded", timeout: 20000 });
+      await this.delay(2000, 3000);
 
-    // Type keyword
-    await Logger.info("INDEED", `Typing keyword "${keyword}"...`);
-    const kwTyped = await this.typeHumanLike(
-      [
-        "#text-input-what",
-        'input[name="q"]',
-        'input[aria-label*="job title"]',
-        'input[placeholder*="Job title"]',
-      ],
-      keyword
-    );
-    if (!kwTyped) {
-      await Logger.error("INDEED", "Could not find keyword input on Indeed");
-      return jobs;
-    }
-    await this.delay(600, 1200);
-
-    // Type location
-    await Logger.info("INDEED", `Typing location "${location}"...`);
-    await this.typeHumanLike(
-      [
-        "#text-input-where",
-        'input[name="l"]',
-        'input[aria-label*="location"]',
-        'input[placeholder*="City, state"]',
-      ],
-      location
-    );
-    await this.delay(700, 1300);
-
-    // Search
-    await Logger.info("INDEED", "Pressing Enter to search...");
-    await this.page!.keyboard.press("Enter");
-    await this.page!.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-    await this.delay(3000, 5000);
-
-    // Re-check for bot wall after search
-    if (await this.detectBotWall()) {
-      const cleared = await this.waitForUserIntervention("INDEED");
-      if (!cleared) return jobs;
-    }
-
-    await Logger.info("INDEED", "Results loaded — scanning job cards...");
-    const found = await this.processJobCards();
-    jobs.push(...found);
-
-    return jobs;
-  }
-
-  private async processJobCards(): Promise<ScrapedJob[]> {
-    const jobs: ScrapedJob[] = [];
-
-    const cardSelectors = [
-      "div[data-jk]",
-      ".job_seen_beacon",
-      ".resultContent",
-    ];
-
-    let cards: ElementHandle<SVGElement | HTMLElement>[] = [];
-    let usedSelector = "";
-    for (const sel of cardSelectors) {
-      try {
-        await this.page!.waitForSelector(sel, { timeout: 8000 });
-        cards = await this.page!.$$(sel);
-        if (cards.length > 0) { usedSelector = sel; break; }
-      } catch { /* try next */ }
-    }
-
-    if (cards.length === 0) {
-      await Logger.warn("INDEED", "No job cards found — Indeed may have blocked the scraper");
-      return jobs;
-    }
-
-    await Logger.info("INDEED", `Found ${cards.length} job cards [${usedSelector}]`);
-    const resultsUrl = this.page!.url();
-
-    for (let i = 0; i < cards.length; i++) {
-      const card = cards[i];
-
-      const jobId: string | null = await card
-        .evaluate((el) => {
-          const id = el.getAttribute("data-jk");
-          if (id) return id;
-          const link = el.querySelector("a[data-jk]");
-          return link?.getAttribute("data-jk") ?? null;
-        })
-        .catch(() => null);
-
-      if (!jobId) {
-        await Logger.warn("INDEED", `Card ${i + 1}: no job ID — skipping`);
-        continue;
+      if (await this.detectBotWall()) {
+        const cleared = await this.waitForUserIntervention("INDEED");
+        if (!cleared) return jobs;
       }
 
-      // Deduplication check
+      // Type keyword in search bar
+      await Logger.info("INDEED", `Typing keyword "${keyword}"...`);
+      const kwTyped = await this.typeHumanLike(
+        ["#text-input-what", 'input[name="q"]', 'input[aria-label*="job title"]'],
+        keyword
+      );
+
+      if (kwTyped) {
+        await this.delay(500, 900);
+        await Logger.info("INDEED", `Typing location "${location}"...`);
+        await this.typeHumanLike(
+          ["#text-input-where", 'input[name="l"]', 'input[aria-label*="location"]'],
+          location
+        );
+        await this.delay(600, 1000);
+        await Logger.info("INDEED", "Pressing Enter to search...");
+        await this.page!.keyboard.press("Enter");
+        await this.page!.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
+        await this.delay(2500, 4000);
+        onResultsPage = true;
+      }
+    } catch (e) {
+      await Logger.warn("INDEED", `Homepage navigation issue: ${e} — using direct search URL`);
+    }
+
+    if (!onResultsPage) {
+      const searchUrl = `https://www.indeed.com/jobs?q=${encodeURIComponent(keyword)}&l=${encodeURIComponent(location)}&sort=date`;
+      await Logger.info("INDEED", `Navigating to search URL directly...`);
+      try {
+        await this.page!.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+        await this.delay(2500, 4000);
+      } catch {
+        await Logger.error("INDEED", "Cannot reach Indeed search — skipping");
+        return jobs;
+      }
+    }
+
+    if (await this.detectBotWall()) {
+      const cleared = await this.waitForUserIntervention("INDEED");
+      if (!cleared) return jobs;
+    }
+
+    // Collect job IDs from results page
+    await Logger.info("INDEED", "Collecting job cards...");
+    const jobCards = await this.collectJobCards();
+    if (jobCards.length === 0) {
+      await Logger.warn("INDEED", "No job cards found on results page");
+      return jobs;
+    }
+    await Logger.info("INDEED", `Found ${jobCards.length} job cards`);
+
+    for (let i = 0; i < jobCards.length; i++) {
+      const { jobId, titleHint, companyHint, locationHint } = jobCards[i];
+
+      // Deduplication
       const existing = await prisma.job.findFirst({
         where: { platform: "indeed", platformJobId: jobId },
         select: { jobTitle: true, companyName: true },
       });
       if (existing) {
-        await Logger.info("INDEED", `[${i + 1}/${cards.length}] Already scraped: "${existing.jobTitle}" @ ${existing.companyName} — skipping`);
+        await Logger.info("INDEED", `[${i + 1}/${jobCards.length}] Already in DB: "${existing.jobTitle}" @ ${existing.companyName} — skipping`);
         continue;
       }
 
-      // Click the card
-      await Logger.info("INDEED", `[${i + 1}/${cards.length}] Clicking card (ID: ${jobId})...`);
+      await Logger.info("INDEED", `[${i + 1}/${jobCards.length}] Opening job ${jobId} (${titleHint} @ ${companyHint})...`);
+
+      const jobUrl = `https://www.indeed.com/viewjob?jk=${jobId}`;
       try {
-        await card.scrollIntoViewIfNeeded();
-        await this.delay(400, 900);
-        const titleLink = await card.$("h2 a, a[data-jk]");
-        if (titleLink) {
-          await titleLink.click();
-        } else {
-          await card.click();
-        }
-        await this.delay(2000, 3500);
-      } catch (e) {
-        await Logger.warn("INDEED", `Click failed for card ${i + 1}: ${e}`);
+        await this.page!.goto(jobUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+        await this.delay(1500, 2500);
+      } catch {
+        await Logger.warn("INDEED", `Could not open ${jobUrl} — skipping`);
         continue;
       }
 
-      // Check if navigated to a new full page
-      const currentUrl = this.page!.url();
-      const openedNewPage = currentUrl !== resultsUrl && currentUrl.includes("indeed.com");
-
-      const job = await this.extractJobDetails(jobId);
+      const job = await this.extractJobDetails(jobId, titleHint, companyHint, locationHint);
       if (job) {
         await Logger.success("INDEED", `Scraped: "${job.jobTitle}" @ ${job.companyName} [${job.location}]`);
         jobs.push(job);
       }
 
-      // Go back to results if navigated away
-      if (openedNewPage && (currentUrl.includes("/viewjob") || currentUrl.includes("/pagead"))) {
-        await Logger.info("INDEED", "Navigating back to results...");
-        await this.page!.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
-        await this.delay(1500, 2500);
-        const refreshed = await this.page!.$$(usedSelector).catch(() => []);
-        if (refreshed.length > 0) cards = refreshed;
-      }
+      await this.page!.evaluate(() => window.scrollBy(0, Math.floor(Math.random() * 300 + 100)));
+      await this.delay(800, 2000);
 
-      if (i % 4 === 0) {
-        await this.page!.evaluate(() => window.scrollBy(0, Math.floor(Math.random() * 250 + 80)));
-        await this.delay(300, 800);
+      // Go back to results for next job
+      if (i < jobCards.length - 1) {
+        await this.page!.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+        await this.delay(1200, 2200);
       }
     }
 
     return jobs;
   }
 
-  private async extractJobDetails(jobId: string): Promise<ScrapedJob | null> {
+  private async collectJobCards(): Promise<Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }>> {
+    const results: Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }> = [];
+
+    const cardSelectors = [".job_seen_beacon", ".resultContent", ".tapItem"];
+    let cards: import("playwright").ElementHandle<SVGElement | HTMLElement>[] = [];
+    for (const sel of cardSelectors) {
+      try {
+        await this.page!.waitForSelector(sel, { timeout: 8000 });
+        cards = await this.page!.$$(sel);
+        if (cards.length > 0) {
+          await Logger.info("INDEED", `Using card selector: ${sel} (${cards.length} found)`);
+          break;
+        }
+      } catch { /* try next */ }
+    }
+
+    for (const card of cards) {
+      try {
+        const data = await card.evaluate((el) => {
+          // Job ID from the link's data-jk attribute
+          const link = el.querySelector("h2 a[data-jk], a[data-jk]") as HTMLAnchorElement | null;
+          const jobId = link?.getAttribute("data-jk") ?? null;
+          if (!jobId) return null;
+
+          const rawTitle =
+            el.querySelector("h2 a span[title]")?.getAttribute("title") ||
+            el.querySelector("h2 a span")?.textContent?.trim() ||
+            link?.getAttribute("aria-label") ||
+            el.querySelector("h2")?.textContent?.trim() ||
+            "";
+          // Strip "full details of " aria-label prefix
+          const title = rawTitle.replace(/^full details of\s+/i, "").trim();
+
+          const company =
+            el.querySelector('[data-testid="company-name"]')?.textContent?.trim() ||
+            el.querySelector(".companyName")?.textContent?.trim() ||
+            "";
+
+          const location =
+            el.querySelector('[data-testid="text-location"]')?.textContent?.trim() ||
+            el.querySelector(".companyLocation")?.textContent?.trim() ||
+            "";
+
+          return { jobId, titleHint: title, companyHint: company, locationHint: location };
+        });
+
+        if (data?.jobId) results.push(data);
+      } catch { /* skip bad card */ }
+    }
+
+    return results;
+  }
+
+  private async extractJobDetails(
+    jobId: string,
+    titleHint: string,
+    companyHint: string,
+    locationHint: string
+  ): Promise<ScrapedJob | null> {
     try {
-      await this.page!.waitForSelector(
-        "h1, #jobDescriptionText, .jobsearch-ViewJobLayout",
-        { timeout: 8000 }
-      );
+      await this.page!.waitForSelector("h1, #jobDescriptionText", { timeout: 8000 });
 
       const titleSelectors = [
-        "h1.jobsearch-JobInfoHeader-title",
         "h1[data-testid='jobsearch-JobInfoHeader-title']",
+        "h1.jobsearch-JobInfoHeader-title",
         ".jobsearch-JobInfoHeader-title",
-        ".jcs-JobTitle",
         "h1",
       ];
-      let title = "";
+      let title = titleHint;
       for (const sel of titleSelectors) {
-        title = await this.page!.$eval(sel, (el) => el.textContent?.trim() ?? "").catch(() => "");
-        if (title) break;
+        const t = await this.page!.$eval(sel, (e) => e.textContent?.trim() ?? "").catch(() => "");
+        if (t && t.length > 1) { title = t; break; }
       }
 
       const companySelectors = [
         "[data-testid='inlineHeader-companyName'] a",
         "[data-testid='inlineHeader-companyName']",
         "[data-company-name]",
-        ".jobsearch-InlineCompanyRating-companyName a",
+        ".jobsearch-InlineCompanyRating-companyName",
         ".icl-u-lg-mr--sm",
       ];
-      let company = "";
+      let company = companyHint;
       for (const sel of companySelectors) {
-        company = await this.page!.$eval(sel, (el) => el.textContent?.trim() ?? "").catch(() => "");
-        if (company) break;
+        const c = await this.page!.$eval(sel, (e) => e.textContent?.trim() ?? "").catch(() => "");
+        if (c && c.length > 1) { company = c; break; }
       }
 
       const locationSelectors = [
         "[data-testid='job-location']",
         "[data-testid='inlineHeader-companyLocation']",
         ".companyLocation",
+        ".icl-u-xs-mt--xs.icl-u-textColor--secondary",
       ];
-      let location = "";
+      let location = locationHint;
       for (const sel of locationSelectors) {
-        location = await this.page!.$eval(sel, (el) => el.textContent?.trim() ?? "").catch(() => "");
-        if (location) break;
+        const l = await this.page!.$eval(sel, (e) => e.textContent?.trim() ?? "").catch(() => "");
+        if (l && l.length > 1) { location = l; break; }
       }
 
       const description = await this.page!
-        .$eval("#jobDescriptionText, .jobsearch-jobDescriptionText", (el) => el.textContent?.trim() ?? "")
+        .$eval("#jobDescriptionText, .jobsearch-jobDescriptionText", (e) => e.textContent?.trim() ?? "")
         .catch(() => "");
 
       const salary = await this.page!
-        .$eval("[data-testid='attribute_snippet_testid'], .salary-snippet", (el) => el.textContent?.trim() ?? "")
+        .$eval("[data-testid='attribute_snippet_testid'], .salary-snippet, .jobMetaDataGroup span", (e) => e.textContent?.trim() ?? "")
         .catch(() => "");
 
-      const locLower = location.toLowerCase();
-      const descLower = description.toLowerCase();
-      const isRemote = locLower.includes("remote") || descLower.includes("fully remote");
+      const locLower = (location + description).toLowerCase();
+      const isRemote = locLower.includes("remote");
       const isHybrid = locLower.includes("hybrid");
       const salaryInfo = salary ? this.extractSalary(salary) : undefined;
 
-      if (!title || !company) {
-        await Logger.warn("INDEED", `Job ${jobId}: incomplete title/company — skipping`);
+      if (!title) {
+        await Logger.warn("INDEED", `Job ${jobId}: no title found — skipping`);
         return null;
       }
 
@@ -271,7 +262,7 @@ export class IndeedScraper extends BaseScraper {
         platformJobId: jobId,
         url: `https://www.indeed.com/viewjob?jk=${jobId}`,
         isEasyApply: false,
-        companyName: company,
+        companyName: company || "Unknown",
         jobTitle: title,
         location,
         salary: salaryInfo?.raw,

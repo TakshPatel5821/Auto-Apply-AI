@@ -1,4 +1,3 @@
-import type { ElementHandle } from "playwright";
 import { BaseScraper } from "./base-scraper";
 import { ScrapedJob } from "@/types";
 import { Logger } from "@/lib/logging/logger";
@@ -12,25 +11,19 @@ export class LinkedInScraper extends BaseScraper {
   ): Promise<ScrapedJob[]> {
     const allJobs: ScrapedJob[] = [];
 
-    await Logger.info("LINKEDIN", "Launching Edge with persistent profile (saves cookies between runs)...");
+    await Logger.info("LINKEDIN", "Launching browser with persistent profile...");
     await this.init("linkedin");
 
     try {
-      const kwList = keywords.slice(0, 3);
-      const locList = locations.slice(0, 2);
-
-      for (const keyword of kwList) {
-        for (const location of locList) {
-          await Logger.info("LINKEDIN", `=== Search: "${keyword}" | "${location}" ===`);
+      for (const keyword of keywords.slice(0, 3)) {
+        for (const location of locations.slice(0, 2)) {
+          await Logger.info("LINKEDIN", `=== Searching: "${keyword}" in "${location}" ===`);
           const jobs = await this.scrapeSearch(keyword, location);
           allJobs.push(...jobs);
-          if (allJobs.length > 0 || kwList.indexOf(keyword) < kwList.length - 1) {
-            await this.delay(4000, 7000);
-          }
+          await this.delay(3000, 6000);
         }
       }
-
-      await Logger.success("LINKEDIN", `Session complete — ${allJobs.length} new jobs collected`);
+      await Logger.success("LINKEDIN", `Session done — ${allJobs.length} new jobs collected`);
     } finally {
       await this.cleanup();
     }
@@ -41,148 +34,92 @@ export class LinkedInScraper extends BaseScraper {
   private async scrapeSearch(keyword: string, location: string): Promise<ScrapedJob[]> {
     const jobs: ScrapedJob[] = [];
 
-    // Step 1: Open LinkedIn Jobs (no cookie injection — let persistent profile handle auth)
-    await Logger.info("LINKEDIN", "Opening linkedin.com/jobs/ ...");
+    // Step 1: Open LinkedIn jobs homepage first (user sees the page)
+    await Logger.info("LINKEDIN", "Opening linkedin.com/jobs ...");
+    let onResultsPage = false;
 
-    let navOk = false;
     try {
       await this.page!.goto("https://www.linkedin.com/jobs/", {
         waitUntil: "domcontentloaded",
-        timeout: 25000,
+        timeout: 20000,
       });
-      navOk = true;
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("ERR_TOO_MANY_REDIRECTS")) {
-        await Logger.warn("LINKEDIN", "Redirect loop — clearing cookies and retrying as guest...");
-        try { await this.context!.clearCookies(); } catch { /* ignore */ }
-        // Short wait, then try public guest URL
-        await this.delay(1500, 2500);
-        try {
-          const guestUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keyword)}&location=${encodeURIComponent(location)}`;
-          await this.page!.goto(guestUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
-          navOk = true;
-          await Logger.info("LINKEDIN", "Loaded as guest — will proceed without login");
-        } catch {
-          navOk = false;
-        }
-      } else {
-        await Logger.warn("LINKEDIN", `Navigation error: ${msg}`);
-      }
-    }
+      await this.delay(2000, 3000);
 
-    if (!navOk) {
-      await Logger.error("LINKEDIN", "Cannot reach LinkedIn — check network connection");
-      return jobs;
-    }
+      // Dismiss sign-in modal if present
+      await this.dismissModal();
 
-    await this.delay(2000, 3500);
-
-    // Step 2: Detect bot/auth wall
-    const isBotWall = await this.detectBotWall();
-    if (isBotWall) {
-      const userCleared = await this.waitForUserIntervention("LINKEDIN");
-      if (!userCleared) return jobs;
-    }
-
-    // Step 3: Check if we're already on a results page (from guest URL fallback above)
-    const currentUrl = this.page!.url();
-    const alreadyOnResults = currentUrl.includes("/jobs/search/") && currentUrl.includes("keywords=");
-
-    if (!alreadyOnResults) {
-      // Step 3a: Type keyword in search bar (human-like)
-      await Logger.info("LINKEDIN", `Typing keyword "${keyword}" into search bar...`);
-      const kwTyped = await this.typeHumanLike(
-        [
-          'input[aria-label="Search by title, skill, or company"]',
-          'input[id*="jobs-search-box-keyword"]',
-          ".jobs-search-box__text-input",
-          'input[placeholder*="title, skill"]',
-        ],
-        keyword
-      );
-
-      if (!kwTyped) {
-        await Logger.error("LINKEDIN", "Could not find keyword input — LinkedIn layout may have changed");
-        return jobs;
-      }
-      await this.delay(600, 1200);
-
-      // Step 3b: Type location
-      await Logger.info("LINKEDIN", `Typing location "${location}"...`);
-      await this.typeHumanLike(
-        [
-          'input[aria-label="City, state, or zip code"]',
-          'input[id*="jobs-search-box-location"]',
-          'input[placeholder*="City, state"]',
-        ],
-        location
-      );
-      await this.delay(700, 1300);
-
-      // Step 3c: Hit Enter
-      await Logger.info("LINKEDIN", "Pressing Enter to search...");
-      await this.page!.keyboard.press("Enter");
-      await this.page!.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-      await this.delay(3000, 5000);
-
-      // Re-check for bot wall after search
+      // Check for bot wall
       if (await this.detectBotWall()) {
         const cleared = await this.waitForUserIntervention("LINKEDIN");
         if (!cleared) return jobs;
       }
+
+      // Try to type in the search bar (shows human-like behavior)
+      await Logger.info("LINKEDIN", `Typing keyword "${keyword}" in search bar...`);
+      const kwTyped = await this.typeHumanLike(
+        [
+          'input[id="job-search-bar-keywords"]',
+          'input[placeholder*="Search jobs"]',
+          'input[aria-label*="Search by title"]',
+          'input[class*="keywords"]',
+          ".jobs-search-box__text-input",
+        ],
+        keyword
+      );
+
+      if (kwTyped) {
+        await this.delay(500, 900);
+        await Logger.info("LINKEDIN", `Typing location "${location}"...`);
+        await this.typeHumanLike(
+          [
+            'input[id="job-search-bar-location"]',
+            'input[placeholder*="City, state"]',
+            'input[aria-label*="City"]',
+            'input[class*="location"]',
+          ],
+          location
+        );
+        await this.delay(600, 1000);
+        await Logger.info("LINKEDIN", "Pressing Enter to search...");
+        await this.page!.keyboard.press("Enter");
+        await this.page!.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
+        await this.delay(2500, 4000);
+        onResultsPage = true;
+      }
+    } catch (e) {
+      await Logger.warn("LINKEDIN", `Homepage navigation issue: ${e} — using direct search URL`);
     }
 
-    await Logger.info("LINKEDIN", "Results page ready — scanning job cards...");
-    const found = await this.processJobCards();
-    jobs.push(...found);
-
-    return jobs;
-  }
-
-  private async processJobCards(): Promise<ScrapedJob[]> {
-    const jobs: ScrapedJob[] = [];
-
-    const cardSelectors = [
-      "li[data-occludable-job-id]",
-      ".jobs-search-results__list-item",
-      ".scaffold-layout__list-item",
-    ];
-
-    let cards: ElementHandle<SVGElement | HTMLElement>[] = [];
-    let usedSelector = "";
-    for (const sel of cardSelectors) {
+    // Fallback: navigate directly to search URL (works without login)
+    if (!onResultsPage) {
+      const searchUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keyword)}&location=${encodeURIComponent(location)}&sortBy=DD&f_TPR=r604800`;
+      await Logger.info("LINKEDIN", `Navigating to search URL directly: ${searchUrl}`);
       try {
-        await this.page!.waitForSelector(sel, { timeout: 8000 });
-        cards = await this.page!.$$(sel);
-        if (cards.length > 0) { usedSelector = sel; break; }
-      } catch { /* try next */ }
+        await this.page!.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+        await this.delay(2500, 4000);
+      } catch {
+        await Logger.error("LINKEDIN", "Cannot reach LinkedIn search — skipping");
+        return jobs;
+      }
     }
 
-    if (cards.length === 0) {
+    // Check bot wall after landing on results
+    if (await this.detectBotWall()) {
+      const cleared = await this.waitForUserIntervention("LINKEDIN");
+      if (!cleared) return jobs;
+    }
+
+    await Logger.info("LINKEDIN", "Results page loaded — collecting job cards...");
+    const jobIds = await this.collectJobIds();
+    if (jobIds.length === 0) {
       await Logger.warn("LINKEDIN", "No job cards found on results page");
       return jobs;
     }
+    await Logger.info("LINKEDIN", `Found ${jobIds.length} job cards`);
 
-    await Logger.info("LINKEDIN", `Found ${cards.length} job cards [${usedSelector}]`);
-
-    for (let i = 0; i < cards.length; i++) {
-      const card = cards[i];
-
-      const jobId: string | null = await card
-        .evaluate((el) => {
-          const direct = el.getAttribute("data-job-id") || el.getAttribute("data-occludable-job-id");
-          if (direct) return direct;
-          const link = el.querySelector('a[href*="/jobs/view/"]');
-          const m = link?.getAttribute("href")?.match(/\/jobs\/view\/(\d+)/);
-          return m?.[1] ?? null;
-        })
-        .catch(() => null);
-
-      if (!jobId) {
-        await Logger.warn("LINKEDIN", `Card ${i + 1}: no job ID — skipping`);
-        continue;
-      }
+    // Process each job
+    for (let i = 0; i < jobIds.length; i++) {
+      const { jobId, titleHint, companyHint, locationHint } = jobIds[i];
 
       // Deduplication check
       const existing = await prisma.job.findFirst({
@@ -190,100 +127,173 @@ export class LinkedInScraper extends BaseScraper {
         select: { jobTitle: true, companyName: true },
       });
       if (existing) {
-        await Logger.info("LINKEDIN", `[${i + 1}/${cards.length}] Already scraped: "${existing.jobTitle}" @ ${existing.companyName} — skipping`);
+        await Logger.info("LINKEDIN", `[${i + 1}/${jobIds.length}] Already in DB: "${existing.jobTitle}" @ ${existing.companyName} — skipping`);
         continue;
       }
 
-      // Click card
-      await Logger.info("LINKEDIN", `[${i + 1}/${cards.length}] Clicking job card (ID: ${jobId})...`);
+      await Logger.info("LINKEDIN", `[${i + 1}/${jobIds.length}] Opening job ${jobId} (${titleHint} @ ${companyHint})...`);
+
+      // Navigate directly to the job's detail page (avoids sign-in modal on click)
+      const jobUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
       try {
-        await card.scrollIntoViewIfNeeded();
-        await this.delay(400, 900);
-        await card.click();
-        await this.delay(2000, 3500);
-      } catch (e) {
-        await Logger.warn("LINKEDIN", `Click failed for card ${i + 1}: ${e}`);
+        await this.page!.goto(jobUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+        await this.delay(1500, 2500);
+      } catch {
+        await Logger.warn("LINKEDIN", `Could not open ${jobUrl} — skipping`);
         continue;
       }
 
-      // Extract details
-      const job = await this.extractJobDetails(jobId);
+      const job = await this.extractJobDetails(jobId, titleHint, companyHint, locationHint);
       if (job) {
         await Logger.success("LINKEDIN", `Scraped: "${job.jobTitle}" @ ${job.companyName} [${job.location}]`);
         jobs.push(job);
       }
 
-      // Random scroll every few cards (looks human)
-      if (i % 4 === 0) {
-        await this.page!.evaluate(() => window.scrollBy(0, Math.floor(Math.random() * 250 + 80)));
-        await this.delay(300, 800);
+      // Random scroll to look human
+      await this.page!.evaluate(() => window.scrollBy(0, Math.floor(Math.random() * 300 + 100)));
+      await this.delay(800, 2000);
+
+      // Go back to results for next job
+      if (i < jobIds.length - 1) {
+        await this.page!.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
+        await this.delay(1200, 2200);
       }
     }
 
     return jobs;
   }
 
-  private async extractJobDetails(jobId: string): Promise<ScrapedJob | null> {
+  private async collectJobIds(): Promise<Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }>> {
+    const results: Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }> = [];
+
+    // Wait for cards to load — try both public and authenticated selectors
+    const cardSelectors = [
+      ".base-card[data-entity-urn]",
+      ".base-card",
+      "[data-entity-urn*='jobPosting']",
+      "li[data-occludable-job-id]",
+      ".jobs-search-results__list-item",
+    ];
+
+    let cards: import("playwright").ElementHandle<SVGElement | HTMLElement>[] = [];
+    for (const sel of cardSelectors) {
+      try {
+        await this.page!.waitForSelector(sel, { timeout: 6000 });
+        cards = await this.page!.$$(sel);
+        if (cards.length > 0) {
+          await Logger.info("LINKEDIN", `Using card selector: ${sel} (${cards.length} found)`);
+          break;
+        }
+      } catch { /* try next */ }
+    }
+
+    for (const card of cards) {
+      try {
+        const data = await card.evaluate((el) => {
+          // Public page: job ID from data-entity-urn="urn:li:jobPosting:1234567"
+          const urn = el.getAttribute("data-entity-urn") || "";
+          const urnId = urn.match(/(\d+)$/)?.[1] ?? null;
+
+          // Authenticated page: job ID from data-occludable-job-id
+          const authId = el.getAttribute("data-occludable-job-id") ?? null;
+
+          // Also try link href
+          const link = el.querySelector('a[href*="/jobs/view/"]');
+          const linkId = link?.getAttribute("href")?.match(/\/jobs\/view\/(\d+)/)?.[1] ?? null;
+
+          const jobId = urnId || authId || linkId;
+          if (!jobId) return null;
+
+          const title =
+            el.querySelector(".base-search-card__title")?.textContent?.trim() ||
+            el.querySelector(".job-search-card__title")?.textContent?.trim() ||
+            el.querySelector("h3")?.textContent?.trim() ||
+            "";
+
+          const company =
+            el.querySelector(".base-search-card__subtitle a")?.textContent?.trim() ||
+            el.querySelector(".base-search-card__subtitle")?.textContent?.trim() ||
+            el.querySelector("h4")?.textContent?.trim() ||
+            "";
+
+          const location =
+            el.querySelector(".job-search-card__location")?.textContent?.trim() ||
+            el.querySelector(".base-search-card__metadata")?.textContent?.trim() ||
+            "";
+
+          return { jobId, titleHint: title, companyHint: company, locationHint: location };
+        });
+
+        if (data?.jobId) results.push(data);
+      } catch { /* skip bad cards */ }
+    }
+
+    return results;
+  }
+
+  private async extractJobDetails(
+    jobId: string,
+    titleHint: string,
+    companyHint: string,
+    locationHint: string
+  ): Promise<ScrapedJob | null> {
     try {
-      await this.page!.waitForSelector(
-        ".jobs-search__job-details, .jobs-details, .job-view-layout, .jobs-details__main-content",
-        { timeout: 8000 }
-      );
+      // Wait for title to appear
+      await this.page!.waitForSelector("h1, .top-card-layout__title, .topcard__title", { timeout: 8000 });
 
       const titleSelectors = [
-        ".job-details-jobs-unified-top-card__job-title h1",
-        ".jobs-unified-top-card__job-title h1",
+        ".top-card-layout__title",
+        ".topcard__title",
         "h1.t-24",
-        "h1.topcard__title",
+        "h1",
       ];
-      let title = "";
+      let title = titleHint;
       for (const sel of titleSelectors) {
-        title = await this.page!.$eval(sel, (el) => el.textContent?.trim() ?? "").catch(() => "");
-        if (title) break;
+        const t = await this.page!.$eval(sel, (e) => e.textContent?.trim() ?? "").catch(() => "");
+        if (t && t.length > 1) { title = t; break; }
       }
 
       const companySelectors = [
-        ".job-details-jobs-unified-top-card__company-name a",
-        ".jobs-unified-top-card__company-name a",
         ".topcard__org-name-link",
-        ".job-details-jobs-unified-top-card__company-name",
+        ".top-card-layout__card .topcard__flavor--black-link",
+        '[data-tracking-control-name="public_jobs_topcard-org-name"]',
+        ".top-card-layout__second-subline a",
       ];
-      let company = "";
+      let company = companyHint;
       for (const sel of companySelectors) {
-        company = await this.page!.$eval(sel, (el) => el.textContent?.trim() ?? "").catch(() => "");
-        if (company) break;
+        const c = await this.page!.$eval(sel, (e) => e.textContent?.trim() ?? "").catch(() => "");
+        if (c && c.length > 1) { company = c; break; }
       }
 
       const locationSelectors = [
-        ".job-details-jobs-unified-top-card__bullet",
-        ".jobs-unified-top-card__workplace-type",
+        ".top-card-layout__bullet",
         ".topcard__flavor--bullet",
+        ".job-details-jobs-unified-top-card__bullet",
       ];
-      let location = "";
+      let location = locationHint;
       for (const sel of locationSelectors) {
-        location = await this.page!.$eval(sel, (el) => el.textContent?.trim() ?? "").catch(() => "");
-        if (location) break;
+        const l = await this.page!.$eval(sel, (e) => e.textContent?.trim() ?? "").catch(() => "");
+        if (l && l.length > 1) { location = l; break; }
       }
 
       const description = await this.page!
         .$eval(
-          ".jobs-description__content, .jobs-description-content__text, #job-details, .jobs-box__html-content",
-          (el) => el.textContent?.trim() ?? ""
+          ".description__text, .show-more-less-html__markup, .decorated-job-posting__details",
+          (e) => e.textContent?.trim() ?? ""
         )
         .catch(() => "");
 
-      const easyApplyText = await this.page!
-        .$eval(".jobs-apply-button--top-card .artdeco-button__text", (el) => el.textContent ?? "")
+      const salary = await this.page!
+        .$eval(".salary.compensation__salary, .salary-main-rail__compensation", (e) => e.textContent?.trim() ?? "")
         .catch(() => "");
-      const isEasyApply = easyApplyText.toLowerCase().includes("easy apply");
 
-      const locLower = location.toLowerCase();
-      const descLower = description.toLowerCase();
-      const isRemote = locLower.includes("remote") || descLower.includes("fully remote");
+      const locLower = (location + description).toLowerCase();
+      const isRemote = locLower.includes("remote");
       const isHybrid = locLower.includes("hybrid");
+      const salaryInfo = salary ? this.extractSalary(salary) : undefined;
 
-      if (!title || !company) {
-        await Logger.warn("LINKEDIN", `Job ${jobId}: title="${title}" company="${company}" — skipping incomplete`);
+      if (!title) {
+        await Logger.warn("LINKEDIN", `Job ${jobId}: no title found — skipping`);
         return null;
       }
 
@@ -291,11 +301,13 @@ export class LinkedInScraper extends BaseScraper {
         platform: "linkedin",
         platformJobId: jobId,
         url: `https://www.linkedin.com/jobs/view/${jobId}/`,
-        easyApplyUrl: isEasyApply ? `https://www.linkedin.com/jobs/view/${jobId}/` : undefined,
-        isEasyApply,
-        companyName: company,
+        isEasyApply: false,
+        companyName: company || "Unknown",
         jobTitle: title,
         location,
+        salary: salaryInfo?.raw,
+        salaryMin: salaryInfo?.min,
+        salaryMax: salaryInfo?.max,
         isRemote,
         isHybrid,
         requiresSponsorship: false,
@@ -310,6 +322,27 @@ export class LinkedInScraper extends BaseScraper {
       await Logger.warn("LINKEDIN", `extractJobDetails(${jobId}) failed: ${e}`);
       return null;
     }
+  }
+
+  private async dismissModal(): Promise<void> {
+    const dismissSelectors = [
+      'button[aria-label="Dismiss"]',
+      'button[data-tracking-control-name="public_jobs_contextual-sign-in-modal_modal_dismiss"]',
+      ".modal__dismiss",
+      'button.contextual-sign-in-modal__modal-dismiss-icon',
+    ];
+    for (const sel of dismissSelectors) {
+      try {
+        const btn = await this.page!.$(sel);
+        if (btn) {
+          await btn.click();
+          await this.delay(500, 800);
+          break;
+        }
+      } catch { /* ignore */ }
+    }
+    // Also try pressing Escape
+    await this.page!.keyboard.press("Escape").catch(() => {});
   }
 
   private async typeHumanLike(selectors: string[], text: string): Promise<boolean> {
