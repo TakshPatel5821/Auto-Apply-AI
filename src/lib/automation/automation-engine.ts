@@ -5,6 +5,7 @@ import { ApplyEngine } from "./apply-engine";
 import { Logger } from "@/lib/logging/logger";
 import { AutomationState, SearchConfig } from "@/types";
 import { getApplicationFolder } from "@/lib/storage/file-manager";
+import { scraperStatus } from "./scraper-status";
 
 class AutomationEngine {
   private state: AutomationState = {
@@ -165,6 +166,7 @@ class AutomationEngine {
 
   async resume(): Promise<void> {
     this.state.isPaused = false;
+    scraperStatus.waitingForUser = false; // unblocks any scraper waiting for human intervention
     await Logger.info("ENGINE", "Automation resumed");
   }
 
