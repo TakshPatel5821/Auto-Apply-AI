@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: job_agent_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: job_agent
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: job_agent_app
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/job_agent
+      - AUTH_PASSWORD=${AUTH_PASSWORD}
+      - AUTH_SECRET=${AUTH_SECRET}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - STORAGE_PATH=/app/applications
+      - LOGS_PATH=/app/logs
+      - OVERLEAF_EMAIL=${OVERLEAF_EMAIL}
+      - OVERLEAF_PASSWORD=${OVERLEAF_PASSWORD}
+      - LINKEDIN_COOKIE=${LINKEDIN_COOKIE}
+      - JOB_SEARCH_KEYWORDS=${JOB_SEARCH_KEYWORDS}
+      - JOB_SEARCH_LOCATIONS=${JOB_SEARCH_LOCATIONS}
+    volumes:
+      - ./applications:/app/applications
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

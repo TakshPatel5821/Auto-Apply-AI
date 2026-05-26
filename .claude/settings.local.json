@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(npx next *)",
+      "Bash(ls -la .env)",
+      "Bash(ls -la .env.local)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\taksh\\.claude\\projects\\c--Users-taksh-OneDrive-Documents-GitHub-Application-automation-tool\\memory"
+    ]
+  }
+}

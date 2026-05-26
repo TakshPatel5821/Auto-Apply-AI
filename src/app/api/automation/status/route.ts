@@ -1,0 +1,63 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth/session";
+import { automationEngine } from "@/lib/automation/automation-engine";
+import { prisma } from "@/lib/db/prisma";
+
+export async function GET(req: NextRequest) {
+  if (!(await getSession())) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const state = automationEngine.getState();
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const [totalJobs, analyzedJobs, appliedToday, totalApplications, recentLogs] =
+    await Promise.all([
+      prisma.job.count({ where: { isSpam: false, isBlacklisted: false } }),
+      prisma.job.count({ where: { status: { in: ["ANALYZED", "TAILORED", "APPLIED"] } } }),
+      prisma.application.count({
+        where: { userId: "local", appliedAt: { gte: today } },
+      }),
+      prisma.application.count({ where: { userId: "local" } }),
+      prisma.automationLog.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        select: {
+          id: true,
+          level: true,
+          category: true,
+          message: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+  return NextResponse.json({
+    state,
+    stats: {
+      totalJobs,
+      analyzedJobs,
+      appliedToday,
+      totalApplications,
+    },
+    recentLogs,
+  });
+}
+
+export async function PUT(req: NextRequest) {
+  if (!(await getSession())) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { action } = await req.json();
+
+  if (action === "pause") {
+    await automationEngine.pause();
+  } else if (action === "resume") {
+    await automationEngine.resume();
+  }
+
+  return NextResponse.json({ success: true, state: automationEngine.getState() });
+}
