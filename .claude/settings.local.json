@@ -5,7 +5,19 @@
       "Bash(npx tsc *)",
       "Bash(npx next *)",
       "Bash(ls -la .env)",
-      "Bash(ls -la .env.local)"
+      "Bash(ls -la .env.local)",
+      "Bash(ollama list *)",
+      "Bash(pg_isready)",
+      "Bash(psql --version)",
+      "Bash(where psql *)",
+      "Bash(where pg_ctl)",
+      "Read(//c/Program Files/PostgreSQL/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Bash(curl -s http://localhost:11434/v1/models)",
+      "Bash(\"C:/Program Files/PostgreSQL/18/bin/pg_isready.exe\" -h localhost -p 5432)",
+      "Bash(\"C:/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -c \"CREATE DATABASE job_agent;\")",
+      "Bash(\"C:/Program Files/PostgreSQL/18/bin/psql.exe\" -U postgres -c \"SELECT version\\(\\);\")",
+      "Bash(Read \"C:\\\\Users\\\\taksh\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-taksh-OneDrive-Documents-GitHub-Application-automation-tool\\\\0534f7ba-fc27-471b-9593-b042aae460d8\\\\tasks\\\\bpzz01mel.output\")"
     ],
     "additionalDirectories": [
       "c:\\Users\\taksh\\.claude\\projects\\c--Users-taksh-OneDrive-Documents-GitHub-Application-automation-tool\\memory"

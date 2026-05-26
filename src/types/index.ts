@@ -222,6 +222,16 @@ export interface SearchConfig {
   platforms: string[];
 }
 
+export interface CustomSite {
+  id: string;
+  name: string;
+  url: string;
+  email: string;
+  password: string;
+  jobsUrl?: string;
+  enabled: boolean;
+}
+
 export interface ScraperConfig {
   delayMin: number;
   delayMax: number;

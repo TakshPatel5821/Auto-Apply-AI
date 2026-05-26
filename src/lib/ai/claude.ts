@@ -1,301 +1,209 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { ollamaCompleteJSON, ollamaComplete } from "./ollama";
 
-const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const USE_OLLAMA =
+  !process.env.ANTHROPIC_API_KEY ||
+  process.env.ANTHROPIC_API_KEY === "not-needed" ||
+  process.env.AI_PROVIDER === "ollama";
 
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+async function ai<T>(prompt: string, system: string, tokens = 1024): Promise<T> {
+  if (USE_OLLAMA) return ollamaCompleteJSON<T>(prompt, system, tokens);
 
-export async function claudeComplete(
-  prompt: string,
-  systemPrompt?: string,
-  maxTokens: number = 4096
-): Promise<string> {
-  const messages: Anthropic.MessageParam[] = [
-    { role: "user", content: prompt },
-  ];
-
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: maxTokens,
-    system: systemPrompt,
-    messages,
+  const Anthropic = (await import("@anthropic-ai/sdk")).default;
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const res = await client.messages.create({
+    model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
+    max_tokens: tokens,
+    system: system + "\n\nRespond with ONLY valid JSON.",
+    messages: [{ role: "user", content: prompt }],
   });
+  const block = res.content[0];
+  if (block.type !== "text") throw new Error("Bad response type");
+  return JSON.parse(block.text.replace(/^```json\n?/, "").replace(/\n?```$/, "")) as T;
+}
 
-  const block = response.content[0];
-  if (block.type !== "text") throw new Error("Unexpected response type");
+export async function claudeComplete(prompt: string, system?: string, tokens?: number) {
+  if (USE_OLLAMA) return ollamaComplete(prompt, system, tokens);
+  const Anthropic = (await import("@anthropic-ai/sdk")).default;
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const res = await client.messages.create({
+    model: process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6",
+    max_tokens: tokens || 1024,
+    system,
+    messages: [{ role: "user", content: prompt }],
+  });
+  const block = res.content[0];
+  if (block.type !== "text") throw new Error("Bad response type");
   return block.text;
 }
 
-export async function claudeCompleteJSON<T>(
-  prompt: string,
-  systemPrompt?: string,
-  maxTokens: number = 4096
-): Promise<T> {
-  const jsonSystemPrompt = `${systemPrompt || ""}
-
-IMPORTANT: You must respond with ONLY valid JSON. No markdown, no explanation, no code blocks. Just raw JSON.`;
-
-  const text = await claudeComplete(prompt, jsonSystemPrompt, maxTokens);
-
-  const cleaned = text
-    .replace(/^```json\n?/, "")
-    .replace(/\n?```$/, "")
-    .trim();
-
-  return JSON.parse(cleaned) as T;
+export async function claudeCompleteJSON<T>(prompt: string, system?: string, tokens?: number) {
+  return ai<T>(prompt, system || "", tokens);
 }
 
-export async function claudeParseResume(resumeText: string) {
-  const systemPrompt = `You are an expert resume parser. Extract all information from the resume and return structured JSON. Be thorough and accurate.`;
+// ─── Resume Parse (sent in background, ~4000 chars max) ──────────────────────
+export async function claudeParseResume(text: string) {
+  return ai(
+    `Extract resume data from this text. Return JSON:
+{"name":"","email":"","phone":"","linkedin":"","github":"","summary":"2 sentences","skills":["skill"],"technologies":["tech"],"experience":[{"company":"","title":"","startDate":"","endDate":"","bullets":["achievement"]}],"education":[{"institution":"","degree":"","field":"","endDate":""}],"projects":[{"name":"","description":"","technologies":["tech"]}],"yearsOfExperience":0,"domains":["domain"],"atsKeywords":["kw"]}
 
-  const prompt = `Parse this resume and extract ALL information into the following JSON structure:
-
-{
-  "rawText": "full resume text",
-  "skills": ["skill1", "skill2"],
-  "experience": [
-    {
-      "company": "Company Name",
-      "title": "Job Title",
-      "location": "City, State",
-      "startDate": "Month Year",
-      "endDate": "Month Year or null",
-      "current": false,
-      "description": "role description",
-      "bullets": ["bullet point 1", "bullet point 2"],
-      "technologies": ["tech1", "tech2"]
-    }
-  ],
-  "education": [
-    {
-      "institution": "University Name",
-      "degree": "Bachelor of Science",
-      "field": "Computer Science",
-      "startDate": "Year",
-      "endDate": "Year",
-      "gpa": "3.8",
-      "honors": ["honor1"],
-      "courses": ["course1"]
-    }
-  ],
-  "projects": [
-    {
-      "name": "Project Name",
-      "description": "project description",
-      "technologies": ["tech1", "tech2"],
-      "url": "https://...",
-      "github": "https://github.com/...",
-      "bullets": ["achievement1"]
-    }
-  ],
-  "achievements": ["achievement1", "achievement2"],
-  "technologies": ["all unique technologies found"],
-  "domains": ["web development", "machine learning", etc],
-  "atsKeywords": ["keyword1", "keyword2"],
-  "yearsOfExperience": 3.5,
-  "summary": "professional summary",
-  "contactInfo": {
-    "name": "Full Name",
-    "email": "email@example.com",
-    "phone": "phone number",
-    "linkedin": "linkedin url",
-    "github": "github url",
-    "portfolio": "portfolio url",
-    "location": "City, State"
-  }
+RESUME (${text.length} chars):
+${text.slice(0, 3500)}`,
+    "You are a resume parser. Return valid JSON only.",
+    2048
+  );
 }
 
-RESUME TEXT:
-${resumeText}`;
+// ─── Job Analysis ─────────────────────────────────────────────────────────────
+export async function claudeAnalyzeJob(description: string) {
+  return ai(
+    `Extract from this job description. Return JSON:
+{"requiredSkills":["skill"],"niceToHaveSkills":["skill"],"technologies":["tech"],"experienceLevel":"entry|mid|senior","yearsRequired":0,"isRemote":false,"atsKeywords":["kw"]}
 
-  return claudeCompleteJSON(prompt, systemPrompt, 8192);
+JOB (first 1500 chars):
+${description.slice(0, 1500)}`,
+    "Job analyst. Return JSON only.",
+    512
+  );
 }
 
-export async function claudeAnalyzeJob(jobDescription: string) {
-  const systemPrompt = `You are an expert job analyst. Extract all structured information from job descriptions.`;
-
-  const prompt = `Analyze this job description and extract structured information:
-
-{
-  "requirements": ["requirement1", "requirement2"],
-  "responsibilities": ["responsibility1"],
-  "requiredSkills": ["skill1", "skill2"],
-  "niceToHaveSkills": ["skill1"],
-  "technologies": ["tech1", "tech2"],
-  "experienceLevel": "entry|mid|senior|lead",
-  "yearsRequired": 2,
-  "isRemote": true,
-  "requiresSponsorship": false,
-  "benefits": ["benefit1"],
-  "companySize": "startup|small|medium|large|enterprise",
-  "domain": "fintech|healthtech|saas|etc",
-  "atsKeywords": ["keyword1", "keyword2"],
-  "salaryMin": 80000,
-  "salaryMax": 120000
-}
-
-JOB DESCRIPTION:
-${jobDescription}`;
-
-  return claudeCompleteJSON(prompt, systemPrompt, 4096);
-}
-
+// ─── Match Score (single job) ─────────────────────────────────────────────────
 export async function claudeMatchJobToResume(
-  jobDescription: string,
+  description: string,
   resumeData: Record<string, unknown>
 ) {
-  const systemPrompt = `You are an expert ATS and job matching specialist. Analyze how well a resume matches a job description.`;
+  const skills = (resumeData.skills as string[] || []).slice(0, 15).join(", ");
+  const tech = (resumeData.technologies as string[] || []).slice(0, 15).join(", ");
 
-  const prompt = `Score how well this resume matches the job description.
+  return ai(
+    `Score resume-job fit (1=perfect, 10=poor). Return JSON:
+{"matchScore":5,"atsScore":5,"confidenceLevel":0.8,"requiredSkills":["skill"],"missingSkills":["skill"],"matchingSkills":["skill"],"matchReason":"brief"}
 
-Return JSON:
-{
-  "matchScore": 7.5,
-  "atsScore": 8.2,
-  "confidenceLevel": 0.85,
-  "requiredSkills": ["skill1"],
-  "missingSkills": ["skill2"],
-  "matchingSkills": ["skill3"],
-  "matchReason": "Brief explanation of match quality",
-  "recommendation": "apply|skip|strong_apply",
-  "improvements": ["improvement suggestion 1"]
+CANDIDATE SKILLS: ${skills}
+CANDIDATE TECH: ${tech}
+YRS EXP: ${resumeData.yearsOfExperience || 0}
+
+JOB (first 800 chars):
+${description.slice(0, 800)}`,
+    "ATS scorer. Return JSON only.",
+    256
+  );
 }
 
-Scale: 1 (perfect match) to 10 (very poor match)
+// ─── Batch Match (score 5 jobs in one call) ───────────────────────────────────
+export async function claudeBatchMatchJobs(
+  jobs: { id: string; title: string; company: string; description: string }[],
+  resumeData: Record<string, unknown>
+) {
+  const skills = (resumeData.skills as string[] || []).slice(0, 12).join(", ");
+  const tech = (resumeData.technologies as string[] || []).slice(0, 12).join(", ");
 
-RESUME DATA:
-${JSON.stringify(resumeData, null, 2)}
+  const jobList = jobs
+    .map((j, i) => `JOB ${i + 1} [${j.id}] ${j.title} @ ${j.company}:\n${j.description.slice(0, 400)}`)
+    .join("\n\n");
 
-JOB DESCRIPTION:
-${jobDescription}`;
+  return ai<{ results: { id: string; matchScore: number; atsScore: number; matchingSkills: string[]; missingSkills: string[]; matchReason: string }[] }>(
+    `Score each job against this candidate. Return JSON:
+{"results":[{"id":"job_id","matchScore":5,"atsScore":5,"matchingSkills":["skill"],"missingSkills":["skill"],"matchReason":"brief"}]}
 
-  return claudeCompleteJSON(prompt, systemPrompt, 2048);
+CANDIDATE: skills=${skills} | tech=${tech} | yrs=${resumeData.yearsOfExperience || 0}
+
+${jobList}`,
+    "ATS scorer. Score ALL jobs listed. Return JSON only with results array.",
+    512
+  );
 }
 
+// ─── Resume Tailoring ─────────────────────────────────────────────────────────
 export async function claudeTailorResume(
-  originalLatex: string,
-  jobDescription: string,
+  latex: string,
+  description: string,
   resumeData: Record<string, unknown>,
   jobAnalysis: Record<string, unknown>
 ) {
-  const systemPrompt = `You are an expert resume writer and ATS optimization specialist. You tailor resumes to specific job descriptions while maintaining complete truthfulness. Never fabricate experience, skills, or achievements.`;
+  const keywords = (jobAnalysis.atsKeywords as string[] || []).slice(0, 8).join(", ");
+  const required = (jobAnalysis.requiredSkills as string[] || []).slice(0, 8).join(", ");
 
-  const prompt = `Tailor this LaTeX resume for the specific job description.
+  return ai(
+    `Tailor this LaTeX resume for the job. Rules: NEVER invent experience. Only rewrite existing content. Add keywords naturally. Keep 1 page.
 
-RULES:
-- NEVER fabricate or invent any experience, skills, companies, or achievements
-- ONLY optimize existing truthful content
-- Rewrite bullet points to better highlight relevant skills
-- Optimize ATS keywords naturally
-- Keep resume EXACTLY one page
-- Maximize use of space with no visible empty areas
-- Maintain professional LaTeX formatting
+TARGET KEYWORDS: ${keywords}
+REQUIRED SKILLS: ${required}
+
+LATEX (first 2500 chars):
+${latex.slice(0, 2500)}
+
+JOB (first 600 chars):
+${description.slice(0, 600)}
 
 Return JSON:
-{
-  "latexContent": "complete tailored LaTeX code",
-  "atsScore": 8.5,
-  "keywordsAdded": ["keyword1", "keyword2"],
-  "sectionsModified": ["experience", "skills"],
-  "tailoringNotes": "What was changed and why"
+{"latexContent":"FULL LATEX CODE","atsScore":7,"keywordsAdded":["kw"],"sectionsModified":["experience"],"tailoringNotes":"what changed"}`,
+    "LaTeX resume tailor. Never fabricate. Return JSON only.",
+    4096
+  );
 }
 
-ORIGINAL LATEX:
-${originalLatex}
-
-JOB DESCRIPTION:
-${jobDescription}
-
-JOB ANALYSIS:
-${JSON.stringify(jobAnalysis, null, 2)}
-
-RESUME DATA:
-${JSON.stringify(resumeData, null, 2)}`;
-
-  return claudeCompleteJSON(prompt, systemPrompt, 8192);
-}
-
+// ─── Cover Letter ─────────────────────────────────────────────────────────────
 export async function claudeGenerateCoverLetter(
-  jobDescription: string,
-  companyName: string,
-  jobTitle: string,
+  description: string,
+  company: string,
+  title: string,
   resumeData: Record<string, unknown>
 ) {
-  const systemPrompt = `You are an expert cover letter writer. Write compelling, personalized cover letters that highlight relevant experience truthfully.`;
+  const info = (resumeData as { contactInfo?: Record<string, string> })?.contactInfo || {};
+  const skills = (resumeData.skills as string[] || []).slice(0, 6).join(", ");
 
-  const prompt = `Write a professional cover letter for this job application.
+  return ai(
+    `Write a short 3-paragraph cover letter.
+
+CANDIDATE: ${info.name || "Applicant"} | skills: ${skills}
+ROLE: ${title} at ${company}
+JOB (first 500 chars): ${description.slice(0, 500)}
 
 Return JSON:
-{
-  "content": "Full cover letter text",
-  "highlights": ["key points highlighted"],
-  "tone": "formal|semi-formal|enthusiastic"
+{"content":"Dear Hiring Manager,\\n\\nParagraph 1...\\n\\nParagraph 2...\\n\\nSincerely,\\n${info.name || 'Applicant'}","tone":"professional"}`,
+    "Cover letter writer. Return JSON only.",
+    768
+  );
 }
 
-COMPANY: ${companyName}
-JOB TITLE: ${jobTitle}
-
-JOB DESCRIPTION:
-${jobDescription}
-
-CANDIDATE RESUME DATA:
-${JSON.stringify(resumeData, null, 2)}`;
-
-  return claudeCompleteJSON(prompt, systemPrompt, 4096);
-}
-
+// ─── Answer screening question ────────────────────────────────────────────────
 export async function claudeAnswerQuestion(
   question: string,
   context: Record<string, unknown>,
   previousAnswers: { question: string; answer: string }[]
 ) {
-  const systemPrompt = `You are helping a job applicant answer application screening questions. Always answer truthfully based on the candidate's actual experience and information.`;
+  const recent = previousAnswers.slice(-3).map((a) => `${a.question}: ${a.answer}`).join(" | ");
 
-  const prompt = `Answer this job application question truthfully based on the candidate's profile.
+  return ai(
+    `Answer this job application question truthfully and briefly.
 
-Return JSON:
-{
-  "answer": "the answer text",
-  "confidence": 0.9,
-  "category": "GENERAL|VISA_SPONSORSHIP|WORK_AUTHORIZATION|SALARY|EXPERIENCE|RELOCATION|DEMOGRAPHICS|AVAILABILITY",
-  "notes": "any important notes about this answer"
+QUESTION: "${question}"
+CONTEXT: ${recent || "No prior answers"}
+
+Return JSON: {"answer":"concise answer","category":"GENERAL|VISA_SPONSORSHIP|WORK_AUTHORIZATION|SALARY|EXPERIENCE|RELOCATION|AVAILABILITY"}`,
+    "Job application answerer. Return JSON only.",
+    128
+  );
 }
 
-QUESTION: ${question}
+// ─── Generate LaTeX from scratch ──────────────────────────────────────────────
+export async function claudeGenerateLatexResume(data: Record<string, unknown>) {
+  const info = (data as { contactInfo?: Record<string, string> })?.contactInfo || {};
+  const skills = (data.skills as string[] || []).slice(0, 15).join(", ");
+  const exp = JSON.stringify((data.experience as object[] || []).slice(0, 2));
+  const edu = JSON.stringify((data.education as object[] || []).slice(0, 1));
 
-CANDIDATE PROFILE:
-${JSON.stringify(context, null, 2)}
+  return ai(
+    `Create a complete 1-page LaTeX resume.
 
-PREVIOUS ANSWERS (for consistency):
-${JSON.stringify(previousAnswers, null, 2)}`;
+NAME: ${info.name || "Candidate"} | EMAIL: ${info.email} | PHONE: ${info.phone} | LOCATION: ${info.location}
+LINKEDIN: ${info.linkedin} | GITHUB: ${info.github}
+SKILLS: ${skills}
+EXPERIENCE: ${exp}
+EDUCATION: ${edu}
 
-  return claudeCompleteJSON(prompt, systemPrompt, 1024);
-}
-
-export async function claudeGenerateLatexResume(
-  resumeData: Record<string, unknown>
-) {
-  const systemPrompt = `You are an expert LaTeX resume designer. Create professional, ATS-friendly, one-page LaTeX resumes.`;
-
-  const prompt = `Create a complete, professional LaTeX resume from this data.
-
-Requirements:
-- Exactly one page
-- ATS-friendly formatting
-- Clean, modern design
-- No empty space
-- Overleaf-compatible
-- Professional fonts (use standard LaTeX fonts)
-
-Return JSON:
-{
-  "latexContent": "complete LaTeX code",
-  "sections": ["sections included"]
-}
-
-RESUME DATA:
-${JSON.stringify(resumeData, null, 2)}`;
-
-  return claudeCompleteJSON(prompt, systemPrompt, 8192);
+Return JSON: {"latexContent":"\\\\documentclass[10pt]{article}...FULL LATEX...\\\\end{document}","sections":["experience","skills","education"]}`,
+    "LaTeX resume creator. Return JSON only.",
+    3000
+  );
 }

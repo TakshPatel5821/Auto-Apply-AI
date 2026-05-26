@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { saveUploadedResume } from "@/lib/storage/file-manager";
-import { parseResume } from "@/lib/resume/parser";
+import { extractTextFromFile } from "@/lib/resume/parser";
+import { quickExtract } from "@/lib/resume/quick-extract";
 import { prisma } from "@/lib/db/prisma";
-import { ParsedResume } from "@/types";
+import { Logger } from "@/lib/logging/logger";
 
+// Upload: save + quick extract (instant) then AI parse in background
 export async function POST(req: NextRequest) {
   if (!(await getSession())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -12,37 +14,31 @@ export async function POST(req: NextRequest) {
 
   const formData = await req.formData();
   const file = formData.get("resume") as File;
-  const setActive = formData.get("setActive") === "true";
+  const setActive = formData.get("setActive") !== "false";
 
   if (!file) {
     return NextResponse.json({ error: "No file provided" }, { status: 400 });
   }
 
-  const allowedTypes = [
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/msword",
-    "text/plain",
-    "application/zip",
-    "application/x-zip-compressed",
-  ];
-
-  if (!allowedTypes.includes(file.type) && !file.name.endsWith(".tex")) {
-    return NextResponse.json({ error: "Unsupported file type" }, { status: 400 });
-  }
-
   const buffer = Buffer.from(await file.arrayBuffer());
   const { filePath, fileName } = saveUploadedResume(buffer, file.name);
 
-  const parsed = await parseResume(filePath) as ParsedResume;
-
-  if (setActive) {
-    await prisma.resume.updateMany({
-      where: { userId: "local" },
-      data: { isActive: false },
-    });
+  // Step 1 — Extract text (fast, no AI)
+  let rawText = "";
+  try {
+    rawText = await extractTextFromFile(filePath);
+  } catch (e) {
+    return NextResponse.json({ error: `Could not read file: ${e}` }, { status: 400 });
   }
 
+  // Step 2 — Quick regex-based extraction (instant, no AI)
+  const quick = quickExtract(rawText);
+
+  if (setActive) {
+    await prisma.resume.updateMany({ where: { userId: "local" }, data: { isActive: false } });
+  }
+
+  // Step 3 — Save to DB immediately with quick data
   const resume = await prisma.resume.create({
     data: {
       userId: "local",
@@ -50,22 +46,65 @@ export async function POST(req: NextRequest) {
       originalPath: filePath,
       fileType: file.type || "unknown",
       fileSize: buffer.length,
-      parsedData: parsed as object,
-      skills: parsed.skills || [],
-      experience: (parsed.experience || []) as object[],
-      education: (parsed.education || []) as object[],
-      projects: (parsed.projects || []) as object[],
-      achievements: parsed.achievements || [],
-      technologies: parsed.technologies || [],
-      domains: parsed.domains || [],
-      atsKeywords: parsed.atsKeywords || [],
-      yearsOfExperience: parsed.yearsOfExperience || null,
-      summary: parsed.summary || null,
+      parsedData: { rawText: rawText.slice(0, 2000), contactInfo: quick as object, aiParsed: false } as object,
+      skills: quick.skills,
+      experience: [],
+      education: [],
+      projects: [],
+      achievements: [],
+      technologies: quick.technologies,
+      domains: [],
+      atsKeywords: quick.technologies.slice(0, 10),
+      yearsOfExperience: quick.yearsOfExperience || null,
+      summary: null,
       isActive: setActive,
     },
   });
 
-  return NextResponse.json({ success: true, resume });
+  // Step 4 — AI deep parse in background (non-blocking)
+  deepParseInBackground(resume.id, rawText).catch(() => {});
+
+  return NextResponse.json({
+    success: true,
+    resume: {
+      ...resume,
+      aiParsing: true, // tell frontend AI parse is still running
+    },
+  });
+}
+
+async function deepParseInBackground(resumeId: string, rawText: string) {
+  await Logger.info("RESUME", "Starting AI deep parse in background", { resumeId });
+
+  try {
+    const { claudeParseResume } = await import("@/lib/ai/claude");
+    // Send only first 4000 chars to keep Ollama fast
+    const parsed = await claudeParseResume(rawText.slice(0, 4000)) as Record<string, unknown>;
+
+    await prisma.resume.update({
+      where: { id: resumeId },
+      data: {
+        parsedData: { ...parsed, aiParsed: true } as object,
+        skills: (parsed.skills as string[]) || [],
+        experience: ((parsed.experience as object[]) || []),
+        education: ((parsed.education as object[]) || []),
+        projects: ((parsed.projects as object[]) || []),
+        achievements: (parsed.achievements as string[]) || [],
+        technologies: (parsed.technologies as string[]) || [],
+        domains: (parsed.domains as string[]) || [],
+        atsKeywords: (parsed.atsKeywords as string[]) || [],
+        yearsOfExperience: (parsed.yearsOfExperience as number) || null,
+        summary: (parsed.summary as string) || null,
+      },
+    });
+
+    await Logger.success("RESUME", "AI deep parse complete", { resumeId });
+  } catch (e) {
+    await Logger.warn("RESUME", "AI deep parse failed, quick extract used instead", {
+      resumeId,
+      error: String(e),
+    });
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -86,6 +125,7 @@ export async function GET(req: NextRequest) {
       yearsOfExperience: true,
       summary: true,
       isActive: true,
+      parsedData: true,
       createdAt: true,
       _count: { select: { tailoredVersions: true } },
     },

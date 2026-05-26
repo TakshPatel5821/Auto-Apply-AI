@@ -17,25 +17,50 @@ export class LinkedInScraper extends BaseScraper {
   ): Promise<ScrapedJob[]> {
     const jobs: ScrapedJob[] = [];
 
+    if (!this.cookie) {
+      await Logger.warn(
+        "LINKEDIN",
+        "No li_at cookie — LinkedIn skipped. F12 → Application → Cookies → copy li_at → paste into LINKEDIN_COOKIE in .env"
+      );
+      return jobs;
+    }
+
     try {
       await this.init();
 
-      if (this.cookie) {
-        await this.context!.addCookies([
-          {
-            name: "li_at",
-            value: this.cookie,
-            domain: ".linkedin.com",
-            path: "/",
-          },
-        ]);
+      // Navigate to blank page first, then set cookie to avoid redirect loops
+      await this.page!.goto("about:blank");
+      await this.context!.addCookies([{
+        name: "li_at",
+        value: this.cookie,
+        domain: ".linkedin.com",
+        path: "/",
+        secure: true,
+        httpOnly: true,
+        sameSite: "None",
+      }]);
+
+      // Go directly to the feed (logged-in landing page) — avoids homepage redirect loop
+      await Logger.info("LINKEDIN", "Opening LinkedIn feed...");
+      try {
+        await this.page!.goto("https://www.linkedin.com/feed/", {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+      } catch {
+        // Feed redirect may still happen — wait for it to settle
+        await this.humanDelay(3000, 5000);
       }
+
+      await this.humanDelay(2000, 3500);
+      await this.randomScroll(1, 2);
 
       for (const keyword of keywords.slice(0, 3)) {
         for (const location of locations.slice(0, 2)) {
+          if (jobs.length >= 60) break;
           const scraped = await this.scrapeKeyword(keyword, location, options);
           jobs.push(...scraped);
-          await this.delay(3000, 7000);
+          await this.humanDelay(4000, 8000);
         }
       }
     } catch (e) {
@@ -53,178 +78,221 @@ export class LinkedInScraper extends BaseScraper {
     options: Record<string, unknown>
   ): Promise<ScrapedJob[]> {
     const jobs: ScrapedJob[] = [];
-    const remote = options.remote ? "&f_WT=2" : "";
-    const experienceFilters = options.experienceLevels
-      ? `&f_E=${(options.experienceLevels as string[]).map(this.mapExperienceLevel).join("%2C")}`
-      : "";
 
-    const searchUrl = `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keyword)}&location=${encodeURIComponent(location)}&sortBy=DD${remote}${experienceFilters}`;
+    try {
+      await Logger.info("LINKEDIN", `Searching: "${keyword}" in ${location}`);
 
-    await Logger.info("LINKEDIN", `Scraping: ${keyword} in ${location}`);
+      // Navigate to jobs page naturally
+      await this.safeNavigate("https://www.linkedin.com/jobs/", 30000);
+      await this.humanDelay(2000, 4000);
 
-    const ok = await this.safeNavigate(searchUrl);
-    if (!ok) return jobs;
-
-    await this.delay(2000, 4000);
-
-    // Scroll to load more jobs
-    for (let i = 0; i < 3; i++) {
-      await this.page!.evaluate(() => window.scrollBy(0, 800));
-      await this.delay(1000, 2000);
-    }
-
-    const jobCards = await this.page!.$$(".job-search-card, .jobs-search-results__list-item");
-
-    for (const card of jobCards.slice(0, 20)) {
-      try {
-        const job = await this.extractJobFromCard(card);
-        if (job) {
-          // Navigate to job page for full details
-          const fullJob = await this.getJobDetails(job);
-          jobs.push(fullJob);
-          await this.delay(1500, 3000);
-        }
-      } catch (e) {
-        await Logger.warn("LINKEDIN", "Failed to extract job card", { error: String(e) });
+      // Type in the keyword search box
+      const keywordInput = await this.page!.$(
+        'input[aria-label*="title"], input[aria-label*="Search"], input.jobs-search-box__text-input'
+      );
+      if (!keywordInput) {
+        await Logger.warn("LINKEDIN", "Could not find job search input");
+        return jobs;
       }
+
+      await keywordInput.click({ delay: 80 });
+      await this.humanDelay(300, 700);
+      // Clear any existing text
+      await this.page!.keyboard.press("Control+a");
+      await this.humanDelay(100, 200);
+      await this.humanType(keyword);
+      await this.humanDelay(500, 1000);
+
+      // Tab to location box and fill it
+      const locationInput = await this.page!.$(
+        'input[aria-label*="location"], input[aria-label*="City"]'
+      );
+      if (locationInput) {
+        await locationInput.click({ delay: 80 });
+        await this.humanDelay(300, 600);
+        await this.page!.keyboard.press("Control+a");
+        await this.humanDelay(100, 200);
+        await this.humanType(location);
+        await this.humanDelay(600, 1200);
+      }
+
+      // Press Enter to search
+      await this.page!.keyboard.press("Enter");
+      await this.humanDelay(3000, 5000);
+
+      // Apply experience level filter if specified
+      if (options.experienceLevels) {
+        await this.applyExperienceFilter(options.experienceLevels as string[]);
+        await this.humanDelay(2000, 3500);
+      }
+
+      // Scroll through results naturally
+      await this.randomScroll();
+      await this.humanDelay(1500, 3000);
+
+      // Extract job cards visible on page
+      const cards = await this.page!.$$(
+        ".job-card-container, .jobs-search-results__list-item, li.ember-view"
+      );
+
+      await Logger.info("LINKEDIN", `Found ${cards.length} job cards`);
+
+      for (const card of cards.slice(0, 15)) {
+        try {
+          // Click each card to load details in sidebar
+          await card.click();
+          await this.humanDelay(1500, 2500);
+          await this.randomScroll(1, 2);
+
+          const job = await this.extractJob();
+          if (job) jobs.push(job);
+        } catch (e) {
+          await Logger.warn("LINKEDIN", "Card extraction failed", { error: String(e) });
+        }
+      }
+    } catch (e) {
+      await Logger.warn("LINKEDIN", `Search failed for "${keyword}"`, { error: String(e) });
     }
 
     return jobs;
   }
 
-  private async extractJobFromCard(
-    card: Awaited<ReturnType<NonNullable<typeof this.page>["$$"]>>[0]
-  ): Promise<Partial<ScrapedJob> | null> {
+  private async extractJob(): Promise<ScrapedJob | null> {
     try {
-      const title = await card.$eval(
-        ".job-card-list__title, .base-search-card__title",
-        (el) => el.textContent?.trim() || ""
-      ).catch(() => "");
+      const titleEl = await this.page!.$(
+        ".job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title h1"
+      );
+      const companyEl = await this.page!.$(
+        ".job-details-jobs-unified-top-card__company-name a, .jobs-unified-top-card__company-name"
+      );
+      const locationEl = await this.page!.$(
+        ".job-details-jobs-unified-top-card__primary-description-without-tagline .tvm__text, .jobs-unified-top-card__bullet"
+      );
 
-      const company = await card.$eval(
-        ".job-card-container__primary-description, .base-search-card__subtitle",
-        (el) => el.textContent?.trim() || ""
-      ).catch(() => "");
+      const jobTitle = (await titleEl?.textContent())?.trim() || "";
+      const companyName = (await companyEl?.textContent())?.trim() || "";
+      const location = (await locationEl?.textContent())?.trim() || "";
 
-      const location = await card.$eval(
-        ".job-card-container__metadata-item, .job-search-card__location",
-        (el) => el.textContent?.trim() || ""
-      ).catch(() => "");
+      if (!jobTitle || !companyName) return null;
 
-      const link = await card.$eval(
-        "a.job-card-list__title, a.base-card__full-link",
-        (el) => (el as HTMLAnchorElement).href
-      ).catch(() => "");
+      const url = this.page!.url();
+      const platformJobId = url.match(/\/jobs\/view\/(\d+)/)?.[1];
 
-      if (!title || !company || !link) return null;
+      // Is Easy Apply?
+      const easyApplyBtn = await this.page!.$(
+        ".jobs-apply-button .artdeco-button__text"
+      );
+      const btnText = (await easyApplyBtn?.textContent()) || "";
+      const isEasyApply = btnText.toLowerCase().includes("easy apply");
+
+      // Get description
+      const descEl = await this.page!.$(
+        ".jobs-description-content__text, #job-details"
+      );
+      const description = (await descEl?.textContent())?.trim() || "";
+
+      // Salary
+      const salaryEl = await this.page!.$(
+        ".compensation__salary, .jobs-unified-top-card__job-insight--highlight"
+      );
+      const salaryText = (await salaryEl?.textContent())?.trim() || "";
+      const salaryData = salaryText ? this.extractSalary(salaryText) : {};
+
+      const descLower = description.toLowerCase();
 
       return {
-        jobTitle: title,
-        companyName: company,
-        location,
-        url: link,
         platform: "linkedin",
+        platformJobId,
+        url,
+        applyUrl: url,
+        easyApplyUrl: isEasyApply ? url : undefined,
+        isEasyApply,
+        companyName,
+        jobTitle,
+        location,
+        salary: salaryText || undefined,
+        salaryMin: (salaryData as { min?: number }).min,
+        salaryMax: (salaryData as { max?: number }).max,
+        isRemote: descLower.includes("remote") || location.toLowerCase().includes("remote"),
+        isHybrid: descLower.includes("hybrid") || location.toLowerCase().includes("hybrid"),
+        requiresSponsorship: descLower.includes("h1b") && !descLower.includes("no sponsorship"),
+        description,
+        requirements: [],
+        responsibilities: [],
+        niceToHave: [],
+        benefits: [],
+        scrapedAt: new Date(),
       };
     } catch {
       return null;
     }
   }
 
-  private async getJobDetails(partial: Partial<ScrapedJob>): Promise<ScrapedJob> {
-    const job: ScrapedJob = {
-      platform: "linkedin",
-      url: partial.url || "",
-      companyName: partial.companyName || "",
-      jobTitle: partial.jobTitle || "",
-      location: partial.location,
-      isEasyApply: false,
-      isRemote: false,
-      isHybrid: false,
-      requiresSponsorship: false,
-      description: "",
-      requirements: [],
-      responsibilities: [],
-      niceToHave: [],
-      benefits: [],
-      scrapedAt: new Date(),
-    };
-
+  private async applyExperienceFilter(levels: string[]): Promise<void> {
     try {
-      await this.safeNavigate(partial.url || "");
-      await this.delay(2000, 3000);
+      // Click "All filters" or experience filter button
+      const filterBtn = await this.page!.$(
+        'button[aria-label*="Experience level"], button[aria-label*="All filters"]'
+      );
+      if (!filterBtn) return;
+      await filterBtn.click();
+      await this.humanDelay(1000, 2000);
 
-      const platformJobId = partial.url?.match(/\/jobs\/view\/(\d+)/)?.[1];
-      if (platformJobId) job.platformJobId = platformJobId;
-
-      // Check for Easy Apply
-      const easyApplyBtn = await this.page!.$(".jobs-apply-button--top-card .artdeco-button--primary");
-      if (easyApplyBtn) {
-        const btnText = await easyApplyBtn.textContent();
-        job.isEasyApply = btnText?.includes("Easy Apply") || false;
-        job.easyApplyUrl = job.isEasyApply ? partial.url : undefined;
+      for (const level of levels) {
+        const label = this.mapExperienceLabel(level);
+        const checkbox = await this.page!.$(`label:has-text("${label}")`);
+        if (checkbox) {
+          await checkbox.click();
+          await this.humanDelay(300, 600);
+        }
       }
 
-      // Check for external apply
-      const applyBtn = await this.page!.$(".jobs-apply-button a");
+      // Apply
+      const applyBtn = await this.page!.$('button:has-text("Show results"), button:has-text("Apply")');
       if (applyBtn) {
-        job.applyUrl = await applyBtn.getAttribute("href") || partial.url;
-      } else {
-        job.applyUrl = partial.url;
+        await applyBtn.click();
+        await this.humanDelay(1500, 2500);
       }
-
-      // Get full description
-      job.description = await this.page!.$eval(
-        ".jobs-description-content__text, .job-description",
-        (el) => el.textContent?.trim() || ""
-      ).catch(() => "");
-
-      // Get salary
-      const salaryEl = await this.page!.$(".compensation__salary, .salary-main-rail__formatted-salary");
-      if (salaryEl) {
-        const salaryText = await salaryEl.textContent() || "";
-        const salaryData = this.extractSalary(salaryText);
-        job.salary = salaryText.trim();
-        job.salaryMin = salaryData.min;
-        job.salaryMax = salaryData.max;
-      }
-
-      // Check remote/hybrid
-      const workType = await this.page!.$eval(
-        ".jobs-unified-top-card__workplace-type, .ui-label",
-        (el) => el.textContent?.trim() || ""
-      ).catch(() => "");
-
-      job.isRemote = workType.toLowerCase().includes("remote");
-      job.isHybrid = workType.toLowerCase().includes("hybrid");
-
-      // Extract job type
-      job.jobType = await this.page!.$eval(
-        ".jobs-unified-top-card__job-insight",
-        (el) => el.textContent?.trim() || ""
-      ).catch(() => undefined);
-
-      if (job.description) {
-        const desc = job.description.toLowerCase();
-        job.requiresSponsorship = !desc.includes("no sponsorship") &&
-          (desc.includes("h1b") || desc.includes("visa sponsorship"));
-      }
-    } catch (e) {
-      await Logger.warn("LINKEDIN", `Failed to get job details for ${partial.url}`, { error: String(e) });
+    } catch {
+      // Filter UI changes often — skip gracefully
     }
-
-    return job;
   }
 
-  private mapExperienceLevel(level: string): string {
+  // Types text character by character with random delays (human-like)
+  private async humanType(text: string): Promise<void> {
+    for (const char of text) {
+      await this.page!.keyboard.type(char, { delay: 60 + Math.random() * 120 });
+    }
+  }
+
+  // Human-like delay
+  private async humanDelay(min: number, max: number): Promise<void> {
+    await this.delay(min, max);
+  }
+
+  // Random scrolling to simulate reading
+  private async randomScroll(minScrolls = 2, maxScrolls = 5): Promise<void> {
+    const scrolls = Math.floor(Math.random() * (maxScrolls - minScrolls + 1)) + minScrolls;
+    for (let i = 0; i < scrolls; i++) {
+      const amount = 300 + Math.floor(Math.random() * 500);
+      await this.page!.evaluate((y) => window.scrollBy(0, y), amount);
+      await this.delay(600, 1500);
+    }
+    // Occasionally scroll back up a bit
+    if (Math.random() > 0.6) {
+      await this.page!.evaluate(() => window.scrollBy(0, -(150 + Math.random() * 200)));
+      await this.delay(400, 900);
+    }
+  }
+
+  private mapExperienceLabel(level: string): string {
     const map: Record<string, string> = {
-      internship: "1",
-      entry: "2",
-      associate: "3",
-      mid: "4",
-      senior: "5",
-      director: "6",
-      executive: "7",
+      internship: "Internship",
+      entry: "Entry level",
+      associate: "Associate",
+      mid: "Mid-Senior level",
+      senior: "Senior level",
     };
-    return map[level.toLowerCase()] || "2";
+    return map[level.toLowerCase()] || "Entry level";
   }
 }

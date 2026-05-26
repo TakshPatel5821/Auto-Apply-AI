@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Play, Pause, Square, Zap, Settings2 } from "lucide-react";
+import { Play, Pause, Square, Zap, Search, BarChart2, FileEdit, Send as SendIcon } from "lucide-react";
 
 interface AutomationState {
   isRunning: boolean;
@@ -96,11 +96,10 @@ export function AutomationControls({
       </div>
 
       {state.isRunning && (
-        <div className="mb-4 bg-gray-800 rounded-lg p-3">
-          <div className="text-xs text-gray-400">Current Activity</div>
-          <div className="text-sm text-white mt-0.5">{state.currentAction || "Processing..."}</div>
+        <div className="mb-4 space-y-3">
+          <PhaseProgress action={state.currentAction} />
           {state.currentJob && (
-            <div className="text-xs text-gray-500 mt-1">{state.currentJob}</div>
+            <div className="text-xs text-gray-500 truncate">{state.currentJob}</div>
           )}
         </div>
       )}
@@ -201,6 +200,49 @@ export function AutomationControls({
           Upload a resume to start automation
         </p>
       )}
+    </div>
+  );
+}
+
+const PHASES = [
+  { label: "Scrape", icon: Search, match: "scraping" },
+  { label: "Analyze", icon: BarChart2, match: "analyzing" },
+  { label: "Tailor", icon: FileEdit, match: "tailoring" },
+  { label: "Apply", icon: SendIcon, match: "applying" },
+];
+
+function PhaseProgress({ action }: { action?: string }) {
+  const lower = (action || "").toLowerCase();
+  const activeIdx = PHASES.findIndex((p) => lower.includes(p.match));
+  const current = activeIdx === -1 ? 0 : activeIdx;
+
+  return (
+    <div className="bg-gray-800 rounded-lg p-3">
+      <div className="text-xs text-gray-400 mb-2">{action || "Processing..."}</div>
+      <div className="flex items-center gap-1">
+        {PHASES.map((phase, i) => {
+          const Icon = phase.icon;
+          const isDone = i < current;
+          const isActive = i === current;
+          return (
+            <div key={phase.label} className="flex items-center gap-1 flex-1">
+              <div className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded flex-1 justify-center ${
+                isDone
+                  ? "bg-green-900/40 text-green-400"
+                  : isActive
+                  ? "bg-blue-900/40 text-blue-400 ring-1 ring-blue-500"
+                  : "bg-gray-700/40 text-gray-600"
+              }`}>
+                <Icon className={`w-3 h-3 ${isActive ? "animate-pulse" : ""}`} />
+                <span className="hidden sm:inline">{phase.label}</span>
+              </div>
+              {i < PHASES.length - 1 && (
+                <div className={`w-2 h-px flex-shrink-0 ${isDone || isActive ? "bg-blue-700" : "bg-gray-700"}`} />
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

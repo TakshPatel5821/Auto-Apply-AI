@@ -2,9 +2,10 @@ import { prisma } from "@/lib/db/prisma";
 import { LinkedInScraper } from "./linkedin";
 import { IndeedScraper } from "./indeed";
 import { GreenhouseScraper } from "./greenhouse";
+import { CustomScraper } from "./custom-scraper";
 import { claudeAnalyzeJob } from "@/lib/ai/claude";
 import { Logger } from "@/lib/logging/logger";
-import { ScrapedJob, SearchConfig } from "@/types";
+import { ScrapedJob, SearchConfig, CustomSite } from "@/types";
 
 export class ScrapingOrchestrator {
   private isRunning = false;
@@ -47,6 +48,17 @@ export class ScrapingOrchestrator {
         });
         allJobs.push(...jobs);
         await Logger.success("SCRAPER", `Indeed: found ${jobs.length} jobs`);
+      }
+
+      // Custom sites
+      const settings = await prisma.userSettings.findUnique({ where: { userId: "local" } });
+      const customSites = ((settings?.customSites as unknown as CustomSite[]) || []).filter((s) => s.enabled);
+      for (const site of customSites) {
+        await Logger.info("SCRAPER", `Scraping custom site: ${site.name}...`);
+        const scraper = new CustomScraper();
+        const jobs = await scraper.scrapeJobs(site);
+        allJobs.push(...jobs);
+        await Logger.success("SCRAPER", `${site.name}: found ${jobs.length} jobs`);
       }
 
       const saved = await this.saveJobs(allJobs);
@@ -149,60 +161,88 @@ export class ScrapingOrchestrator {
   }
 
   async analyzeAndScoreJobs(resumeId: string): Promise<void> {
-    const resume = await prisma.resume.findUnique({
-      where: { id: resumeId },
-    });
-
+    const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
     if (!resume) throw new Error("Resume not found");
 
     const unanalyzedJobs = await prisma.job.findMany({
-      where: {
-        status: "FOUND",
-        isBlacklisted: false,
-        isSpam: false,
-        isDuplicate: false,
-      },
-      take: 50,
+      where: { status: "FOUND", isBlacklisted: false, isSpam: false, isDuplicate: false },
+      take: 100,
     });
 
-    await Logger.info("ANALYZER", `Analyzing ${unanalyzedJobs.length} jobs`);
+    if (unanalyzedJobs.length === 0) return;
+    await Logger.info("ANALYZER", `Analyzing ${unanalyzedJobs.length} jobs (batch mode)`);
+
+    const { fastFilter } = await import("@/lib/matching/fast-filter");
+    const { claudeBatchMatchJobs } = await import("@/lib/ai/claude");
+    const resumeData = resume.parsedData as Record<string, unknown>;
+    const candidateSkills = resume.skills || [];
+    const candidateTech = resume.technologies || [];
+    const searchKeywords = (process.env.JOB_SEARCH_KEYWORDS || "Software Engineer")
+      .split(",").map((k) => k.trim());
+
+    // Step 1: instant pre-filter (no AI)
+    const toAiScore: typeof unanalyzedJobs = [];
 
     for (const job of unanalyzedJobs) {
-      try {
-        const { claudeMatchJobToResume } = await import("@/lib/ai/claude");
-        const matchData = await claudeMatchJobToResume(
-          job.description,
-          resume.parsedData as Record<string, unknown>
-        ) as {
-          matchScore: number;
-          atsScore: number;
-          confidenceLevel: number;
-          requiredSkills: string[];
-          missingSkills: string[];
-          matchingSkills: string[];
-          matchReason: string;
-        };
+      const filter = fastFilter(job.jobTitle, job.description, candidateSkills, candidateTech, searchKeywords);
 
+      if (filter.skip) {
         await prisma.job.update({
           where: { id: job.id },
           data: {
-            matchScore: matchData.matchScore,
-            atsScore: matchData.atsScore,
-            confidenceLevel: matchData.confidenceLevel,
-            requiredSkills: matchData.requiredSkills || [],
-            missingSkills: matchData.missingSkills || [],
-            matchingSkills: matchData.matchingSkills || [],
-            matchReason: matchData.matchReason,
+            matchScore: 10,
+            atsScore: 1,
+            confidenceLevel: 0.9,
+            requiredSkills: [],
+            missingSkills: filter.missingKeywords,
+            matchingSkills: filter.matchedKeywords,
+            matchReason: filter.reason,
             status: "ANALYZED",
           },
         });
+      } else {
+        toAiScore.push(job);
+      }
+    }
 
-        await Logger.info("ANALYZER", `Scored: ${job.jobTitle} @ ${job.companyName} — ${matchData.matchScore}/10`, { jobId: job.id });
-        await new Promise((r) => setTimeout(r, 1000));
+    await Logger.info("ANALYZER", `Pre-filter: ${unanalyzedJobs.length - toAiScore.length} skipped, ${toAiScore.length} going to AI`);
+
+    // Step 2: batch AI scoring (5 jobs per call)
+    const BATCH = 5;
+    for (let i = 0; i < toAiScore.length; i += BATCH) {
+      const batch = toAiScore.slice(i, i + BATCH);
+
+      try {
+        const result = await claudeBatchMatchJobs(
+          batch.map((j) => ({ id: j.id, title: j.jobTitle, company: j.companyName, description: j.description })),
+          resumeData
+        );
+
+        for (const scored of result.results || []) {
+          await prisma.job.update({
+            where: { id: scored.id },
+            data: {
+              matchScore: scored.matchScore,
+              atsScore: scored.atsScore,
+              confidenceLevel: 0.75,
+              requiredSkills: [],
+              missingSkills: scored.missingSkills || [],
+              matchingSkills: scored.matchingSkills || [],
+              matchReason: scored.matchReason,
+              status: "ANALYZED",
+            },
+          });
+          await Logger.info("ANALYZER", `Scored: ${scored.matchReason} → ${scored.matchScore}/10`);
+        }
       } catch (e) {
-        await Logger.error("ANALYZER", `Failed to analyze job ${job.id}`, {
-          error: String(e),
-        });
+        // Fallback: mark batch as analyzed with neutral score
+        for (const job of batch) {
+          await prisma.job.update({
+            where: { id: job.id },
+            data: { matchScore: 5, atsScore: 5, status: "ANALYZED", matchReason: "Scoring failed, manual review needed" },
+          });
+        }
+        await Logger.warn("ANALYZER", `Batch ${i / BATCH + 1} failed: ${e}`);
       }
     }
   }

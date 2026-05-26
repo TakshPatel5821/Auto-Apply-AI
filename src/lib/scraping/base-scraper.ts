@@ -19,19 +19,29 @@ export abstract class BaseScraper {
   }
 
   protected async init(): Promise<void> {
-    this.browser = await chromium.launch({
-      headless: this.config.headless,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--disable-gpu",
-        "--disable-blink-features=AutomationControlled",
-      ],
-    });
+    const headless = process.env.BROWSER_HEADLESS !== "false"
+      ? this.config.headless
+      : false;
+
+    // Try Microsoft Edge first (more trusted by LinkedIn), fall back to Chromium
+    try {
+      this.browser = await chromium.launch({
+        channel: "msedge",
+        headless,
+        slowMo: headless ? 0 : 200,
+        args: ["--disable-blink-features=AutomationControlled"],
+      });
+    } catch {
+      this.browser = await chromium.launch({
+        headless,
+        slowMo: headless ? 0 : 200,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-blink-features=AutomationControlled",
+        ],
+      });
+    }
 
     this.context = await this.browser.newContext({
       userAgent: this.config.userAgent || this.getRandomUserAgent(),
@@ -80,13 +90,16 @@ export abstract class BaseScraper {
   protected async safeNavigate(url: string, timeout = 30000): Promise<boolean> {
     for (let i = 0; i < this.config.maxRetries; i++) {
       try {
-        await this.page!.goto(url, {
-          waitUntil: "domcontentloaded",
-          timeout,
-        });
+        await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout });
         return true;
       } catch (e) {
-        await Logger.warn("SCRAPER", `Navigation failed (attempt ${i + 1}): ${url}`, { error: String(e) });
+        const msg = String(e);
+        // Don't retry redirect loops — they won't self-resolve
+        if (msg.includes("ERR_TOO_MANY_REDIRECTS")) {
+          await Logger.warn("SCRAPER", `Redirect loop on ${url} — cookie may be invalid or expired`);
+          return false;
+        }
+        await Logger.warn("SCRAPER", `Navigation failed (attempt ${i + 1}): ${url}`, { error: msg });
         if (i < this.config.maxRetries - 1) await this.delay(3000, 6000);
       }
     }

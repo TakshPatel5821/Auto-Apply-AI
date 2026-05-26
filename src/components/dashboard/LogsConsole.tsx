@@ -8,6 +8,7 @@ interface LogEntry {
   level: string;
   category: string;
   message: string;
+  details?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -71,7 +72,12 @@ export function LogsConsole({
                 {levelPrefixes[log.level] || log.level}
               </span>
               <span className="text-gray-600 flex-shrink-0">[{log.category}]</span>
-              <span className="text-gray-300 break-all">{log.message}</span>
+              <span className="text-gray-300 break-all">
+                {log.message}
+                {log.details?.error != null && (
+                  <span className="text-red-400 ml-1">— {String(log.details.error)}</span>
+                )}
+              </span>
             </div>
           ))
         )}

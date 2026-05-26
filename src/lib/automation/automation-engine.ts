@@ -52,12 +52,15 @@ class AutomationEngine {
     try {
       // Step 1: Scrape jobs
       this.state.currentAction = "Scraping jobs...";
+      const beforeScrape = await prisma.job.count();
       await scrapingOrchestrator.startScraping(config.searchConfig);
+      const afterScrape = await prisma.job.count();
+      this.state.jobsScraped = afterScrape - beforeScrape;
 
       if (this.stopRequested) return;
 
       // Step 2: Analyze & score jobs
-      this.state.currentAction = "Analyzing jobs...";
+      this.state.currentAction = `Analyzing jobs... (${this.state.jobsScraped} new)`;
       await scrapingOrchestrator.analyzeAndScoreJobs(config.resumeId);
 
       if (this.stopRequested) return;
@@ -99,6 +102,7 @@ class AutomationEngine {
           });
 
           this.state.jobsAnalyzed++;
+          this.state.currentAction = `Tailoring resumes... (${this.state.jobsAnalyzed}/${topJobs.length})`;
           this.state.lastActivity = new Date();
         } catch (e) {
           await Logger.error("ENGINE", `Tailoring failed for ${job.companyName}`, { error: String(e) });
@@ -121,7 +125,7 @@ class AutomationEngine {
           if (this.stopRequested) break;
 
           this.state.currentJob = `${app.job.jobTitle} @ ${app.job.companyName}`;
-          this.state.currentAction = "Applying...";
+          this.state.currentAction = `Applying to jobs... (${this.state.applicationsSubmitted}/${pendingApplications.length})`;
 
           const success = await this.applyEngine.applyToJob(app.id);
           if (success) {

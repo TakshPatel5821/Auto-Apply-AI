@@ -35,6 +35,7 @@ model UserSettings {
   blacklistCompanies String[] @default([])
   preferredCompanies String[] @default([])
   preferredTechStack String[] @default([])
+  customSites        Json     @default("[]")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

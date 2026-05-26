@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { StatsCards } from "@/components/dashboard/StatsCards";
 import { AutomationControls } from "@/components/dashboard/AutomationControls";
 import { ResumeUpload } from "@/components/dashboard/ResumeUpload";
+import { CustomSitesPanel } from "@/components/dashboard/CustomSitesPanel";
 import { JobsTable } from "@/components/dashboard/JobsTable";
 import { ApplicationsTable } from "@/components/dashboard/ApplicationsTable";
 import { LogsConsole } from "@/components/dashboard/LogsConsole";
@@ -103,9 +104,10 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchAll();
-    const interval = setInterval(fetchAll, 15000);
+    const delay = automationState.isRunning && !automationState.isPaused ? 3000 : 15000;
+    const interval = setInterval(fetchAll, delay);
     return () => clearInterval(interval);
-  }, [fetchAll]);
+  }, [fetchAll, automationState.isRunning, automationState.isPaused]);
 
   useEffect(() => {
     if (activeTab === "memory") fetchMemory();
@@ -218,6 +220,7 @@ export default function DashboardPage() {
               <h3 className="text-sm font-semibold text-white mb-4">Resume</h3>
               <ResumeUpload resumes={resumes} onUpload={fetchAll} />
             </div>
+            <CustomSitesPanel />
           </div>
 
           {/* Main content */}
@@ -436,17 +439,23 @@ function SettingsTab({
   settings: any;
   onSave: () => void;
 }) {
-  const [form, setForm] = useState({
-    searchKeywords: settings?.searchKeywords?.join(", ") || "Software Engineer",
-    searchLocations: settings?.searchLocations?.join(", ") || "Remote",
-    remoteOnly: settings?.remoteOnly ?? true,
-    requireSponsorship: settings?.requireSponsorship ?? false,
-    maxApplicationsPerDay: settings?.maxApplicationsPerDay ?? 20,
-    autoApply: settings?.autoApply ?? false,
-    blacklistCompanies: settings?.blacklistCompanies?.join(", ") || "",
-    preferredTechStack: settings?.preferredTechStack?.join(", ") || "",
-    minSalary: settings?.minSalary || "",
+  const buildForm = (s: any) => ({
+    searchKeywords: s?.searchKeywords?.join(", ") || "Software Engineer Intern, Cloud Engineer Intern, Cybersecurity Intern, Software Developer Intern",
+    searchLocations: s?.searchLocations?.join(", ") || "Arlington TX, Dallas TX, Fort Worth TX, Remote",
+    remoteOnly: s?.remoteOnly ?? false,
+    requireSponsorship: s?.requireSponsorship ?? false,
+    maxApplicationsPerDay: s?.maxApplicationsPerDay ?? 20,
+    autoApply: s?.autoApply ?? false,
+    blacklistCompanies: s?.blacklistCompanies?.join(", ") || "",
+    preferredTechStack: s?.preferredTechStack?.join(", ") || "Python, JavaScript, PHP, Azure, MySQL, React",
+    minSalary: s?.minSalary != null ? String(s.minSalary) : "",
   });
+
+  const [form, setForm] = useState(() => buildForm(settings));
+
+  useEffect(() => {
+    setForm(buildForm(settings));
+  }, [settings]);
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
@@ -462,7 +471,7 @@ function SettingsTab({
         autoApply: form.autoApply,
         blacklistCompanies: form.blacklistCompanies.split(",").map((s: string) => s.trim()).filter(Boolean),
         preferredTechStack: form.preferredTechStack.split(",").map((s: string) => s.trim()).filter(Boolean),
-        minSalary: form.minSalary ? parseInt(form.minSalary) : null,
+        minSalary: form.minSalary.trim() !== "" ? (parseInt(form.minSalary) || null) : null,
       }),
     });
     onSave();
