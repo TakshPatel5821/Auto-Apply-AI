@@ -290,6 +290,53 @@ export abstract class BaseScraper {
     return false;
   }
 
+  // Click "Show more" / "See more" buttons in job description until fully expanded.
+  // Returns true if at least one button was clicked.
+  protected async expandJobDescription(): Promise<boolean> {
+    if (!this.page) return false;
+    let clickedAny = false;
+
+    const showMoreSelectors = [
+      // LinkedIn
+      "button.show-more-less-html__button",
+      "button.show-more-less-button",
+      'button[aria-label="See more, visually open the description"]',
+      'button[aria-label*="see more"]',
+      'button[aria-label*="Show more"]',
+      ".show-more-less-html__button--more",
+      // Indeed
+      "button.jobsearch-jobDescriptionText-button",
+      'button[data-testid="job-description-view-more"]',
+      // Generic
+      'button:has-text("Show more")',
+      'button:has-text("See more")',
+      'button:has-text("Read more")',
+      'button:has-text("View full description")',
+    ];
+
+    // Click multiple times in case there are nested expand buttons
+    for (let pass = 0; pass < 3; pass++) {
+      let clickedThisPass = false;
+      for (const sel of showMoreSelectors) {
+        try {
+          const btn = await this.page.$(sel);
+          if (btn) {
+            const isVisible = await btn.isVisible().catch(() => false);
+            if (isVisible) {
+              await btn.click({ timeout: 3000 }).catch(() => {});
+              await this.page.waitForTimeout(400);
+              clickedThisPass = true;
+              clickedAny = true;
+            }
+          }
+        } catch { /* try next selector */ }
+      }
+      if (!clickedThisPass) break;
+    }
+
+    return clickedAny;
+  }
+
   protected async safeClick(selector: string, timeout = 10000): Promise<boolean> {
     try {
       await this.page!.waitForSelector(selector, { timeout });

@@ -13,26 +13,43 @@ export async function GET(req: NextRequest) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const [totalJobs, analyzedJobs, appliedToday, totalApplications, recentLogs] =
-    await Promise.all([
-      prisma.job.count({ where: { isSpam: false, isBlacklisted: false } }),
-      prisma.job.count({ where: { status: { in: ["ANALYZED", "TAILORED", "APPLIED"] } } }),
-      prisma.application.count({
-        where: { userId: "local", appliedAt: { gte: today } },
-      }),
-      prisma.application.count({ where: { userId: "local" } }),
-      prisma.automationLog.findMany({
-        orderBy: { createdAt: "desc" },
-        take: 20,
-        select: {
-          id: true,
-          level: true,
-          category: true,
-          message: true,
-          createdAt: true,
-        },
-      }),
-    ]);
+  const [
+    totalJobs,
+    analyzedJobs,
+    appliedToday,
+    totalApplications,
+    scrapedToday,
+    fitJobs,
+    recentLogs,
+  ] = await Promise.all([
+    prisma.job.count({ where: { isSpam: false, isBlacklisted: false } }),
+    prisma.job.count({ where: { status: { in: ["ANALYZED", "TAILORED", "APPLIED"] } } }),
+    prisma.application.count({
+      where: { userId: "local", appliedAt: { gte: today } },
+    }),
+    prisma.application.count({ where: { userId: "local" } }),
+    prisma.job.count({
+      where: { scrapedAt: { gte: today }, isSpam: false },
+    }),
+    prisma.job.count({
+      where: {
+        matchScore: { lte: 6 },
+        isSpam: false,
+        isBlacklisted: false,
+      },
+    }),
+    prisma.automationLog.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: {
+        id: true,
+        level: true,
+        category: true,
+        message: true,
+        createdAt: true,
+      },
+    }),
+  ]);
 
   return NextResponse.json({
     state,
@@ -41,6 +58,8 @@ export async function GET(req: NextRequest) {
       analyzedJobs,
       appliedToday,
       totalApplications,
+      scrapedToday,
+      fitJobs,
     },
     recentLogs,
   });

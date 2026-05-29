@@ -9,6 +9,7 @@ import { CustomSitesPanel } from "@/components/dashboard/CustomSitesPanel";
 import { JobsTable } from "@/components/dashboard/JobsTable";
 import { ApplicationsTable } from "@/components/dashboard/ApplicationsTable";
 import { LogsConsole } from "@/components/dashboard/LogsConsole";
+import { QuickSetupPanel } from "@/components/dashboard/QuickSetupPanel";
 import {
   Briefcase,
   Send,
@@ -45,6 +46,8 @@ export default function DashboardPage() {
     analyzedJobs: 0,
     appliedToday: 0,
     totalApplications: 0,
+    scrapedToday: 0,
+    fitJobs: 0,
   });
   const [memories, setMemories] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>(null);
@@ -209,8 +212,9 @@ export default function DashboardPage() {
         <StatsCards stats={stats} automationState={automationState} />
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Left sidebar - Automation + Resume */}
+          {/* Left sidebar - Quick Setup + Automation + Resume */}
           <div className="space-y-6">
+            <QuickSetupPanel onSave={fetchAll} />
             <AutomationControls
               state={automationState}
               resumes={resumes}

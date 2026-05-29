@@ -101,8 +101,9 @@ export function savePDF(folderPath: string, fileName: string, pdfBuffer: Buffer)
   return saveFile(folderPath, fileName, pdfBuffer);
 }
 
-export function saveScreenshot(folderPath: string, screenshot: Buffer): string {
-  const fileName = `screenshot_${Date.now()}.png`;
+export function saveScreenshot(folderPath: string, screenshot: Buffer, label?: string): string {
+  const safeLabel = label ? label.replace(/[^a-z0-9_\-\.]/gi, "_") : "screenshot";
+  const fileName = `${safeLabel}_${Date.now()}.png`;
   return saveFile(folderPath, fileName, screenshot);
 }
 

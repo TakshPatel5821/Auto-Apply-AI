@@ -1,13 +1,16 @@
 "use client";
 
-import { ExternalLink, FileText, FileIcon } from "lucide-react";
+import { useState } from "react";
+import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw } from "lucide-react";
 
 interface Application {
   id: string;
   status: string;
   appliedAt: string | null;
   updatedAt: string;
+  error?: string | null;
   job: {
+    id: string;
     companyName: string;
     jobTitle: string;
     location: string | null;
@@ -15,6 +18,7 @@ interface Application {
     matchScore: number | null;
     url: string;
     applyUrl: string | null;
+    isEasyApply: boolean;
   };
   tailoredResume: { id: string; atsScore: number | null; pdfPath: string | null } | null;
   coverLetter: { id: string; pdfPath: string | null } | null;
@@ -23,7 +27,7 @@ interface Application {
 const statusColors: Record<string, string> = {
   PENDING: "bg-gray-700 text-gray-300",
   APPROVED: "bg-blue-900 text-blue-300",
-  IN_PROGRESS: "bg-yellow-900 text-yellow-300",
+  IN_PROGRESS: "bg-yellow-900 text-yellow-300 animate-pulse",
   SUBMITTED: "bg-purple-900 text-purple-300",
   CONFIRMED: "bg-green-900 text-green-300",
   FAILED: "bg-red-900 text-red-300",
@@ -39,113 +43,254 @@ export function ApplicationsTable({
   applications: Application[];
   onRefresh: () => void;
 }) {
-  async function approve(appId: string, jobId: string) {
+  const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  function setBusy(id: string, busy: boolean) {
+    setBusyIds((prev) => {
+      const next = new Set(prev);
+      if (busy) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  async function approve(appId: string) {
+    setBusy(appId, true);
     await fetch("/api/applications/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jobId, action: "approve" }),
+      body: JSON.stringify({ applicationId: appId, action: "approve" }),
     });
+    setBusy(appId, false);
     onRefresh();
   }
 
-  async function submit(jobId: string) {
-    await fetch("/api/applications/apply", {
+  async function submit(appId: string) {
+    setBusy(appId, true);
+    const res = await fetch("/api/applications/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jobId, action: "submit" }),
+      body: JSON.stringify({ applicationId: appId, action: "submit" }),
     });
+    const data = await res.json();
+    setMessage(data.message || (data.success ? "Application submission started" : data.error || "Submit failed"));
+    setTimeout(() => setMessage(null), 5000);
+    setBusy(appId, false);
     onRefresh();
   }
+
+  async function applyAll() {
+    setBulkRunning(true);
+    setMessage(null);
+    const res = await fetch("/api/applications/apply-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: 20 }),
+    });
+    const data = await res.json();
+    setMessage(data.message);
+    setTimeout(() => setMessage(null), 6000);
+    setBulkRunning(false);
+    onRefresh();
+  }
+
+  const readyCount = applications.filter((a) => a.status === "APPROVED" || a.status === "PENDING").length;
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-gray-800">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-gray-800">
-            <th className="text-left px-4 py-3 text-gray-400 font-medium">Company</th>
-            <th className="text-left px-4 py-3 text-gray-400 font-medium">Role</th>
-            <th className="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
-            <th className="text-left px-4 py-3 text-gray-400 font-medium">Match</th>
-            <th className="text-left px-4 py-3 text-gray-400 font-medium">Applied</th>
-            <th className="text-left px-4 py-3 text-gray-400 font-medium">Files</th>
-            <th className="text-right px-4 py-3 text-gray-400 font-medium">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {applications.map((app) => (
-            <tr key={app.id} className="border-b border-gray-800/50 hover:bg-gray-800/20 transition-colors">
-              <td className="px-4 py-3">
-                <div className="font-medium text-white">{app.job.companyName}</div>
-                <div className="text-xs text-gray-500 capitalize">{app.job.platform}</div>
-              </td>
-              <td className="px-4 py-3 text-gray-300">{app.job.jobTitle}</td>
-              <td className="px-4 py-3">
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[app.status] || "bg-gray-700 text-gray-400"}`}>
-                  {app.status}
-                </span>
-              </td>
-              <td className="px-4 py-3">
-                <span className="text-sm font-bold text-white">
-                  {app.job.matchScore?.toFixed(1) || "—"}
-                </span>
-                {app.tailoredResume?.atsScore && (
-                  <div className="text-xs text-gray-500">ATS:{app.tailoredResume.atsScore.toFixed(0)}</div>
-                )}
-              </td>
-              <td className="px-4 py-3 text-xs text-gray-500">
-                {app.appliedAt
-                  ? new Date(app.appliedAt).toLocaleDateString()
-                  : "Pending"}
-              </td>
-              <td className="px-4 py-3">
-                <div className="flex gap-1.5">
-                  {app.tailoredResume && (
-                    <span title="Resume tailored" className="text-purple-400">
-                      <FileText className="w-3.5 h-3.5" />
-                    </span>
-                  )}
-                  {app.coverLetter && (
-                    <span title="Cover letter generated" className="text-blue-400">
-                      <FileIcon className="w-3.5 h-3.5" />
-                    </span>
-                  )}
-                </div>
-              </td>
-              <td className="px-4 py-3">
-                <div className="flex items-center justify-end gap-1">
-                  <a
-                    href={app.job.applyUrl || app.job.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="p-1.5 text-gray-500 hover:text-blue-400 transition-colors"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                  {app.status === "PENDING" && (
-                    <button
-                      onClick={() => approve(app.id, app.job.applyUrl || "")}
-                      className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
-                    >
-                      Approve
-                    </button>
-                  )}
-                  {app.status === "APPROVED" && (
-                    <button
-                      onClick={() => submit(app.job.applyUrl || "")}
-                      className="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded transition-colors"
-                    >
-                      Apply
-                    </button>
-                  )}
-                </div>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {applications.length === 0 && (
-        <div className="text-center py-12 text-gray-600">No applications yet</div>
+    <div className="space-y-3">
+      {/* Bulk action bar */}
+      {applications.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 flex items-center gap-3">
+          <div className="flex-1 flex items-center gap-2">
+            <Send className="w-4 h-4 text-blue-400" />
+            <span className="text-sm text-gray-300">
+              <span className="font-semibold text-white">{readyCount}</span> application{readyCount === 1 ? "" : "s"} ready to submit
+            </span>
+          </div>
+          <button
+            onClick={applyAll}
+            disabled={bulkRunning || readyCount === 0}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            {bulkRunning ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin" />
+                Starting...
+              </>
+            ) : (
+              <>
+                <Zap className="w-4 h-4" />
+                Apply to All Ready
+              </>
+            )}
+          </button>
+          <button
+            onClick={onRefresh}
+            className="p-2 text-gray-500 hover:text-gray-300 transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
       )}
+
+      {/* Toast message */}
+      {message && (
+        <div className="bg-blue-900/30 border border-blue-800 text-blue-300 text-sm px-4 py-2 rounded-lg flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          {message}
+        </div>
+      )}
+
+      <div className="overflow-x-auto rounded-xl border border-gray-800">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-800 bg-gray-900/50">
+              <th className="text-left px-4 py-3 text-gray-400 font-medium">Company</th>
+              <th className="text-left px-4 py-3 text-gray-400 font-medium">Role</th>
+              <th className="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
+              <th className="text-left px-4 py-3 text-gray-400 font-medium">Match</th>
+              <th className="text-left px-4 py-3 text-gray-400 font-medium">Applied</th>
+              <th className="text-left px-4 py-3 text-gray-400 font-medium">Files</th>
+              <th className="text-right px-4 py-3 text-gray-400 font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {applications.map((app) => {
+              const busy = busyIds.has(app.id);
+              return (
+                <tr key={app.id} className="border-b border-gray-800/50 hover:bg-gray-800/20 transition-colors">
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-white">{app.job.companyName}</div>
+                    <div className="text-xs text-gray-500 capitalize flex items-center gap-1">
+                      {app.job.platform}
+                      {app.job.isEasyApply && (
+                        <span className="text-blue-400 text-[10px] uppercase">• Easy Apply</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-gray-300">{app.job.jobTitle}</td>
+                  <td className="px-4 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[app.status] || "bg-gray-700 text-gray-400"}`}>
+                      {app.status}
+                    </span>
+                    {app.error && (
+                      <div className="text-[10px] text-red-400 mt-1 max-w-[200px] truncate" title={app.error}>
+                        {app.error}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="text-sm font-bold text-white">
+                      {app.job.matchScore?.toFixed(1) || "—"}
+                    </span>
+                    {app.tailoredResume?.atsScore && (
+                      <div className="text-xs text-gray-500">ATS:{app.tailoredResume.atsScore.toFixed(0)}</div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-gray-500">
+                    {app.appliedAt ? new Date(app.appliedAt).toLocaleDateString() : "—"}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex gap-1.5">
+                      {app.tailoredResume?.pdfPath && (
+                        <span title={`Resume PDF: ${app.tailoredResume.pdfPath}`} className="text-purple-400">
+                          <FileText className="w-3.5 h-3.5" />
+                        </span>
+                      )}
+                      {app.coverLetter?.pdfPath && (
+                        <span title="Cover letter PDF" className="text-blue-400">
+                          <FileIcon className="w-3.5 h-3.5" />
+                        </span>
+                      )}
+                      {!app.tailoredResume?.pdfPath && app.tailoredResume && (
+                        <span title="Resume tailored (LaTeX only — no PDF)" className="text-yellow-400">
+                          <FileText className="w-3.5 h-3.5" />
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-end gap-1">
+                      <a
+                        href={app.job.applyUrl || app.job.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1.5 text-gray-500 hover:text-blue-400 transition-colors"
+                        title="Open job posting"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+
+                      {/* PENDING → show Approve + Apply Now */}
+                      {app.status === "PENDING" && (
+                        <>
+                          <button
+                            disabled={busy}
+                            onClick={() => approve(app.id)}
+                            className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded transition-colors"
+                          >
+                            Approve
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() => submit(app.id)}
+                            className="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded transition-colors flex items-center gap-1"
+                            title="Approve and apply in one click"
+                          >
+                            <Zap className="w-3 h-3" />
+                            Apply Now
+                          </button>
+                        </>
+                      )}
+
+                      {/* APPROVED → show Apply */}
+                      {app.status === "APPROVED" && (
+                        <button
+                          disabled={busy}
+                          onClick={() => submit(app.id)}
+                          className="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded transition-colors flex items-center gap-1"
+                        >
+                          {busy ? (
+                            <>
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              ...
+                            </>
+                          ) : (
+                            <>
+                              <Send className="w-3 h-3" />
+                              Apply
+                            </>
+                          )}
+                        </button>
+                      )}
+
+                      {/* FAILED → Retry */}
+                      {app.status === "FAILED" && (
+                        <button
+                          disabled={busy}
+                          onClick={() => submit(app.id)}
+                          className="text-xs px-2 py-1 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 text-white rounded transition-colors flex items-center gap-1"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          Retry
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {applications.length === 0 && (
+          <div className="text-center py-12 text-gray-600">
+            No applications yet. Run the automation to scrape + tailor + apply.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

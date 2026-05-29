@@ -18,6 +18,7 @@ export async function POST(req: NextRequest) {
     requireSponsorship = false,
     experienceLevels = ["entry", "mid"],
     platforms = ["linkedin", "indeed"],
+    maxJobs = 20,
     resumeId,
   } = body;
 
@@ -30,10 +31,11 @@ export async function POST(req: NextRequest) {
     requireSponsorship,
     experienceLevels,
     platforms,
+    maxJobs,
   };
 
   // Run scraping in background
-  scrapingOrchestrator.startScraping(config).then(async () => {
+  scrapingOrchestrator.startScraping(config, resumeId).then(async () => {
     if (resumeId) {
       await scrapingOrchestrator.analyzeAndScoreJobs(resumeId);
     }
