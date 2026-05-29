@@ -22,7 +22,19 @@ function saveProjectId(id: string): void {
   writeFileSync(PROJECT_ID_FILE, id);
 }
 
-export async function compileLatexToPDF(latexContent: string, outputDir: string): Promise<string | null> {
+// Overleaf drives a single browser profile + project, so two compilations must
+// never overlap. Chain every call through one promise so they run strictly
+// one-at-a-time, even when the pipeline fires several tailor jobs concurrently.
+let overleafQueue: Promise<unknown> = Promise.resolve();
+
+export function compileLatexToPDF(latexContent: string, outputDir: string): Promise<string | null> {
+  const result = overleafQueue.then(() => compileLatexToPDFInner(latexContent, outputDir));
+  // Keep the chain alive regardless of this call's success/failure.
+  overleafQueue = result.catch(() => undefined);
+  return result;
+}
+
+async function compileLatexToPDFInner(latexContent: string, outputDir: string): Promise<string | null> {
   mkdirSync(PROFILE_DIR, { recursive: true });
   ensureDir(outputDir);
 
