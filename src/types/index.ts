@@ -196,10 +196,12 @@ export interface ExcelJobRow {
   location: string;
   salary: string;
   jobType: string;
+  isFit: string; // "Yes" or "No"
   matchScore: number;
   atsScore: number;
   requiredSkills: string;
   missingSkills: string;
+  matchReason: string;
   easyApplyAvailable: boolean;
   directApplyLink: string;
   platform: string;
@@ -220,6 +222,14 @@ export interface SearchConfig {
   experienceLevels: string[];
   minSalary?: number;
   platforms: string[];
+  maxJobs?: number; // Total jobs to scrape across all platforms in one session
+}
+
+export interface ScraperOptions {
+  maxJobs?: number;
+  remote?: boolean;
+  experienceLevels?: string[];
+  onJob?: (job: ScrapedJob) => Promise<void>;
 }
 
 export interface CustomSite {

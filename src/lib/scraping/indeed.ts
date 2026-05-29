@@ -1,29 +1,39 @@
 import { BaseScraper } from "./base-scraper";
-import { ScrapedJob } from "@/types";
+import { ScrapedJob, ScraperOptions } from "@/types";
 import { Logger } from "@/lib/logging/logger";
 import { prisma } from "@/lib/db/prisma";
 
 export class IndeedScraper extends BaseScraper {
+  private maxJobs = 50;
+  private collected = 0;
+  private onJob?: (job: ScrapedJob) => Promise<void>;
+
   async scrapeJobs(
     keywords: string[],
     locations: string[],
-    _options?: Record<string, unknown>
+    options?: ScraperOptions
   ): Promise<ScrapedJob[]> {
+    this.maxJobs = options?.maxJobs ?? 50;
+    this.onJob = options?.onJob;
+    this.collected = 0;
+
     const allJobs: ScrapedJob[] = [];
 
-    await Logger.info("INDEED", "Launching browser with persistent profile...");
+    await Logger.info("INDEED", `Launching browser — target: ${this.maxJobs} jobs`);
     await this.init("indeed");
 
     try {
-      for (const keyword of keywords.slice(0, 3)) {
-        for (const location of locations.slice(0, 2)) {
-          await Logger.info("INDEED", `=== Searching: "${keyword}" in "${location}" ===`);
+      outer: for (const keyword of keywords) {
+        for (const location of locations) {
+          if (this.collected >= this.maxJobs) break outer;
+
+          await Logger.info("INDEED", `═══ Searching "${keyword}" in "${location}" (${this.collected}/${this.maxJobs} so far) ═══`);
           const jobs = await this.scrapeSearch(keyword, location);
           allJobs.push(...jobs);
           await this.delay(3000, 6000);
         }
       }
-      await Logger.success("INDEED", `Session done — ${allJobs.length} new jobs collected`);
+      await Logger.success("INDEED", `Session done — ${allJobs.length} jobs collected`);
     } finally {
       await this.cleanup();
     }
@@ -46,7 +56,6 @@ export class IndeedScraper extends BaseScraper {
         if (!cleared) return jobs;
       }
 
-      // Type keyword in search bar
       await Logger.info("INDEED", `Typing keyword "${keyword}"...`);
       const kwTyped = await this.typeHumanLike(
         ["#text-input-what", 'input[name="q"]', 'input[aria-label*="job title"]'],
@@ -68,12 +77,12 @@ export class IndeedScraper extends BaseScraper {
         onResultsPage = true;
       }
     } catch (e) {
-      await Logger.warn("INDEED", `Homepage navigation issue: ${e} — using direct search URL`);
+      await Logger.warn("INDEED", `Homepage navigation issue: ${e} — using direct URL`);
     }
 
     if (!onResultsPage) {
       const searchUrl = `https://www.indeed.com/jobs?q=${encodeURIComponent(keyword)}&l=${encodeURIComponent(location)}&sort=date`;
-      await Logger.info("INDEED", `Navigating to search URL directly...`);
+      await Logger.info("INDEED", `Direct URL: ${searchUrl}`);
       try {
         await this.page!.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
         await this.delay(2500, 4000);
@@ -83,24 +92,48 @@ export class IndeedScraper extends BaseScraper {
       }
     }
 
-    if (await this.detectBotWall()) {
+    if (await this.detectBotWall() || await this.detectIndeedBlock()) {
       const cleared = await this.waitForUserIntervention("INDEED");
       if (!cleared) return jobs;
     }
 
-    // Collect job IDs from results page
+    // Dismiss cookie/popup banners before collecting
+    await this.dismissPopups();
+
+    // Scroll to trigger lazy-loaded cards
+    await this.scrollResultsPage();
+
     await Logger.info("INDEED", "Collecting job cards...");
     const jobCards = await this.collectJobCards();
     if (jobCards.length === 0) {
-      await Logger.warn("INDEED", "No job cards found on results page");
-      return jobs;
+      await Logger.warn("INDEED", "No job cards found — taking debug screenshot");
+      await this.debugScreenshot("indeed-no-cards");
+
+      // Re-check for bot wall now that we've waited longer
+      if (await this.detectBotWall() || await this.detectIndeedBlock()) {
+        const cleared = await this.waitForUserIntervention("INDEED");
+        if (cleared) {
+          // User cleared the block — try again
+          const retryCards = await this.collectJobCards();
+          if (retryCards.length === 0) return jobs;
+          jobCards.push(...retryCards);
+        } else {
+          return jobs;
+        }
+      } else {
+        return jobs;
+      }
     }
     await Logger.info("INDEED", `Found ${jobCards.length} job cards`);
 
     for (let i = 0; i < jobCards.length; i++) {
+      if (this.collected >= this.maxJobs) {
+        await Logger.info("INDEED", `Reached limit (${this.maxJobs}) — stopping`);
+        break;
+      }
+
       const { jobId, titleHint, companyHint, locationHint } = jobCards[i];
 
-      // Deduplication
       const existing = await prisma.job.findFirst({
         where: { platform: "indeed", platformJobId: jobId },
         select: { jobTitle: true, companyName: true },
@@ -110,7 +143,7 @@ export class IndeedScraper extends BaseScraper {
         continue;
       }
 
-      await Logger.info("INDEED", `[${i + 1}/${jobCards.length}] Opening job ${jobId} (${titleHint} @ ${companyHint})...`);
+      await Logger.info("INDEED", `[${i + 1}/${jobCards.length}] Opening: ${titleHint} @ ${companyHint}`);
 
       const jobUrl = `https://www.indeed.com/viewjob?jk=${jobId}`;
       try {
@@ -123,15 +156,23 @@ export class IndeedScraper extends BaseScraper {
 
       const job = await this.extractJobDetails(jobId, titleHint, companyHint, locationHint);
       if (job) {
-        await Logger.success("INDEED", `Scraped: "${job.jobTitle}" @ ${job.companyName} [${job.location}]`);
         jobs.push(job);
+        this.collected++;
+        await Logger.success("INDEED", `[${this.collected}/${this.maxJobs}] Scraped: "${job.jobTitle}" @ ${job.companyName} [${job.location}] — desc: ${job.description.length} chars`);
+
+        if (this.onJob) {
+          try {
+            await this.onJob(job);
+          } catch (e) {
+            await Logger.warn("INDEED", `onJob callback failed: ${e}`);
+          }
+        }
       }
 
       await this.page!.evaluate(() => window.scrollBy(0, Math.floor(Math.random() * 300 + 100)));
       await this.delay(800, 2000);
 
-      // Go back to results for next job
-      if (i < jobCards.length - 1) {
+      if (i < jobCards.length - 1 && this.collected < this.maxJobs) {
         await this.page!.goBack({ waitUntil: "domcontentloaded" }).catch(() => {});
         await this.delay(1200, 2200);
       }
@@ -140,54 +181,153 @@ export class IndeedScraper extends BaseScraper {
     return jobs;
   }
 
-  private async collectJobCards(): Promise<Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }>> {
-    const results: Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }> = [];
+  // Detect Indeed's specific block pages — they don't always trigger the generic bot wall.
+  private async detectIndeedBlock(): Promise<boolean> {
+    try {
+      const url = this.page?.url() ?? "";
+      if (url.includes("/blocked") || url.includes("hcaptcha") || url.includes("/_403")) return true;
 
-    const cardSelectors = [".job_seen_beacon", ".resultContent", ".tapItem"];
-    let cards: import("playwright").ElementHandle<SVGElement | HTMLElement>[] = [];
-    for (const sel of cardSelectors) {
+      const bodyText = (await this.page!.evaluate(
+        () => (document.body?.innerText ?? "").slice(0, 4000).toLowerCase()
+      )) as string;
+
+      return (
+        bodyText.includes("additional verification") ||
+        bodyText.includes("please prove") ||
+        bodyText.includes("cloudflare") ||
+        bodyText.includes("checking your browser") ||
+        bodyText.includes("attention required") ||
+        // Empty results page sometimes signals soft block
+        (bodyText.includes("0 jobs") && bodyText.length < 500)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  // Dismiss cookie consent / popup overlays that block scraping
+  private async dismissPopups(): Promise<void> {
+    const dismissSelectors = [
+      '#onetrust-accept-btn-handler',
+      'button[id*="accept"]',
+      'button[aria-label*="close"]',
+      'button[aria-label*="Close"]',
+      '.icl-CloseButton',
+      '[data-testid="close-button"]',
+      'button:has-text("Accept")',
+      'button:has-text("Got it")',
+      'button:has-text("Continue")',
+    ];
+    for (const sel of dismissSelectors) {
       try {
-        await this.page!.waitForSelector(sel, { timeout: 8000 });
-        cards = await this.page!.$$(sel);
-        if (cards.length > 0) {
-          await Logger.info("INDEED", `Using card selector: ${sel} (${cards.length} found)`);
-          break;
+        const btn = await this.page!.$(sel);
+        if (btn) {
+          const visible = await btn.isVisible().catch(() => false);
+          if (visible) {
+            await btn.click({ timeout: 2000 }).catch(() => {});
+            await this.delay(300, 600);
+          }
         }
+      } catch { /* ignore */ }
+    }
+  }
+
+  private async scrollResultsPage(): Promise<void> {
+    try {
+      for (let i = 0; i < 3; i++) {
+        await this.page!.evaluate(() => window.scrollBy(0, 1500));
+        await this.delay(700, 1100);
+      }
+      await this.page!.evaluate(() => window.scrollTo(0, 0));
+      await this.delay(300, 600);
+    } catch { /* ignore */ }
+  }
+
+  private async debugScreenshot(label: string): Promise<void> {
+    try {
+      const { homedir } = await import("os");
+      const { join } = await import("path");
+      const { mkdirSync } = await import("fs");
+      const dir = join(homedir(), ".job-agent-profiles", "debug");
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, `${label}-${Date.now()}.png`);
+      await this.page!.screenshot({ path, fullPage: false });
+      await Logger.info("INDEED", `Debug screenshot saved: ${path}`);
+    } catch { /* ignore */ }
+  }
+
+  private async collectJobCards(): Promise<Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }>> {
+    // Wait for ANY signal that results have loaded (new or old Indeed UI)
+    const anyResultSelectors = [
+      "[data-jk]",
+      "div[data-testid='slider_item']",
+      ".job_seen_beacon",
+      ".resultContent",
+      "#mosaic-jobResults",
+      ".jobsearch-ResultsList",
+    ];
+
+    for (const sel of anyResultSelectors) {
+      try {
+        await this.page!.waitForSelector(sel, { timeout: 10000 });
+        await Logger.info("INDEED", `Results signal found: ${sel}`);
+        break;
       } catch { /* try next */ }
     }
 
-    for (const card of cards) {
-      try {
-        const data = await card.evaluate((el) => {
-          // Job ID from the link's data-jk attribute
-          const link = el.querySelector("h2 a[data-jk], a[data-jk]") as HTMLAnchorElement | null;
-          const jobId = link?.getAttribute("data-jk") ?? null;
-          if (!jobId) return null;
+    // Wait briefly for cards to fully render
+    await this.delay(1500, 2500);
 
-          const rawTitle =
-            el.querySelector("h2 a span[title]")?.getAttribute("title") ||
-            el.querySelector("h2 a span")?.textContent?.trim() ||
-            link?.getAttribute("aria-label") ||
-            el.querySelector("h2")?.textContent?.trim() ||
-            "";
-          // Strip "full details of " aria-label prefix
-          const title = rawTitle.replace(/^full details of\s+/i, "").trim();
+    // Collect via [data-jk] attribute — works for both old and new Indeed UI
+    const results = await this.page!.evaluate(() => {
+      const out: Array<{ jobId: string; titleHint: string; companyHint: string; locationHint: string }> = [];
+      const seen = new Set<string>();
 
-          const company =
-            el.querySelector('[data-testid="company-name"]')?.textContent?.trim() ||
-            el.querySelector(".companyName")?.textContent?.trim() ||
-            "";
+      // Strategy: find every element that has [data-jk], walk up to its card container
+      const jkElements = document.querySelectorAll("[data-jk]");
+      for (const link of Array.from(jkElements)) {
+        const jobId = link.getAttribute("data-jk");
+        if (!jobId || seen.has(jobId)) continue;
+        seen.add(jobId);
 
-          const location =
-            el.querySelector('[data-testid="text-location"]')?.textContent?.trim() ||
-            el.querySelector(".companyLocation")?.textContent?.trim() ||
-            "";
+        // Walk up to find the card container
+        const card = link.closest(
+          ".job_seen_beacon, .resultContent, div[data-testid='slider_item'], .tapItem, li, td"
+        ) || (link.parentElement as HTMLElement | null) || link;
 
-          return { jobId, titleHint: title, companyHint: company, locationHint: location };
-        });
+        const rawTitle =
+          (link as HTMLElement).getAttribute("aria-label") ||
+          card.querySelector("h2 a span[title]")?.getAttribute("title") ||
+          card.querySelector("h2 a span")?.textContent?.trim() ||
+          card.querySelector("h2")?.textContent?.trim() ||
+          (link as HTMLElement).textContent?.trim() ||
+          "";
 
-        if (data?.jobId) results.push(data);
-      } catch { /* skip bad card */ }
+        const title = rawTitle.replace(/^full details of\s+/i, "").trim();
+
+        const company =
+          card.querySelector('[data-testid="company-name"]')?.textContent?.trim() ||
+          card.querySelector('[data-testid="inlineHeader-companyName"]')?.textContent?.trim() ||
+          card.querySelector(".companyName")?.textContent?.trim() ||
+          card.querySelector('a[data-testid="company-name"]')?.textContent?.trim() ||
+          "";
+
+        const location =
+          card.querySelector('[data-testid="text-location"]')?.textContent?.trim() ||
+          card.querySelector('[data-testid="job-location"]')?.textContent?.trim() ||
+          card.querySelector(".companyLocation")?.textContent?.trim() ||
+          "";
+
+        if (title) {
+          out.push({ jobId, titleHint: title, companyHint: company, locationHint: location });
+        }
+      }
+
+      return out;
+    });
+
+    if (results.length > 0) {
+      await Logger.info("INDEED", `Collected ${results.length} cards via [data-jk] walker`);
     }
 
     return results;
@@ -201,6 +341,10 @@ export class IndeedScraper extends BaseScraper {
   ): Promise<ScrapedJob | null> {
     try {
       await this.page!.waitForSelector("h1, #jobDescriptionText", { timeout: 8000 });
+
+      // Expand description if there's a "show more" / "view full description" button
+      await this.expandJobDescription();
+      await this.delay(300, 600);
 
       const titleSelectors = [
         "h1[data-testid='jobsearch-JobInfoHeader-title']",
@@ -240,7 +384,7 @@ export class IndeedScraper extends BaseScraper {
       }
 
       const description = await this.page!
-        .$eval("#jobDescriptionText, .jobsearch-jobDescriptionText", (e) => e.textContent?.trim() ?? "")
+        .$eval("#jobDescriptionText, .jobsearch-jobDescriptionText", (e) => (e as HTMLElement).innerText?.trim() ?? "")
         .catch(() => "");
 
       const salary = await this.page!
