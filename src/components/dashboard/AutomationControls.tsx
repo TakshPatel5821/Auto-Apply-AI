@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Play, Pause, Square, Zap, Search, BarChart2, FileEdit, Send as SendIcon } from "lucide-react";
 
 interface AutomationState {
@@ -29,14 +29,40 @@ export function AutomationControls({
 }) {
   const [mode, setMode] = useState<"auto" | "manual">("manual");
   const [maxApps, setMaxApps] = useState(20);
+  const [maxJobs, setMaxJobs] = useState(10);
+  const [platforms, setPlatforms] = useState<string[]>(["linkedin", "indeed"]);
   const [loading, setLoading] = useState(false);
+
+  // Load the saved source selection so it survives reloads.
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d) => {
+        const saved = d?.settings?.enabledPlatforms;
+        if (Array.isArray(saved) && saved.length > 0) setPlatforms(saved);
+      })
+      .catch(() => {});
+  }, []);
+
+  function togglePlatform(id: string) {
+    const next = platforms.includes(id)
+      ? platforms.filter((p) => p !== id)
+      : [...platforms, id];
+    setPlatforms(next);
+    // Persist immediately so the choice is remembered.
+    fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabledPlatforms: next }),
+    }).catch(() => {});
+  }
 
   async function startAutomation() {
     setLoading(true);
     await fetch("/api/automation/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode, maxApplicationsPerDay: maxApps }),
+      body: JSON.stringify({ mode, maxApplicationsPerDay: maxApps, maxJobsToScrape: maxJobs, platforms }),
     });
     setLoading(false);
     onRefresh();
@@ -66,7 +92,8 @@ export function AutomationControls({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         resumeId: activeResume?.id,
-        platforms: ["linkedin", "indeed"],
+        platforms,
+        maxJobs,
       }),
     });
     setLoading(false);
@@ -139,8 +166,65 @@ export function AutomationControls({
           </div>
 
           <div>
-            <label className="text-xs text-gray-400 block mb-2">
-              Max Applications / Day: {maxApps}
+            <label className="text-xs text-gray-400 block mb-2">Job Sources</label>
+            <div className="grid grid-cols-2 gap-2">
+              {PLATFORMS.map((p) => {
+                const on = platforms.includes(p.id);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => togglePlatform(p.id)}
+                    aria-pressed={on}
+                    className={`flex items-center justify-between py-2 px-3 rounded-lg text-sm font-medium border transition-colors ${
+                      on
+                        ? "bg-blue-600 border-blue-600 text-white"
+                        : "bg-gray-800 border-gray-700 text-gray-500 hover:border-gray-600"
+                    }`}
+                  >
+                    <span>{p.label}</span>
+                    <span className={`w-2 h-2 rounded-full ${on ? "bg-white" : "bg-gray-600"}`} />
+                  </button>
+                );
+              })}
+            </div>
+            {platforms.length === 0 && (
+              <p className="text-xs text-red-400 mt-2">Select at least one job source</p>
+            )}
+          </div>
+
+          <div>
+            <label className="text-xs text-gray-400 flex items-center justify-between mb-2">
+              <span>Jobs to Scrape This Session</span>
+              <span className="font-mono text-blue-400 font-semibold">{maxJobs}</span>
+            </label>
+            <div className="flex gap-2 items-center">
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={maxJobs}
+                onChange={(e) => setMaxJobs(Math.max(1, Math.min(500, parseInt(e.target.value) || 1)))}
+                className="w-20 px-2 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-blue-500"
+              />
+              <input
+                type="range"
+                min={1}
+                max={100}
+                value={maxJobs}
+                onChange={(e) => setMaxJobs(parseInt(e.target.value))}
+                className="flex-1 accent-blue-500"
+              />
+            </div>
+            <p className="text-[10px] text-gray-500 mt-1">
+              Scraper stops once it finds this many new job postings.
+            </p>
+          </div>
+
+          <div>
+            <label className="text-xs text-gray-400 flex items-center justify-between mb-2">
+              <span>Max Applications / Day</span>
+              <span className="font-mono text-blue-400 font-semibold">{maxApps}</span>
             </label>
             <input
               type="range"
@@ -159,7 +243,7 @@ export function AutomationControls({
           <>
             <button
               onClick={startAutomation}
-              disabled={loading || resumes.length === 0}
+              disabled={loading || resumes.length === 0 || platforms.length === 0}
               className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg font-medium text-sm transition-colors"
             >
               <Play className="w-4 h-4" />
@@ -167,8 +251,8 @@ export function AutomationControls({
             </button>
             <button
               onClick={startScrapeOnly}
-              disabled={loading}
-              className="flex items-center justify-center gap-1 py-2.5 px-3 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition-colors"
+              disabled={loading || platforms.length === 0}
+              className="flex items-center justify-center gap-1 py-2.5 px-3 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-gray-300 rounded-lg text-sm transition-colors"
             >
               Scrape Only
             </button>
@@ -203,6 +287,13 @@ export function AutomationControls({
     </div>
   );
 }
+
+// Built-in job-board scrapers the user can toggle on/off before a run.
+// Custom sites are managed separately in settings and run when enabled there.
+const PLATFORMS = [
+  { id: "linkedin", label: "LinkedIn" },
+  { id: "indeed", label: "Indeed" },
+];
 
 const PHASES = [
   { label: "Scrape", icon: Search, match: "scraping" },
