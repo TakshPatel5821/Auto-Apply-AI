@@ -16,8 +16,9 @@ dist/
 .env.test.local
 .env.production.local
 
-# Application data
-applications/
+# Application data (generated résumés/PDFs at repo root only — anchored so it
+# does NOT match the src/app/api/applications route folder)
+/applications/
 logs/
 *.pdf
 *.docx
