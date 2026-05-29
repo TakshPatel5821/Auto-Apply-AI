@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { StatsCards } from "@/components/dashboard/StatsCards";
 import { AnalyticsPanel } from "@/components/dashboard/AnalyticsPanel";
+import { CareerAdvisorPanel } from "@/components/dashboard/CareerAdvisorPanel";
 import { AutomationControls } from "@/components/dashboard/AutomationControls";
 import { ResumeUpload } from "@/components/dashboard/ResumeUpload";
 import { CustomSitesPanel } from "@/components/dashboard/CustomSitesPanel";
@@ -21,9 +22,10 @@ import {
   Brain,
   RefreshCw,
   BarChart3,
+  Compass,
 } from "lucide-react";
 
-type Tab = "jobs" | "applications" | "analytics" | "resume" | "memory" | "settings";
+type Tab = "jobs" | "applications" | "analytics" | "career" | "resume" | "memory" | "settings";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -155,6 +157,7 @@ export default function DashboardPage() {
     { id: "jobs", label: "Jobs", icon: Briefcase, count: stats.totalJobs },
     { id: "applications", label: "Applications", icon: Send, count: stats.totalApplications },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
+    { id: "career", label: "Career", icon: Compass },
     { id: "resume", label: "Resume", icon: FileText, count: resumes.length },
     { id: "memory", label: "Memory", icon: Brain, count: memories.length },
     { id: "settings", label: "Settings", icon: Settings },
@@ -300,6 +303,8 @@ export default function DashboardPage() {
               )}
 
               {activeTab === "analytics" && <AnalyticsPanel />}
+
+              {activeTab === "career" && <CareerAdvisorPanel />}
 
               {activeTab === "resume" && (
                 <div className="space-y-6">
