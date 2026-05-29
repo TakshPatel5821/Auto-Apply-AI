@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { mode = "manual", maxApplicationsPerDay = 20 } = body;
+  const { mode = "manual", maxApplicationsPerDay = 20, maxJobsToScrape = 20, platforms } = body;
 
   const activeResume = await prisma.resume.findFirst({
     where: { userId: "local", isActive: true },
@@ -39,7 +39,13 @@ export async function POST(req: NextRequest) {
     experienceLevels: settings?.experienceLevels?.length
       ? settings.experienceLevels
       : ["entry", "mid"],
-    platforms: ["linkedin", "indeed"],
+    platforms:
+      Array.isArray(platforms) && platforms.length > 0
+        ? platforms
+        : settings?.enabledPlatforms?.length
+          ? settings.enabledPlatforms
+          : ["linkedin", "indeed"],
+    maxJobs: maxJobsToScrape,
   };
 
   automationEngine.start({
@@ -47,6 +53,7 @@ export async function POST(req: NextRequest) {
     resumeId: activeResume.id,
     mode: mode as "auto" | "manual",
     maxApplicationsPerDay,
+    maxJobsToScrape,
   });
 
   return NextResponse.json({

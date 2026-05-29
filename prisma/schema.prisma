@@ -28,6 +28,7 @@ model UserSettings {
   remoteOnly        Boolean  @default(false)
   requireSponsorship Boolean @default(false)
   experienceLevels  String[] @default([])
+  enabledPlatforms  String[] @default(["linkedin", "indeed"])
   minSalary         Int?
   maxApplicationsPerDay Int  @default(20)
   autoApply         Boolean  @default(false)
