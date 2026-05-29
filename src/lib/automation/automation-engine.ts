@@ -119,7 +119,31 @@ class AutomationEngine {
         `Scraping done: ${result.newCount} new (${result.fitCount} fit) — finishing ${this.queue.length} queued job(s)...`
       );
 
-      // Wait for the per-job pipeline to drain everything the scraper queued.
+      // Also process the existing fit backlog: jobs already scraped/analyzed
+      // (via Scrape Only or earlier runs, incl. ones stuck mid-tailor) that
+      // never produced an application. Without this they're stranded forever,
+      // since duplicates are never re-scraped.
+      if (!this.stopRequested) {
+        const backlog = await prisma.job.findMany({
+          where: {
+            status: { in: ["FOUND", "ANALYZED", "TAILORING"] },
+            matchScore: { lte: 6 },
+            isBlacklisted: false,
+            isSpam: false,
+            isDuplicate: false,
+            application: null,
+          },
+          orderBy: { matchScore: "asc" },
+          select: { id: true },
+          take: 50,
+        });
+        if (backlog.length) {
+          await Logger.info("ENGINE", `Queuing ${backlog.length} existing fit job(s) for tailoring`);
+          for (const j of backlog) this.enqueueJob(j.id);
+        }
+      }
+
+      // Wait for the per-job pipeline to drain everything queued.
       await this.waitForQueue();
 
       if (!this.stopRequested) {
@@ -154,6 +178,7 @@ class AutomationEngine {
   /** Called by the scraper for each fit job. Enqueues and kicks the worker. */
   private enqueueJob(jobId: string): void {
     if (this.stopRequested) return;
+    if (this.queue.includes(jobId)) return;
     this.queue.push(jobId);
     void this.runQueue();
   }
@@ -238,9 +263,11 @@ class AutomationEngine {
       await prisma.job.update({ where: { id: jobId }, data: { status: "ANALYZED" } }).catch(() => {});
     }
 
-    // Only tailor real fits (lower = better; ≤ 6 is "fit").
-    if (matchScore > 6) {
-      await Logger.info("ENGINE", `Skipping tailor for ${job.companyName} — weak fit (${matchScore}/10)`);
+    // The fast filter already decided this job is a fit; the Claude re-score
+    // above only refines the displayed number. Tailor it unless Claude rates it
+    // a clear no-go (9-10), so genuine fits are never silently dropped.
+    if (matchScore >= 9) {
+      await Logger.info("ENGINE", `Skipping tailor for ${job.companyName} — Claude rated it a poor fit (${matchScore}/10)`);
       return;
     }
     if (this.stopRequested) return;
