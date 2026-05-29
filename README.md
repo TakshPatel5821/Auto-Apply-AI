@@ -104,6 +104,8 @@ It can:
 ### Install
 
 ```bash
+git clone https://github.com/TakshPatel5821/ai-job-agent.git
+cd ai-job-agent
 npm install
 npx playwright install chromium
 ```
@@ -124,7 +126,13 @@ AUTH_SECRET=minimum_32_character_random_secret
 DATABASE_URL=postgresql://postgres:password@localhost:5432/job_agent
 
 ANTHROPIC_API_KEY=your_claude_key
+ANTHROPIC_MODEL=claude-opus-4-8
 OPENAI_API_KEY=optional_openai_key
+
+# Optional local fallback: if ANTHROPIC_API_KEY is empty, or AI_PROVIDER=ollama,
+# all AI work runs locally through Ollama instead of Claude.
+AI_PROVIDER=
+OLLAMA_BASE_URL=http://localhost:11434/v1
 
 LINKEDIN_COOKIE=optional_linkedin_li_at_cookie
 
@@ -136,7 +144,16 @@ JOB_SEARCH_KEYWORDS=Software Engineer,Frontend Engineer
 JOB_SEARCH_LOCATIONS=Remote,New York
 BLACKLIST_COMPANIES=Company One,Company Two
 AUTOMATION_MAX_APPLICATIONS_PER_DAY=20
+
+# Optional: re-enable the slow Ollama semantic pre-filter during analysis.
+# Off by default — Claude scores fit jobs directly, which is much faster.
+USE_SEMANTIC_FILTER=false
 ```
+
+Notes:
+
+- `ANTHROPIC_MODEL` defaults to `claude-opus-4-8`. Set `claude-sonnet-4-6` for a cheaper, faster option — the same `effort` and adaptive-thinking behavior applies.
+- If `ANTHROPIC_API_KEY` is empty (or `AI_PROVIDER=ollama`), every AI helper falls back to local Ollama models.
 
 ### Database
 
@@ -190,7 +207,7 @@ Main visible areas:
 
 - **Stats cards**: totals for jobs, applications, interviews, and match data.
 - **Quick setup panel**: helps save common keywords and experience levels.
-- **Automation controls**: starts, pauses, resumes, or stops automation.
+- **Automation controls**: starts, pauses, resumes, or stops automation, and toggles which job sources (LinkedIn, Indeed) to scrape. The choice is saved to settings and restored on reload.
 - **Jobs table**: shows scraped jobs, match score, status, platform, and links.
 - **Applications table**: shows generated or submitted applications.
 - **Resume upload**: uploads a resume and shows parse status.
@@ -396,6 +413,8 @@ Important functions:
 - `claudeFullTailor(resumeData, originalLatex, jobDescription, jobTitle, companyName)`: combines analysis, resume tailoring, and cover letter generation.
 - `claudeGenerateLatexResume(data)`: creates base LaTeX resume content from parsed resume data.
 
+The helpers default to model `claude-opus-4-8` (override with `ANTHROPIC_MODEL`). Cheap calls (parsing, scoring, form answers) run at low `effort` to save tokens, while generation calls (tailoring, cover letters, base LaTeX) run at higher effort and stream the response so long outputs do not hit request timeouts. When no Anthropic key is configured, all of these fall back to local Ollama models.
+
 ### 7. Resume Tailoring
 
 File:
@@ -593,7 +612,7 @@ The database schema is in `prisma/schema.prisma`.
 Main models:
 
 - `User`: local user record. This app currently uses the single user ID `local`.
-- `UserSettings`: search settings, platform choices, auto-apply settings, blacklist, preferred tech, and custom sites.
+- `UserSettings`: search settings, enabled job sources (`enabledPlatforms`), auto-apply settings, blacklist, preferred tech, and custom sites.
 - `Resume`: uploaded resume files and parsed resume data.
 - `TailoredResume`: generated LaTeX/PDF resume versions tied to a job.
 - `CoverLetter`: generated cover letters tied to a job.
