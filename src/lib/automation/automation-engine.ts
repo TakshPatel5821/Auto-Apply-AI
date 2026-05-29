@@ -3,6 +3,7 @@ import { join } from "path";
 import { prisma } from "@/lib/db/prisma";
 import { scrapingOrchestrator } from "@/lib/scraping/scraping-orchestrator";
 import { tailorResumeForJob } from "./resume-tailor";
+import { claudeMatchJobToResume } from "@/lib/ai/claude";
 import { ApplyEngine } from "./apply-engine";
 import { Logger } from "@/lib/logging/logger";
 import { AutomationState, SearchConfig } from "@/types";
@@ -37,6 +38,15 @@ class AutomationEngine {
   private applyEngine = new ApplyEngine();
   private stopRequested = false;
 
+  // ─── Per-job streaming pipeline state ─────────────────────────────────────
+  private queue: string[] = [];
+  private queueWorking = false;
+  private tailoredCount = 0;
+  private runResumeId = "";
+  private runMode: "auto" | "manual" = "manual";
+  private runMaxApps = 20;
+  private runResumeData: Record<string, unknown> = {};
+
   getState(): AutomationState {
     return { ...this.state };
   }
@@ -46,12 +56,17 @@ class AutomationEngine {
     resumeId: string;
     mode: "auto" | "manual";
     maxApplicationsPerDay?: number;
+    maxJobsToScrape?: number;
   }): Promise<void> {
     if (this.state.isRunning) {
-      throw new Error("Automation already running");
+      await Logger.warn("ENGINE", "Automation already running — ignoring duplicate start");
+      return;
     }
 
     this.stopRequested = false;
+    this.queue = [];
+    this.queueWorking = false;
+    this.tailoredCount = 0;
     this.state = {
       isRunning: true,
       isPaused: false,
@@ -64,158 +79,66 @@ class AutomationEngine {
       lastActivity: new Date(),
     };
 
+    // Inject maxJobs limit into search config
+    const searchConfig: SearchConfig = {
+      ...config.searchConfig,
+      maxJobs: config.maxJobsToScrape ?? config.searchConfig.maxJobs ?? 20,
+    };
+
+    this.runResumeId = config.resumeId;
+    this.runMode = config.mode;
+    this.runMaxApps = config.maxApplicationsPerDay ?? 20;
+
+    // Load the resume once — every per-job analyze/tailor reuses this.
+    const resume = await prisma.resume.findUnique({ where: { id: config.resumeId } });
+    this.runResumeData = (resume?.parsedData as Record<string, unknown>) || {};
+
     await Logger.info("ENGINE", `╔══════════════════════════════════════════╗`);
     await Logger.info("ENGINE", `║  Automation started — mode: ${config.mode.toUpperCase().padEnd(13)}║`);
     await Logger.info("ENGINE", `╚══════════════════════════════════════════╝`);
-    await Logger.info("ENGINE", `Platforms: ${config.searchConfig.platforms.join(", ")}`);
-    await Logger.info("ENGINE", `Keywords: ${config.searchConfig.keywords.join(", ")}`);
-    await Logger.info("ENGINE", `Locations: ${config.searchConfig.locations.join(", ")}`);
+    await Logger.info("ENGINE", `Platforms: ${searchConfig.platforms.join(", ")}`);
+    await Logger.info("ENGINE", `Keywords: ${searchConfig.keywords.join(", ")}`);
+    await Logger.info("ENGINE", `Locations: ${searchConfig.locations.join(", ")}`);
+    await Logger.info("ENGINE", `Max jobs to scrape: ${searchConfig.maxJobs}`);
 
     try {
-      // ─── Step 1: Scrape jobs ─────────────────────────────────────────────────
-      this.state.currentAction = "Step 1/4: Scraping jobs...";
-      await Logger.info("ENGINE", "─── Step 1: Scraping jobs ───");
+      // Streaming pipeline: scraping uses the cheap local filter; each fit job is
+      // handed off to the Claude pipeline (analyze → tailor → Overleaf CV → apply)
+      // the moment it's found, running concurrently with continued scraping.
+      this.state.currentAction = `Scraping & processing up to ${searchConfig.maxJobs} jobs...`;
+      await Logger.info("ENGINE", "─── Streaming pipeline: scrape → analyze → tailor → CV per job ───");
 
-      const beforeScrape = await prisma.job.count();
-      await scrapingOrchestrator.startScraping(config.searchConfig);
-      const afterScrape = await prisma.job.count();
-      this.state.jobsScraped = afterScrape - beforeScrape;
+      const result = await scrapingOrchestrator.startScraping(
+        searchConfig,
+        config.resumeId,
+        (jobId) => this.enqueueJob(jobId)
+      );
+      this.state.jobsScraped = result.newCount;
+      await Logger.success(
+        "ENGINE",
+        `Scraping done: ${result.newCount} new (${result.fitCount} fit) — finishing ${this.queue.length} queued job(s)...`
+      );
 
-      await Logger.success("ENGINE", `Scraping done — ${this.state.jobsScraped} new jobs added`);
-      await saveExcelTracker();
+      // Wait for the per-job pipeline to drain everything the scraper queued.
+      await this.waitForQueue();
 
-      if (this.stopRequested) return;
-
-      // ─── Step 2: Analyze & score ──────────────────────────────────────────────
-      this.state.currentAction = `Step 2/4: Analyzing ${this.state.jobsScraped} new jobs...`;
-      await Logger.info("ENGINE", "─── Step 2: Analyzing & scoring jobs ───");
-
-      await scrapingOrchestrator.analyzeAndScoreJobs(config.resumeId);
-      this.state.jobsAnalyzed = this.state.jobsScraped;
-
-      await Logger.success("ENGINE", "Analysis done");
-      await saveExcelTracker();
-
-      if (this.stopRequested) return;
-
-      // ─── Step 3: Tailor resumes for top matches ───────────────────────────────
-      this.state.currentAction = "Step 3/4: Tailoring resumes...";
-      await Logger.info("ENGINE", "─── Step 3: Tailoring resumes & cover letters ───");
-
-      const topJobs = await prisma.job.findMany({
-        where: {
-          status: "ANALYZED",
-          matchScore: { lte: 6 },
-          isBlacklisted: false,
-          isSpam: false,
-          isDuplicate: false,
-          application: null, // no application yet
-        },
-        orderBy: { matchScore: "asc" },
-        take: 20,
-      });
-
-      await Logger.info("ENGINE", `Found ${topJobs.length} top-match jobs to tailor for`);
-
-      let tailored = 0;
-      for (const job of topJobs) {
-        if (this.stopRequested) break;
-
-        await Logger.info("ENGINE", `Tailoring [${tailored + 1}/${topJobs.length}]: ${job.jobTitle} @ ${job.companyName}`);
-
-        try {
-          const { tailoredResumeId, coverLetterId } = await tailorResumeForJob(config.resumeId, job.id);
-
-          const folderPath = getApplicationFolder(job.companyName, job.jobTitle);
-
-          await prisma.application.create({
-            data: {
-              userId: "local",
-              jobId: job.id,
-              resumeId: config.resumeId,
-              tailoredResumeId,
-              coverLetterId,
-              status: config.mode === "auto" ? "APPROVED" : "PENDING",
-              folderPath,
-            },
-          });
-
-          tailored++;
-          this.state.jobsAnalyzed = tailored;
-          this.state.currentAction = `Step 3/4: Tailoring resumes... (${tailored}/${topJobs.length})`;
-          this.state.lastActivity = new Date();
-
-          await Logger.success("ENGINE", `Tailored ${tailored}/${topJobs.length}: ${job.companyName}`);
-        } catch (e) {
-          await Logger.error("ENGINE", `Tailoring failed for ${job.companyName}: ${e}`);
-        }
+      if (!this.stopRequested) {
+        // Mark leftover non-fit jobs as analyzed so the dashboard isn't cluttered
+        // with permanently-"FOUND" rows.
+        await prisma.job.updateMany({
+          where: { status: "FOUND", isBlacklisted: false, isSpam: false, isDuplicate: false },
+          data: { status: "ANALYZED" },
+        });
       }
 
       await saveExcelTracker();
-      await Logger.success("ENGINE", `Tailoring done — ${tailored} resumes tailored`);
-
-      if (this.stopRequested) return;
-
-      // ─── Step 4: Auto-apply (auto mode only) ─────────────────────────────────
-      if (config.mode === "auto") {
-        this.state.currentAction = "Step 4/4: Applying to jobs...";
-        await Logger.info("ENGINE", "─── Step 4: Applying to jobs ───");
-
-        const maxApps = config.maxApplicationsPerDay || 20;
-        const todayCount = await this.getApplicationsToday();
-        const remaining = Math.max(0, maxApps - todayCount);
-
-        await Logger.info("ENGINE", `Today's limit: ${maxApps} | Already applied today: ${todayCount} | Can apply: ${remaining}`);
-
-        if (remaining === 0) {
-          await Logger.warn("ENGINE", "Daily application limit reached — skipping apply step");
-        } else {
-          const pendingApplications = await prisma.application.findMany({
-            where: { status: "APPROVED", userId: "local" },
-            take: remaining,
-            include: { job: true },
-            orderBy: { createdAt: "asc" },
-          });
-
-          await Logger.info("ENGINE", `${pendingApplications.length} applications queued`);
-
-          for (const app of pendingApplications) {
-            if (this.stopRequested) break;
-
-            this.state.currentJob = `${app.job.jobTitle} @ ${app.job.companyName}`;
-            this.state.currentAction = `Step 4/4: Applying... (${this.state.applicationsSubmitted}/${pendingApplications.length})`;
-
-            await Logger.info("ENGINE", `Applying [${this.state.applicationsSubmitted + 1}/${pendingApplications.length}]: ${app.job.jobTitle} @ ${app.job.companyName}`);
-
-            const success = await this.applyEngine.applyToJob(app.id);
-            if (success) {
-              this.state.applicationsSubmitted++;
-              this.state.applicationsToday++;
-              await Logger.success("ENGINE", `Applied: ${app.job.companyName} (${this.state.applicationsSubmitted} total today)`);
-            }
-
-            this.state.lastActivity = new Date();
-            await saveExcelTracker();
-
-            // Polite delay between applications
-            if (this.state.applicationsSubmitted < pendingApplications.length) {
-              const waitSec = 10 + Math.floor(Math.random() * 15);
-              await Logger.info("ENGINE", `Waiting ${waitSec}s before next application...`);
-              await new Promise((r) => setTimeout(r, waitSec * 1000));
-            }
-          }
-        }
-      } else {
-        await Logger.info("ENGINE", "Manual mode — applications created with PENDING status, awaiting approval in dashboard");
-      }
 
       await Logger.success("ENGINE", `╔══════════════════════════════════════════╗`);
       await Logger.success("ENGINE", `║  Automation cycle COMPLETE               ║`);
       await Logger.success("ENGINE", `║  Scraped:  ${String(this.state.jobsScraped).padEnd(31)}║`);
-      await Logger.success("ENGINE", `║  Tailored: ${String(tailored).padEnd(31)}║`);
+      await Logger.success("ENGINE", `║  Tailored: ${String(this.tailoredCount).padEnd(31)}║`);
       await Logger.success("ENGINE", `║  Applied:  ${String(this.state.applicationsSubmitted).padEnd(31)}║`);
       await Logger.success("ENGINE", `╚══════════════════════════════════════════╝`);
-
     } catch (e) {
       await Logger.error("ENGINE", `Automation failed: ${e}`);
     } finally {
@@ -223,6 +146,146 @@ class AutomationEngine {
       this.state.currentJob = undefined;
       this.state.currentAction = undefined;
       await saveExcelTracker();
+    }
+  }
+
+  // ─── Per-job pipeline ───────────────────────────────────────────────────────
+
+  /** Called by the scraper for each fit job. Enqueues and kicks the worker. */
+  private enqueueJob(jobId: string): void {
+    if (this.stopRequested) return;
+    this.queue.push(jobId);
+    void this.runQueue();
+  }
+
+  /** Serial worker — one job end-to-end at a time (Overleaf can't run in parallel). */
+  private async runQueue(): Promise<void> {
+    if (this.queueWorking) return;
+    this.queueWorking = true;
+    try {
+      while (this.queue.length > 0) {
+        if (this.stopRequested) {
+          this.queue = [];
+          break;
+        }
+        // Honor pause without dropping queued work.
+        while (this.state.isPaused && !this.stopRequested) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        if (this.stopRequested) break;
+
+        const jobId = this.queue.shift()!;
+        await this.processJob(jobId);
+      }
+    } finally {
+      this.queueWorking = false;
+    }
+  }
+
+  /** Block until the scraper-fed queue is fully drained. */
+  private async waitForQueue(): Promise<void> {
+    while ((this.queue.length > 0 || this.queueWorking) && !this.stopRequested) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+
+  /** Analyze → tailor → CV → (auto) apply for a single job. */
+  private async processJob(jobId: string): Promise<void> {
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!job) return;
+
+    // Skip if we've already produced an application for this job.
+    const existing = await prisma.application.findFirst({ where: { jobId } });
+    if (existing) return;
+
+    this.state.currentJob = `${job.jobTitle} @ ${job.companyName}`;
+    this.state.lastActivity = new Date();
+
+    // ─── Analyze (Claude, single job) ─────────────────────────────────────────
+    // Coerce null to a borderline-fit value; jobs only reach the queue when the
+    // fast filter already marked them a fit, so this is just for type-safety.
+    let matchScore: number = job.matchScore ?? 6;
+    this.state.currentAction = `Analyzing: ${job.jobTitle} @ ${job.companyName}`;
+    try {
+      const scored = (await claudeMatchJobToResume(job.description, this.runResumeData)) as {
+        matchScore?: number;
+        atsScore?: number;
+        matchingSkills?: string[];
+        missingSkills?: string[];
+        matchReason?: string;
+        confidenceLevel?: number;
+      };
+      matchScore = scored.matchScore ?? matchScore;
+      await prisma.job.update({
+        where: { id: jobId },
+        data: {
+          matchScore,
+          atsScore: scored.atsScore ?? job.atsScore,
+          matchingSkills: scored.matchingSkills ?? job.matchingSkills,
+          missingSkills: scored.missingSkills ?? job.missingSkills,
+          matchReason: scored.matchReason ?? job.matchReason,
+          confidenceLevel: scored.confidenceLevel ?? 0.8,
+          status: "ANALYZED",
+        },
+      });
+      this.state.jobsAnalyzed++;
+      await Logger.info(
+        "ENGINE",
+        `Analyzed ${job.companyName}: ${matchScore}/10 — ${(scored.matchReason || "").slice(0, 80)}`
+      );
+    } catch (e) {
+      await Logger.warn("ENGINE", `Analyze failed for ${job.companyName} — tailoring on filter score: ${e}`);
+      await prisma.job.update({ where: { id: jobId }, data: { status: "ANALYZED" } }).catch(() => {});
+    }
+
+    // Only tailor real fits (lower = better; ≤ 6 is "fit").
+    if (matchScore > 6) {
+      await Logger.info("ENGINE", `Skipping tailor for ${job.companyName} — weak fit (${matchScore}/10)`);
+      return;
+    }
+    if (this.stopRequested) return;
+
+    // ─── Tailor résumé + cover letter + Overleaf CV ───────────────────────────
+    this.state.currentAction = `Tailoring: ${job.jobTitle} @ ${job.companyName}`;
+    try {
+      const { tailoredResumeId, coverLetterId } = await tailorResumeForJob(this.runResumeId, jobId);
+      const folderPath = getApplicationFolder(job.companyName, job.jobTitle);
+
+      const application = await prisma.application.create({
+        data: {
+          userId: "local",
+          jobId,
+          resumeId: this.runResumeId,
+          tailoredResumeId,
+          coverLetterId,
+          status: this.runMode === "auto" ? "APPROVED" : "PENDING",
+          folderPath,
+        },
+      });
+
+      this.tailoredCount++;
+      this.state.lastActivity = new Date();
+      await Logger.success("ENGINE", `Tailored ${job.companyName} (${this.tailoredCount} done)`);
+
+      // ─── Auto-apply (auto mode only, within the daily limit) ────────────────
+      if (this.runMode === "auto" && !this.stopRequested) {
+        const todayCount = await this.getApplicationsToday();
+        if (todayCount >= this.runMaxApps) {
+          await Logger.warn("ENGINE", `Daily limit (${this.runMaxApps}) reached — not applying to ${job.companyName}`);
+        } else {
+          this.state.currentAction = `Applying: ${job.jobTitle} @ ${job.companyName}`;
+          const ok = await this.applyEngine.applyToJob(application.id);
+          if (ok) {
+            this.state.applicationsSubmitted++;
+            this.state.applicationsToday++;
+            await Logger.success("ENGINE", `Applied: ${job.companyName} (${this.state.applicationsSubmitted} total)`);
+          }
+        }
+      }
+
+      await saveExcelTracker();
+    } catch (e) {
+      await Logger.error("ENGINE", `Tailoring failed for ${job.companyName}: ${e}`);
     }
   }
 

@@ -1,23 +1,65 @@
+import { writeFileSync } from "fs";
+import { join } from "path";
 import { prisma } from "@/lib/db/prisma";
 import { LinkedInScraper } from "./linkedin";
 import { IndeedScraper } from "./indeed";
-import { GreenhouseScraper } from "./greenhouse";
 import { CustomScraper } from "./custom-scraper";
-import { claudeAnalyzeJob } from "@/lib/ai/claude";
 import { Logger } from "@/lib/logging/logger";
 import { ScrapedJob, SearchConfig, CustomSite } from "@/types";
+import { fastFilter } from "@/lib/matching/fast-filter";
+import { generateJobsExcel } from "@/lib/export/excel";
+import { ensureDir } from "@/lib/storage/file-manager";
+
+const EXCEL_PATH = join(process.cwd(), "applications", "jobs_tracker.xlsx");
+
+// Ollama embeddings are slow (minutes for a handful of jobs). With Claude doing
+// the real scoring, the semantic pre-filter is redundant — keep it off unless
+// explicitly enabled via env.
+const USE_SEMANTIC_FILTER = process.env.USE_SEMANTIC_FILTER === "true";
+
+// Throttle Excel writes — file IO during scraping shouldn't be per-job if writes overlap.
+// We use a sequential queue so writes never race.
+let excelWritePending: Promise<void> = Promise.resolve();
+function queueExcelWrite(): Promise<void> {
+  excelWritePending = excelWritePending.then(async () => {
+    try {
+      ensureDir(join(process.cwd(), "applications"));
+      const buffer = await generateJobsExcel();
+      writeFileSync(EXCEL_PATH, buffer);
+    } catch (e) {
+      await Logger.warn("SCRAPER", `Excel update failed: ${e}`);
+    }
+  });
+  return excelWritePending;
+}
+
+// Convert fast-filter score (0-100, higher = better) to matchScore (1-10, lower = better)
+function filterScoreToMatchScore(score: number): number {
+  if (score >= 80) return 2;
+  if (score >= 60) return 4;
+  if (score >= 40) return 6;
+  if (score >= 20) return 8;
+  return 10;
+}
 
 export class ScrapingOrchestrator {
   private isRunning = false;
 
-  async startScraping(config: SearchConfig): Promise<void> {
+  async startScraping(
+    config: SearchConfig,
+    resumeId?: string,
+    onFitJob?: (jobId: string) => void
+  ): Promise<{ newCount: number; fitCount: number; notFitCount: number }> {
     if (this.isRunning) {
       await Logger.warn("SCRAPER", "Already running");
-      return;
+      return { newCount: 0, fitCount: 0, notFitCount: 0 };
     }
 
     this.isRunning = true;
-    await Logger.info("SCRAPER", "Starting job scraping session", { config });
+    await Logger.info("SCRAPER", "Starting scraping session", {
+      platforms: config.platforms.join(","),
+      maxJobs: config.maxJobs,
+    });
 
     const session = await prisma.scrapingSession.create({
       data: {
@@ -26,100 +68,59 @@ export class ScrapingOrchestrator {
       },
     });
 
-    try {
-      const allJobs: ScrapedJob[] = [];
-
-      if (config.platforms.includes("linkedin")) {
-        await Logger.info("SCRAPER", "Scraping LinkedIn...");
-        const scraper = new LinkedInScraper();
-        const jobs = await scraper.scrapeJobs(config.keywords, config.locations, {
-          remote: config.remote,
-          experienceLevels: config.experienceLevels,
-        });
-        allJobs.push(...jobs);
-        await Logger.success("SCRAPER", `LinkedIn: found ${jobs.length} jobs`);
-      }
-
-      if (config.platforms.includes("indeed")) {
-        await Logger.info("SCRAPER", "Scraping Indeed...");
-        const scraper = new IndeedScraper();
-        const jobs = await scraper.scrapeJobs(config.keywords, config.locations, {
-          remote: config.remote,
-        });
-        allJobs.push(...jobs);
-        await Logger.success("SCRAPER", `Indeed: found ${jobs.length} jobs`);
-      }
-
-      // Custom sites
-      const settings = await prisma.userSettings.findUnique({ where: { userId: "local" } });
-      const customSites = ((settings?.customSites as unknown as CustomSite[]) || []).filter((s) => s.enabled);
-      for (const site of customSites) {
-        await Logger.info("SCRAPER", `Scraping custom site: ${site.name}...`);
-        const scraper = new CustomScraper();
-        const jobs = await scraper.scrapeJobs(site);
-        allJobs.push(...jobs);
-        await Logger.success("SCRAPER", `${site.name}: found ${jobs.length} jobs`);
-      }
-
-      const saved = await this.saveJobs(allJobs);
-
-      await prisma.scrapingSession.update({
-        where: { id: session.id },
-        data: {
-          status: "completed",
-          jobsFound: allJobs.length,
-          jobsNew: saved.newCount,
-          jobsDuplicate: saved.duplicateCount,
-          completedAt: new Date(),
-        },
-      });
-
-      await Logger.success("SCRAPER", `Session complete: ${saved.newCount} new jobs`, {
-        total: allJobs.length,
-        new: saved.newCount,
-        duplicate: saved.duplicateCount,
-      });
-    } catch (e) {
-      await prisma.scrapingSession.update({
-        where: { id: session.id },
-        data: { status: "failed", error: String(e), completedAt: new Date() },
-      });
-      await Logger.error("SCRAPER", "Scraping session failed", { error: String(e) });
-    } finally {
-      this.isRunning = false;
-    }
-  }
-
-  private async saveJobs(
-    jobs: ScrapedJob[]
-  ): Promise<{ newCount: number; duplicateCount: number }> {
     let newCount = 0;
+    let fitCount = 0;
+    let notFitCount = 0;
     let duplicateCount = 0;
 
-    for (const job of jobs) {
+    // Resume data for fast-filter (per-job filter needs candidate skills)
+    let candidateSkills: string[] = [];
+    let candidateTech: string[] = [];
+
+    if (resumeId) {
+      const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
+      if (resume) {
+        candidateSkills = resume.skills || [];
+        candidateTech = resume.technologies || [];
+      }
+    }
+
+    const searchKeywords = config.keywords;
+
+    // Per-job callback: save → fast filter → update Excel
+    const onJob = async (job: ScrapedJob): Promise<void> => {
       try {
+        // Dedup check
         const exists = job.platformJobId
           ? await prisma.job.findUnique({
-              where: {
-                platform_platformJobId: {
-                  platform: job.platform,
-                  platformJobId: job.platformJobId,
-                },
-              },
+              where: { platform_platformJobId: { platform: job.platform, platformJobId: job.platformJobId } },
             })
-          : await prisma.job.findFirst({
-              where: { url: job.url },
-            });
+          : await prisma.job.findFirst({ where: { url: job.url } });
 
         if (exists) {
           duplicateCount++;
-          continue;
+          return;
         }
 
         const isBlacklisted = this.isCompanyBlacklisted(job.companyName);
         const isSpam = this.isSpamJob(job);
 
-        await prisma.job.create({
+        // Run fast filter immediately for fit-or-not classification
+        const filter = fastFilter(
+          job.jobTitle,
+          job.description,
+          candidateSkills,
+          candidateTech,
+          searchKeywords
+        );
+
+        const matchScore = filterScoreToMatchScore(filter.score);
+        const isFit = !filter.skip && matchScore <= 6;
+
+        if (isFit) fitCount++;
+        else notFitCount++;
+
+        const created = await prisma.job.create({
           data: {
             platform: job.platform,
             platformJobId: job.platformJobId || null,
@@ -143,6 +144,12 @@ export class ScrapingOrchestrator {
             responsibilities: job.responsibilities || [],
             niceToHave: job.niceToHave || [],
             benefits: job.benefits || [],
+            // Preliminary scoring from fast filter (AI step will refine later)
+            matchScore,
+            atsScore: filter.score / 10, // 0-10 scale
+            matchingSkills: filter.matchedKeywords,
+            missingSkills: filter.missingKeywords,
+            matchReason: filter.reason,
             isBlacklisted,
             isSpam,
             status: "FOUND",
@@ -150,64 +157,145 @@ export class ScrapingOrchestrator {
         });
 
         newCount++;
+
+        await Logger.success(
+          "SCRAPER",
+          `[+${newCount}] ${job.jobTitle} @ ${job.companyName} — Fit: ${isFit ? "YES" : "NO"} (score: ${matchScore}/10) | ${filter.reason}`
+        );
+
+        // Update Excel after each new job
+        queueExcelWrite();
+
+        // Stream fit jobs straight into the per-job pipeline (analyze → tailor →
+        // CV) so processing starts immediately instead of waiting for the full
+        // scrape to finish.
+        if (isFit && onFitJob) {
+          try {
+            onFitJob(created.id);
+          } catch (e) {
+            await Logger.warn("SCRAPER", `onFitJob handoff failed for ${job.jobTitle}: ${e}`);
+          }
+        }
       } catch (e) {
-        await Logger.warn("SCRAPER", `Failed to save job: ${job.jobTitle}`, {
-          error: String(e),
+        await Logger.warn("SCRAPER", `Per-job save failed for ${job.jobTitle}: ${e}`);
+      }
+    };
+
+    try {
+      const allKeywords = config.keywords;
+      const allLocations = config.locations;
+      const maxJobs = config.maxJobs ?? 50;
+
+      // Split limit across platforms (if user wants 10 total, ~5 from each)
+      const platformCount = config.platforms.length + 1; // +1 for custom sites buffer
+      const perPlatformLimit = Math.max(3, Math.ceil(maxJobs / Math.max(1, platformCount)));
+
+      if (config.platforms.includes("linkedin") && newCount < maxJobs) {
+        const remaining = maxJobs - newCount;
+        const limit = Math.min(perPlatformLimit, remaining);
+        await Logger.info("SCRAPER", `── LinkedIn (target: ${limit} jobs) ──`);
+        const scraper = new LinkedInScraper();
+        await scraper.scrapeJobs(allKeywords, allLocations, {
+          maxJobs: limit,
+          remote: config.remote,
+          experienceLevels: config.experienceLevels,
+          onJob,
         });
       }
+
+      if (config.platforms.includes("indeed") && newCount < maxJobs) {
+        const remaining = maxJobs - newCount;
+        const limit = Math.min(perPlatformLimit, remaining);
+        await Logger.info("SCRAPER", `── Indeed (target: ${limit} jobs) ──`);
+        const scraper = new IndeedScraper();
+        await scraper.scrapeJobs(allKeywords, allLocations, {
+          maxJobs: limit,
+          remote: config.remote,
+          onJob,
+        });
+      }
+
+      // Custom sites
+      const settings = await prisma.userSettings.findUnique({ where: { userId: "local" } });
+      const customSites = ((settings?.customSites as unknown as CustomSite[]) || []).filter((s) => s.enabled);
+      for (const site of customSites) {
+        if (newCount >= maxJobs) break;
+        await Logger.info("SCRAPER", `── Custom: ${site.name} ──`);
+        const scraper = new CustomScraper();
+        const jobs = await scraper.scrapeJobs(site);
+        for (const job of jobs) {
+          if (newCount >= maxJobs) break;
+          await onJob(job);
+        }
+      }
+
+      // Ensure final Excel write completes
+      await queueExcelWrite();
+
+      await prisma.scrapingSession.update({
+        where: { id: session.id },
+        data: {
+          status: "completed",
+          jobsFound: newCount + duplicateCount,
+          jobsNew: newCount,
+          jobsDuplicate: duplicateCount,
+          completedAt: new Date(),
+        },
+      });
+
+      await Logger.success(
+        "SCRAPER",
+        `Session done: ${newCount} new | ${fitCount} fit | ${notFitCount} not fit | ${duplicateCount} duplicates`
+      );
+    } catch (e) {
+      await prisma.scrapingSession.update({
+        where: { id: session.id },
+        data: { status: "failed", error: String(e), completedAt: new Date() },
+      });
+      await Logger.error("SCRAPER", "Scraping session failed", { error: String(e) });
+    } finally {
+      this.isRunning = false;
     }
 
-    return { newCount, duplicateCount };
+    return { newCount, fitCount, notFitCount };
   }
 
   async analyzeAndScoreJobs(resumeId: string): Promise<void> {
     const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
     if (!resume) throw new Error("Resume not found");
 
+    // Only analyze jobs that the fast filter marked as Fit (matchScore <= 6) and that haven't been AI-scored yet.
+    // We track AI-scored state via confidenceLevel — fast filter sets it to null/low, AI sets it higher.
     const unanalyzedJobs = await prisma.job.findMany({
-      where: { status: "FOUND", isBlacklisted: false, isSpam: false, isDuplicate: false },
-      take: 150,
+      where: {
+        status: "FOUND",
+        isBlacklisted: false,
+        isSpam: false,
+        isDuplicate: false,
+        matchScore: { lte: 6 }, // only fit jobs
+      },
+      orderBy: { matchScore: "asc" },
+      take: 100,
     });
 
     if (unanalyzedJobs.length === 0) {
-      await Logger.info("ANALYZER", "No new jobs to analyze");
+      await Logger.info("ANALYZER", "No fit jobs to analyze deeply");
+      // Mark non-fit jobs as ANALYZED too so they don't keep being picked up
+      await prisma.job.updateMany({
+        where: { status: "FOUND", isBlacklisted: false, isSpam: false, isDuplicate: false },
+        data: { status: "ANALYZED" },
+      });
       return;
     }
-    await Logger.info("ANALYZER", `Analyzing ${unanalyzedJobs.length} jobs`);
+    await Logger.info("ANALYZER", `AI-scoring ${unanalyzedJobs.length} fit jobs`);
 
-    const { fastFilter } = await import("@/lib/matching/fast-filter");
     const { claudeBatchMatchJobs } = await import("@/lib/ai/claude");
     const { generateEmbedding, cosineSimilarity } = await import("@/lib/ai/ollama");
     const resumeData = resume.parsedData as Record<string, unknown>;
     const candidateSkills = resume.skills || [];
     const candidateTech = resume.technologies || [];
-    const searchKeywords = (process.env.JOB_SEARCH_KEYWORDS || "Software Engineer")
-      .split(",").map((k) => k.trim());
 
-    // Step 1: Fast keyword filter (instant, no AI)
-    const toSemanticScore: typeof unanalyzedJobs = [];
-
-    for (const job of unanalyzedJobs) {
-      const filter = fastFilter(job.jobTitle, job.description, candidateSkills, candidateTech, searchKeywords);
-      if (filter.skip) {
-        await prisma.job.update({
-          where: { id: job.id },
-          data: {
-            matchScore: 10, atsScore: 1, confidenceLevel: 0.9,
-            requiredSkills: [], missingSkills: filter.missingKeywords,
-            matchingSkills: filter.matchedKeywords, matchReason: filter.reason,
-            status: "ANALYZED",
-          },
-        });
-      } else {
-        toSemanticScore.push(job);
-      }
-    }
-    await Logger.info("ANALYZER", `Fast-filter: ${unanalyzedJobs.length - toSemanticScore.length} skipped, ${toSemanticScore.length} proceeding`);
-
-    if (toSemanticScore.length === 0) return;
-
-    // Step 2: Semantic scoring with nomic-embed-text (fast, no tokens needed)
+    // Semantic scoring with nomic-embed-text
     const resumeText = [
       (resumeData.summary as string) || "",
       candidateSkills.slice(0, 20).join(" "),
@@ -217,47 +305,48 @@ export class ScrapingOrchestrator {
     ].join(" ").trim();
 
     const semanticScores = new Map<string, number>();
+    const toAiScore: typeof unanalyzedJobs = [];
 
-    if (resumeText.length > 50) {
-      await Logger.info("ANALYZER", "Computing semantic similarity scores...");
+    if (USE_SEMANTIC_FILTER && resumeText.length > 50) {
       try {
         const resumeEmbedding = await generateEmbedding(resumeText);
         let semanticSkipped = 0;
 
-        for (const job of toSemanticScore) {
+        for (const job of unanalyzedJobs) {
           try {
             const jobText = `${job.jobTitle} ${job.companyName} ${job.description}`.slice(0, 4000);
             const jobEmbedding = await generateEmbedding(jobText);
             const sim = cosineSimilarity(resumeEmbedding, jobEmbedding);
             semanticScores.set(job.id, sim);
 
-            // Hard skip: semantically unrelated (sim < 0.3 = basically unrelated)
             if (sim < 0.3) {
               semanticSkipped++;
               await prisma.job.update({
                 where: { id: job.id },
                 data: {
-                  matchScore: 9, atsScore: 2, confidenceLevel: 0.85,
+                  matchScore: 9,
+                  atsScore: 2,
+                  confidenceLevel: 0.85,
                   matchReason: `Low semantic similarity (${(sim * 100).toFixed(0)}%)`,
                   status: "ANALYZED",
                 },
               });
+            } else {
+              toAiScore.push(job);
             }
           } catch {
-            // Embedding failed for this job — still send to AI
             semanticScores.set(job.id, 0.5);
+            toAiScore.push(job);
           }
         }
-        await Logger.info("ANALYZER", `Semantic filter: ${semanticSkipped} more skipped`);
+        await Logger.info("ANALYZER", `Semantic filter: ${semanticSkipped} demoted`);
       } catch (e) {
-        await Logger.warn("ANALYZER", `Semantic scoring unavailable: ${e} — falling back to AI scoring only`);
+        await Logger.warn("ANALYZER", `Semantic scoring unavailable: ${e}`);
+        toAiScore.push(...unanalyzedJobs);
       }
+    } else {
+      toAiScore.push(...unanalyzedJobs);
     }
-
-    // Step 3: AI batch scoring — only jobs that passed semantic filter
-    const toAiScore = toSemanticScore.filter(
-      (j) => !["ANALYZED"].includes(j.status) && (semanticScores.get(j.id) ?? 0.5) >= 0.3
-    );
 
     // Sort by semantic similarity descending (best candidates first)
     toAiScore.sort((a, b) => (semanticScores.get(b.id) ?? 0.5) - (semanticScores.get(a.id) ?? 0.5));
@@ -276,8 +365,10 @@ export class ScrapingOrchestrator {
         );
 
         for (const scored of result.results || []) {
+          // Claude occasionally echoes an id that wasn't in the batch — skip it
+          // so prisma.update doesn't throw "Record to update not found".
+          if (!batch.some((j) => j.id === scored.id)) continue;
           const semSim = semanticScores.get(scored.id) ?? 0.5;
-          // Blend AI score with semantic score for confidence
           const confidence = Math.min(0.95, 0.6 + semSim * 0.35);
           await prisma.job.update({
             where: { id: scored.id },
@@ -305,6 +396,15 @@ export class ScrapingOrchestrator {
       }
     }
 
+    // Mark all remaining FOUND jobs (not-fit ones we didn't analyze) as ANALYZED
+    await prisma.job.updateMany({
+      where: { status: "FOUND", isBlacklisted: false, isSpam: false, isDuplicate: false },
+      data: { status: "ANALYZED" },
+    });
+
+    // Refresh Excel after full analysis
+    queueExcelWrite();
+
     const analyzed = await prisma.job.count({ where: { status: "ANALYZED" } });
     const good = await prisma.job.count({ where: { status: "ANALYZED", matchScore: { lte: 4 } } });
     await Logger.success("ANALYZER", `Analysis complete — ${good} strong matches found out of ${analyzed} total analyzed`);
@@ -320,9 +420,8 @@ export class ScrapingOrchestrator {
 
   private isSpamJob(job: ScrapedJob): boolean {
     const spamKeywords = [
-      "work from home",
-      "make money",
-      "no experience needed",
+      "work from home opportunity - earn",
+      "make money from home",
       "unlimited earning",
       "pyramid",
       "mlm",
