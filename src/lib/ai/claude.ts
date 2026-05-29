@@ -459,3 +459,52 @@ Provide 5-6 technical questions, 4-5 behavioral questions, and 3-4 items in each
     "high"
   );
 }
+
+// ─── Career Advisor ───────────────────────────────────────────────────────────
+export interface CareerAdvice {
+  summary: string;
+  strengths: string[];
+  skillGaps: { skill: string; demand: string; why: string }[];
+  roadmap: { step: number; title: string; detail: string }[];
+  targetRoles: string[];
+  salaryInsight: string;
+}
+
+export async function claudeCareerAdvice(
+  profile: { name: string; years: number; skills: string[]; technologies: string[] },
+  demand: {
+    topGaps: { skill: string; count: number }[];
+    topStrengths: { skill: string; count: number }[];
+    commonTitles: string[];
+    jobsAnalyzed: number;
+    salaryRange: string;
+  }
+): Promise<CareerAdvice> {
+  return aiLong<CareerAdvice>(
+    `Assess this candidate's market positioning using REAL demand data from ${demand.jobsAnalyzed} jobs they scraped. Be specific, practical, and honest.
+
+CANDIDATE: ${profile.name} | ${profile.years} yrs experience
+HAS SKILLS: ${profile.skills.slice(0, 25).join(", ")}
+HAS TECH: ${profile.technologies.slice(0, 25).join(", ")}
+
+MARKET DEMAND (derived from their scraped jobs):
+- Most-requested skills they are MISSING: ${demand.topGaps.map((g) => `${g.skill}(${g.count})`).join(", ") || "none detected"}
+- Their in-demand strengths: ${demand.topStrengths.map((s) => `${s.skill}(${s.count})`).join(", ") || "none detected"}
+- Common role titles: ${demand.commonTitles.join(", ") || "n/a"}
+- Salary range observed: ${demand.salaryRange || "n/a"}
+
+Return ONLY this JSON:
+{
+  "summary": "2-3 sentence honest assessment of where they stand",
+  "strengths": ["a specific in-demand strength they already have"],
+  "skillGaps": [{"skill": "", "demand": "high|medium|low", "why": "why it matters for their target roles"}],
+  "roadmap": [{"step": 1, "title": "what to learn or do", "detail": "how to do it and roughly how long"}],
+  "targetRoles": ["a role type they're well-positioned for now"],
+  "salaryInsight": "1-2 sentences on realistic salary positioning"
+}
+Give 4-6 prioritized skillGaps and a 4-6 step roadmap.`,
+    "You are a candid, practical career advisor for software and tech job seekers. Return JSON only.",
+    3000,
+    "high"
+  );
+}
