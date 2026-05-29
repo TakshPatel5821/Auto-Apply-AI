@@ -28,7 +28,10 @@ services:
       - AUTH_PASSWORD=${AUTH_PASSWORD}
       - AUTH_SECRET=${AUTH_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AI_PROVIDER=${AI_PROVIDER}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
       - STORAGE_PATH=/app/applications
       - LOGS_PATH=/app/logs
       - OVERLEAF_EMAIL=${OVERLEAF_EMAIL}
@@ -44,5 +47,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # GPU-accelerated local AI (Ollama). Opt-in — only starts with the `gpu` profile:
+  #   docker compose --profile gpu up
+  # Requires the NVIDIA Container Toolkit on the host. Point the app at it with
+  #   OLLAMA_BASE_URL=http://ollama:11434/v1  (and AI_PROVIDER=ollama to force local).
+  # Ollama auto-detects and uses the reserved GPU; pull a model once it's up:
+  #   docker compose exec ollama ollama pull qwen2.5:7b
+  ollama:
+    image: ollama/ollama:latest
+    container_name: job_agent_ollama
+    profiles: ["gpu"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  ollama_data:

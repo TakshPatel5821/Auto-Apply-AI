@@ -185,6 +185,29 @@ The Docker setup starts:
 - PostgreSQL on port `5432`
 - Next.js app on port `3000`
 
+### GPU acceleration (optional, local AI)
+
+The Claude API is the default brain and needs no GPU. If you want to run the
+**local Ollama fallback** on a GPU, an opt-in `gpu` profile adds an Ollama
+service that reserves the host's NVIDIA GPU:
+
+```bash
+docker compose --profile gpu up -d        # starts postgres + app + ollama
+docker compose exec ollama ollama pull qwen2.5:7b   # pull a model once
+```
+
+Then point the app at it (in `.env`):
+
+```env
+AI_PROVIDER=ollama
+OLLAMA_BASE_URL=http://ollama:11434/v1
+```
+
+Requirements: an NVIDIA GPU plus the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host. Ollama auto-detects and uses the reserved GPU — no extra config.
+Running Ollama natively (outside Docker) already uses your GPU automatically;
+the profile is only for the containerized setup.
+
 ## Available Scripts
 
 ```bash
@@ -209,9 +232,12 @@ Main visible areas:
 - **Quick setup panel**: helps save common keywords and experience levels.
 - **Automation controls**: starts, pauses, resumes, or stops automation, and toggles which job sources (LinkedIn, Indeed) to scrape. The choice is saved to settings and restored on reload.
 - **Jobs table**: shows scraped jobs, match score, status, platform, and links.
-- **Applications table**: shows generated or submitted applications.
+- **Applications table**: shows generated or submitted applications, with a per-row diff button (base vs tailored résumé).
+- **Analytics tab**: Recharts dashboards — applications per day, match-score distribution, jobs by source, and an application status funnel.
 - **Resume upload**: uploads a resume and shows parse status.
-- **Logs console**: streams recent automation logs from the database.
+- **Logs console**: live automation logs streamed over Server-Sent Events (no manual refresh).
+
+The dashboard updates in real time over SSE (`/api/stream`): automation state, stats, and logs push as they happen; the jobs/applications tables refresh automatically when their counts change.
 - **Custom sites panel**: manages additional sites to scrape.
 - **Memory tab**: stores answers for repeated application questions.
 - **Settings tab**: stores search keywords, locations, platforms, limits, and preferences.
