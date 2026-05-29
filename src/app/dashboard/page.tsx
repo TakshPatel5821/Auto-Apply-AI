@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { StatsCards } from "@/components/dashboard/StatsCards";
+import { AnalyticsPanel } from "@/components/dashboard/AnalyticsPanel";
 import { AutomationControls } from "@/components/dashboard/AutomationControls";
 import { ResumeUpload } from "@/components/dashboard/ResumeUpload";
 import { CustomSitesPanel } from "@/components/dashboard/CustomSitesPanel";
@@ -19,9 +20,10 @@ import {
   Download,
   Brain,
   RefreshCw,
+  BarChart3,
 } from "lucide-react";
 
-type Tab = "jobs" | "applications" | "resume" | "memory" | "settings";
+type Tab = "jobs" | "applications" | "analytics" | "resume" | "memory" | "settings";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -105,12 +107,32 @@ export default function DashboardPage() {
     }
   }, []);
 
+  // Initial load of everything.
   useEffect(() => {
     fetchAll();
-    const delay = automationState.isRunning && !automationState.isPaused ? 3000 : 15000;
-    const interval = setInterval(fetchAll, delay);
-    return () => clearInterval(interval);
-  }, [fetchAll, automationState.isRunning, automationState.isPaused]);
+  }, [fetchAll]);
+
+  // Live updates via Server-Sent Events: state, stats, and logs stream in with
+  // no polling. Heavy tables (jobs/applications) are refetched only when the
+  // job/application counts actually change.
+  const totalsRef = useRef({ totalJobs: -1, totalApplications: -1 });
+  useEffect(() => {
+    const es = new EventSource("/api/stream");
+    es.addEventListener("state", (e) => setAutomationState(JSON.parse((e as MessageEvent).data)));
+    es.addEventListener("logs", (e) => setLogs(JSON.parse((e as MessageEvent).data)));
+    es.addEventListener("stats", (e) => {
+      const s = JSON.parse((e as MessageEvent).data);
+      setStats(s);
+      if (
+        s.totalJobs !== totalsRef.current.totalJobs ||
+        s.totalApplications !== totalsRef.current.totalApplications
+      ) {
+        totalsRef.current = { totalJobs: s.totalJobs, totalApplications: s.totalApplications };
+        fetchAll();
+      }
+    });
+    return () => es.close();
+  }, [fetchAll]);
 
   useEffect(() => {
     if (activeTab === "memory") fetchMemory();
@@ -132,6 +154,7 @@ export default function DashboardPage() {
   const tabs: { id: Tab; label: string; icon: any; count?: number }[] = [
     { id: "jobs", label: "Jobs", icon: Briefcase, count: stats.totalJobs },
     { id: "applications", label: "Applications", icon: Send, count: stats.totalApplications },
+    { id: "analytics", label: "Analytics", icon: BarChart3 },
     { id: "resume", label: "Resume", icon: FileText, count: resumes.length },
     { id: "memory", label: "Memory", icon: Brain, count: memories.length },
     { id: "settings", label: "Settings", icon: Settings },
@@ -275,6 +298,8 @@ export default function DashboardPage() {
                   />
                 </div>
               )}
+
+              {activeTab === "analytics" && <AnalyticsPanel />}
 
               {activeTab === "resume" && (
                 <div className="space-y-6">
