@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare } from "lucide-react";
+import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare, GraduationCap } from "lucide-react";
 import { ResumeDiffModal } from "./ResumeDiffModal";
+import { InterviewPrepModal } from "./InterviewPrepModal";
 
 interface Application {
   id: string;
@@ -48,6 +49,7 @@ export function ApplicationsTable({
   const [bulkRunning, setBulkRunning] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [diffId, setDiffId] = useState<string | null>(null);
+  const [prepJobId, setPrepJobId] = useState<string | null>(null);
 
   function setBusy(id: string, busy: boolean) {
     setBusyIds((prev) => {
@@ -237,6 +239,15 @@ export function ApplicationsTable({
                         </button>
                       )}
 
+                      {/* AI interview prep */}
+                      <button
+                        onClick={() => setPrepJobId(app.job.id)}
+                        className="p-1.5 text-gray-500 hover:text-emerald-400 transition-colors"
+                        title="AI interview prep"
+                      >
+                        <GraduationCap className="w-3.5 h-3.5" />
+                      </button>
+
                       {/* PENDING → show Approve + Apply Now */}
                       {app.status === "PENDING" && (
                         <>
@@ -306,6 +317,7 @@ export function ApplicationsTable({
       </div>
 
       {diffId && <ResumeDiffModal tailoredResumeId={diffId} onClose={() => setDiffId(null)} />}
+      {prepJobId && <InterviewPrepModal jobId={prepJobId} onClose={() => setPrepJobId(null)} />}
     </div>
   );
 }

@@ -410,3 +410,52 @@ Return JSON: {"latexContent":"\\\\documentclass[10pt]{article}...FULL LATEX...\\
     "high"
   );
 }
+
+// ─── Interview Preparation ────────────────────────────────────────────────────
+export interface InterviewPrep {
+  technicalQuestions: { question: string; guidance: string }[];
+  behavioralQuestions: { question: string; star: string }[];
+  companyTalkingPoints: string[];
+  questionsToAsk: string[];
+  prepTips: string[];
+}
+
+export async function claudeInterviewPrep(
+  resumeData: Record<string, unknown>,
+  jobDescription: string,
+  jobTitle: string,
+  companyName: string
+): Promise<InterviewPrep> {
+  const contactInfo = (resumeData.contactInfo as Record<string, string>) || {};
+  const skills = (resumeData.skills as string[] || []).slice(0, 20).join(", ");
+  const tech = (resumeData.technologies as string[] || []).slice(0, 20).join(", ");
+  const exp = JSON.stringify((resumeData.experience as object[] || []).slice(0, 3));
+  const yrs = resumeData.yearsOfExperience || 0;
+
+  return aiLong<InterviewPrep>(
+    `Create focused interview prep for this candidate and this exact role. Ground every
+suggested answer in the candidate's REAL experience below — never invent experience.
+
+CANDIDATE: ${contactInfo.name || "Applicant"} | ${yrs} yrs experience
+SKILLS: ${skills}
+TECHNOLOGIES: ${tech}
+EXPERIENCE: ${exp}
+
+ROLE: ${jobTitle} @ ${companyName}
+JOB DESCRIPTION (first 2000 chars):
+${jobDescription.slice(0, 2000)}
+
+Return ONLY this JSON:
+{
+  "technicalQuestions": [{"question": "a likely technical question for this role", "guidance": "how to approach it, and which of the candidate's actual skills/projects to reference"}],
+  "behavioralQuestions": [{"question": "a behavioral question", "star": "a concise STAR-format answer drafted from the candidate's real experience"}],
+  "companyTalkingPoints": ["specific reason this candidate fits this role/company"],
+  "questionsToAsk": ["a smart, specific question for the candidate to ask the interviewer"],
+  "prepTips": ["a concrete prep action tailored to this role"]
+}
+Provide 5-6 technical questions, 4-5 behavioral questions, and 3-4 items in each list.`,
+    "You are an expert technical interview coach. Never fabricate the candidate's experience. Return JSON only.",
+    4096,
+    "high"
+  );
+}
