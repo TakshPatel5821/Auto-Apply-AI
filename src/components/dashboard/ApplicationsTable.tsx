@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw } from "lucide-react";
+import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare } from "lucide-react";
+import { ResumeDiffModal } from "./ResumeDiffModal";
 
 interface Application {
   id: string;
@@ -46,6 +47,7 @@ export function ApplicationsTable({
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [diffId, setDiffId] = useState<string | null>(null);
 
   function setBusy(id: string, busy: boolean) {
     setBusyIds((prev) => {
@@ -224,6 +226,17 @@ export function ApplicationsTable({
                         <ExternalLink className="w-3.5 h-3.5" />
                       </a>
 
+                      {/* Résumé diff (base vs tailored) */}
+                      {app.tailoredResume && (
+                        <button
+                          onClick={() => setDiffId(app.tailoredResume!.id)}
+                          className="p-1.5 text-gray-500 hover:text-purple-400 transition-colors"
+                          title="View résumé diff (base vs tailored)"
+                        >
+                          <GitCompare className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
                       {/* PENDING → show Approve + Apply Now */}
                       {app.status === "PENDING" && (
                         <>
@@ -291,6 +304,8 @@ export function ApplicationsTable({
           </div>
         )}
       </div>
+
+      {diffId && <ResumeDiffModal tailoredResumeId={diffId} onClose={() => setDiffId(null)} />}
     </div>
   );
 }

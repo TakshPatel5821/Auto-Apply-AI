@@ -90,6 +90,15 @@ export async function tailorResumeForJob(
     originalLatex = result.latexContent || DEFAULT_LATEX_TEMPLATE;
   }
 
+  // Persist the base LaTeX once so the diff viewer always has a stable baseline
+  // to compare each job's tailored version against.
+  if (!resume.baseLatex && originalLatex) {
+    await prisma.resume.update({
+      where: { id: resumeId },
+      data: { baseLatex: originalLatex },
+    }).catch(() => {});
+  }
+
   // Step 2: ONE combined Claude call — analyze + tailor + cover letter
   // Prompt caching makes subsequent jobs much faster (system + resume cached).
   const aiStart = Date.now();

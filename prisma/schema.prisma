@@ -63,6 +63,7 @@ model Resume {
   atsKeywords String[]
   yearsOfExperience Float?
   summary     String?
+  baseLatex   String?  // Pre-tailor base LaTeX résumé — the baseline for the diff viewer
 
   isActive    Boolean  @default(false)
 
