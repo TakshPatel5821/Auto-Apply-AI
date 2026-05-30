@@ -33,6 +33,8 @@ class AutomationEngine {
     jobsAnalyzed: 0,
     applicationsSubmitted: 0,
     applicationsToday: 0,
+    waitingForUser: false,
+    waitingReason: "",
   };
 
   private applyEngine = new ApplyEngine();
@@ -48,7 +50,11 @@ class AutomationEngine {
   private runResumeData: Record<string, unknown> = {};
 
   getState(): AutomationState {
-    return { ...this.state };
+    return {
+      ...this.state,
+      waitingForUser: scraperStatus.waitingForUser,
+      waitingReason: scraperStatus.reason,
+    };
   }
 
   async start(config: {

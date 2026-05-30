@@ -165,6 +165,8 @@ export interface AutomationState {
   applicationsToday: number;
   startedAt?: Date;
   lastActivity?: Date;
+  waitingForUser?: boolean;
+  waitingReason?: string;
 }
 
 export interface DashboardStats {
