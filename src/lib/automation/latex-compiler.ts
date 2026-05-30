@@ -27,11 +27,12 @@ function findTectonic(): string {
 // browser automation entirely. Returns the PDF path, or null on failure.
 export async function compileLatexToPDF(
   latexContent: string,
-  outputDir: string
+  outputDir: string,
+  baseName = "tailored_resume"
 ): Promise<string | null> {
   ensureDir(outputDir);
-  const texPath = join(outputDir, "tailored_resume.tex");
-  const pdfPath = join(outputDir, "tailored_resume.pdf");
+  const texPath = join(outputDir, `${baseName}.tex`);
+  const pdfPath = join(outputDir, `${baseName}.pdf`);
 
   try {
     writeFileSync(texPath, latexContent, "utf-8");

@@ -73,6 +73,7 @@ export async function tailorResumeForJob(
   // step has a real résumé PDF to upload. (The old design compiled via Overleaf
   // in the background, so apply usually ran before any PDF existed.)
   let pdfPath: string | null = null;
+  let coverLetterPdfPath: string | null = null;
   if (SKIP_PDF) {
     await Logger.info("TAILOR", "SKIP_PDF=true — saved .tex only, no PDF compiled");
   } else {
@@ -80,6 +81,23 @@ export async function tailorResumeForJob(
       Logger.warn("TAILOR", `PDF compilation error: ${e}`);
       return null;
     });
+    // Compile the cover letter too, so apply can upload it when a job requires
+    // a cover-letter file (not just a paste-in text box). Named cover_letter.pdf.
+    if (paths.coverLetterTex) {
+      coverLetterPdfPath = await compileLatexToPDF(
+        generateCoverLetterTex(
+          tailored.coverLetter,
+          job.companyName,
+          job.jobTitle,
+          (resume.parsedData as { contactInfo?: { name?: string } })?.contactInfo?.name
+        ),
+        folderPath,
+        "cover_letter"
+      ).catch((e) => {
+        Logger.warn("TAILOR", `Cover letter PDF error: ${e}`);
+        return null;
+      });
+    }
   }
 
   // Step 5: persist DB records with the PDF path already set.
@@ -102,6 +120,7 @@ export async function tailorResumeForJob(
       jobId,
       content: tailored.coverLetter,
       texPath: paths.coverLetterTex || null,
+      pdfPath: coverLetterPdfPath,
     },
   });
 
