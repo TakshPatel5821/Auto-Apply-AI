@@ -360,7 +360,7 @@ STRICT RULES:
 - NEVER fabricate experience, education, skills, or accomplishments
 - Only emphasize content the candidate already has
 - The PROFESSIONAL SUMMARY is the only part of the resume that changes — write it as plain text (no markdown, no LaTeX), 2-3 sentences, ~55 words max, weaving in the job's most relevant keywords truthfully
-- Cover letter: 3 short paragraphs (hook → why-you-fit → close)
+- Cover letter: concise — 3 short paragraphs, ~120 words total (hook → why-you-fit → close). coverLetter MUST be a single string, not an array.
 - Return ONLY a single JSON object — no markdown fences, no prose, no preamble`;
 
   const candidateProfile = `CANDIDATE PROFILE (same for every job this session):
@@ -377,7 +377,7 @@ ${jobDescription.slice(0, 3000)}
 Do all of the following for this candidate:
 1. Analyze the job → ATS keywords, required skills, technologies, experience level (entry|mid|senior).
 2. Write a tailored PROFESSIONAL SUMMARY (plain text, 2-3 sentences, ~55 words) for THIS role using only the candidate's real skills.
-3. Write a 3-paragraph cover letter personalised to this exact role and company.
+3. Write a concise cover letter — 3 short paragraphs, ~120 words total — for this exact role and company.
 4. Score the resume's ATS match for this job (1 = perfect, 10 = poor).
 
 Return ONLY this JSON object (no markdown fences):
@@ -395,7 +395,7 @@ Return ONLY this JSON object (no markdown fences):
     const raw = await ollamaCompleteJSON<Record<string, unknown>>(
       userPrompt,
       `${systemRules}\n\n${candidateProfile}`,
-      2000
+      1200
     );
     return buildTailorResult(raw);
   }
@@ -406,7 +406,7 @@ Return ONLY this JSON object (no markdown fences):
   const client = await getClient();
   const stream = client.messages.stream({
     model: MODEL,
-    max_tokens: 2000,
+    max_tokens: 1200,
     ...(MODEL_SUPPORTS_EFFORT ? { thinking: { type: "adaptive" as const } } : {}),
     ...effortConfig(TAILOR_EFFORT),
     system: [

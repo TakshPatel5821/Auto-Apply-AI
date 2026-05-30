@@ -241,41 +241,56 @@ export class ApplyEngine {
     }
   }
 
-  // Find the apply button on a LinkedIn page and tell us if it's Easy Apply
+  // Find the apply button on a LinkedIn page and tell us if it's Easy Apply.
+  // NOTE: LinkedIn's external "Apply" control is a plain <a> (external-link icon),
+  // often WITHOUT role="button", and the button also renders async — so we wait
+  // for it and scan both <button> and <a> elements.
   private async findLinkedInApplyButton(): Promise<{ selector: string; text: string; isEasyApply: boolean } | null> {
+    // Wait for any apply control to render before scanning.
+    await this.page!.waitForSelector(
+      '.jobs-apply-button, button[aria-label*="Apply"], a[aria-label*="Apply"], button[aria-label*="Easy Apply"]',
+      { timeout: 12000 }
+    ).catch(() => null);
+
     return this.page!.evaluate(() => {
-      // Look at every button/link, find one that looks like the apply button
-      const allButtons = Array.from(document.querySelectorAll("button, a[role='button']")) as HTMLElement[];
-      for (const b of allButtons) {
+      const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim();
+      const els = Array.from(document.querySelectorAll("button, a")) as HTMLElement[];
+
+      for (const b of els) {
         if ((b as HTMLButtonElement).disabled) continue;
-        const text = ((b.innerText || "") + " " + (b.getAttribute("aria-label") || "")).trim();
+        // Visible only (skip 0-size / hidden controls).
+        const rect = b.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+
+        const aria = b.getAttribute("aria-label") || "";
+        const text = norm(b.innerText + " " + aria);
         const lower = text.toLowerCase();
 
-        // Skip if it's clearly not an apply button
-        if (!lower.includes("apply") && !lower.includes("easy apply")) continue;
-        // Skip share/save/follow
-        if (lower.includes("save") || lower.includes("share") || lower.includes("follow")) continue;
-
-        // Build a usable selector
-        const id = b.id ? `#${CSS.escape(b.id)}` : "";
-        const ariaLabel = b.getAttribute("aria-label");
-        let selector = id;
-        if (!selector && ariaLabel) {
-          selector = `[aria-label="${ariaLabel.replace(/"/g, '\\"')}"]`;
+        const isApplyClass =
+          b.classList.contains("jobs-apply-button") || !!b.closest(".jobs-apply-button");
+        // Accessible name starts with "apply"/"easy apply", or it's the apply-button widget.
+        const looksApply =
+          isApplyClass || lower.startsWith("apply") || /\beasy apply\b/.test(lower);
+        if (!looksApply) continue;
+        // Exclude look-alikes (counts, AI helpers, save/share/alerts).
+        if (/(save|share|follow|set alert|clicked apply|tailor|cover letter|match details|stand out|report)/.test(lower)) {
+          continue;
         }
+
+        // Build a usable selector.
+        const tag = b.tagName.toLowerCase();
+        const id = b.id ? `#${CSS.escape(b.id)}` : "";
+        let selector = id;
+        if (!selector && aria) selector = `${tag}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
+        if (!selector && isApplyClass) selector = ".jobs-apply-button";
         if (!selector) {
-          // Position-based fallback: count buttons up to this one with the same text
-          const all = Array.from(document.querySelectorAll("button"));
-          const idx = all.indexOf(b as HTMLButtonElement);
-          if (idx >= 0) selector = `button:nth-of-type(${idx + 1})`;
+          const all = Array.from(document.querySelectorAll(tag));
+          const idx = all.indexOf(b);
+          if (idx >= 0) selector = `${tag}:nth-of-type(${idx + 1})`;
         }
         if (!selector) continue;
 
-        return {
-          selector,
-          text: text.slice(0, 80),
-          isEasyApply: lower.includes("easy apply"),
-        };
+        return { selector, text: text.slice(0, 80), isEasyApply: /\beasy apply\b/.test(lower) };
       }
       return null;
     });
