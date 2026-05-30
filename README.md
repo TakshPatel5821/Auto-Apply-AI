@@ -72,6 +72,7 @@ It can:
 ├── src/
 │   ├── app/                      # Next.js pages and API routes
 │   ├── components/               # Dashboard and UI components
+│   ├── hooks/                    # React custom hooks
 │   ├── lib/                      # Core backend logic
 │   │   ├── ai/                   # Claude, OpenAI, Ollama helpers
 │   │   ├── auth/                 # Login session helpers
@@ -88,7 +89,12 @@ It can:
 │   └── types/                    # Shared TypeScript interfaces
 ├── Dockerfile
 ├── docker-compose.yml
+├── next-env.d.ts                 # Next.js type definitions
+├── next.config.ts                # Next.js configuration
 ├── package.json
+├── postcss.config.js             # PostCSS configuration
+├── tailwind.config.ts            # Tailwind CSS configuration
+├── tsconfig.json                 # TypeScript configuration
 └── README.md
 ```
 

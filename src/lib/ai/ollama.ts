@@ -3,7 +3,13 @@ import OpenAI from "openai";
 const ollamaClient = new OpenAI({
   baseURL: process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1",
   apiKey: "ollama",
-  timeout: 120000,
+  // Local LLMs generating long output (full LaTeX résumés) regularly take longer
+  // than 2 min — the old 120s cap was the main "Request timed out." cause.
+  // Configurable via OLLAMA_TIMEOUT_MS; default 10 min.
+  timeout: Number(process.env.OLLAMA_TIMEOUT_MS) || 600000,
+  // ollamaCompleteJSON already retries on parse failures. Letting the SDK also
+  // retry timeouts 2x compounded the wait to ~6 min per call before failing.
+  maxRetries: 0,
 });
 
 const MODEL = process.env.OLLAMA_MODEL || "qwen2.5:7b";

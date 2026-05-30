@@ -1,22 +1,61 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { ollamaCompleteJSON, ollamaComplete } from "./ollama";
+import { buildResumeLatex } from "@/lib/automation/resume-template";
 
-const USE_OLLAMA =
-  !process.env.ANTHROPIC_API_KEY ||
-  process.env.ANTHROPIC_API_KEY === "not-needed" ||
-  process.env.AI_PROVIDER === "ollama";
+// Provider selection. AI_PROVIDER ∈ "ollama" | "bedrock" | "anthropic".
+// Falls back to ollama when no usable API key is present (local dev default).
+const AI_PROVIDER =
+  process.env.AI_PROVIDER ||
+  (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== "not-needed"
+    ? "anthropic"
+    : "ollama");
 
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-4-8";
+const USE_OLLAMA = AI_PROVIDER === "ollama";
+const USE_BEDROCK = AI_PROVIDER === "bedrock";
 
-// Effort controls thinking depth + overall token spend (GA on Opus 4.8 / Sonnet 4.6).
+// On Bedrock the model IDs carry an "anthropic." prefix and Haiku 4.5 is the
+// cheap/fast default; first-party defaults to Opus 4.8.
+const MODEL =
+  process.env.ANTHROPIC_MODEL ||
+  (USE_BEDROCK ? "anthropic.claude-haiku-4-5" : "claude-opus-4-8");
+
+// Effort controls thinking depth + overall token spend (GA on Opus 4.6+/Sonnet 4.6).
 // Cheap extraction/scoring runs at "low"; rich generation passes "high".
 type Effort = "low" | "medium" | "high";
+
+// `effort` and adaptive thinking exist only on Opus 4.6+/Sonnet 4.6 — they 400 on
+// Haiku 4.5 / Sonnet 4.5. Detect the model so the same request code works on both
+// (Bedrock Haiku 4.5 → omit them; first-party Opus 4.8 → include them).
+const MODEL_SUPPORTS_EFFORT = /opus-4-[678]|sonnet-4-6/.test(MODEL);
+
+// Only attach output_config.effort on models that support it.
+function effortConfig(effort: Effort): Record<string, unknown> {
+  return MODEL_SUPPORTS_EFFORT ? { output_config: { effort } } : {};
+}
+
+// Resume tailoring is a bounded rewrite, not open-ended reasoning. "high" with
+// adaptive thinking was running 5-10 min per job and hitting the SDK's 10-min
+// request timeout (e.g. Oracle, Guidehouse). "medium" keeps quality strong for
+// this task while staying well under the timeout. Set TAILOR_EFFORT=high to
+// restore maximum polish. (Ignored on Haiku 4.5, which has no effort param.)
+const TAILOR_EFFORT: Effort = (process.env.TAILOR_EFFORT as Effort) || "medium";
 
 let _clientPromise: Promise<Anthropic> | null = null;
 async function getClient(): Promise<Anthropic> {
   if (!_clientPromise) {
     _clientPromise = (async () => {
       const { default: AnthropicSDK } = await import("@anthropic-ai/sdk");
+      if (USE_BEDROCK) {
+        // Claude in Amazon Bedrock (Mantle) endpoint. The standard Anthropic
+        // client supports it via baseURL + a bearer token passed as apiKey
+        // (sent as the x-api-key header). No SigV4 / @anthropic-ai/bedrock-sdk
+        // needed — that path can't use an ABSK bearer token in TypeScript.
+        const region = process.env.AWS_REGION || "us-east-1";
+        return new AnthropicSDK({
+          apiKey: process.env.AWS_BEARER_TOKEN_BEDROCK || process.env.ANTHROPIC_API_KEY,
+          baseURL: `https://bedrock-mantle.${region}.api.aws/anthropic`,
+        });
+      }
       return new AnthropicSDK({ apiKey: process.env.ANTHROPIC_API_KEY });
     })();
   }
@@ -32,6 +71,28 @@ function stripJsonFences(text: string): string {
   return t;
 }
 
+// ─── Defensive coercion helpers ──────────────────────────────────────────────
+// The model occasionally returns a field as a nested object/array instead of the
+// expected scalar. Writing such a value to disk crashes with ERR_INVALID_ARG_TYPE,
+// which aborts the whole tailor → CV → apply pipeline. These keep it robust.
+
+function asString(val: unknown): string {
+  if (typeof val === "string") return val;
+  if (val == null) return "";
+  if (Array.isArray(val)) return val.filter((v): v is string => typeof v === "string").join("\n\n");
+  if (typeof val === "object") {
+    return Object.values(val as Record<string, unknown>)
+      .filter((v): v is string => typeof v === "string")
+      .join("\n\n");
+  }
+  return String(val);
+}
+
+function asStringArray(val: unknown): string[] {
+  if (Array.isArray(val)) return val.filter((v): v is string => typeof v === "string");
+  return [];
+}
+
 async function ai<T>(prompt: string, system: string, tokens = 1024, effort: Effort = "low"): Promise<T> {
   if (USE_OLLAMA) return ollamaCompleteJSON<T>(prompt, system, tokens);
 
@@ -39,7 +100,7 @@ async function ai<T>(prompt: string, system: string, tokens = 1024, effort: Effo
   const res = await client.messages.create({
     model: MODEL,
     max_tokens: tokens,
-    output_config: { effort },
+    ...effortConfig(effort),
     system: system + "\n\nRespond with ONLY valid JSON.",
     messages: [{ role: "user", content: prompt }],
   });
@@ -58,7 +119,7 @@ async function aiLong<T>(prompt: string, system: string, tokens: number, effort:
   const stream = client.messages.stream({
     model: MODEL,
     max_tokens: tokens,
-    output_config: { effort },
+    ...effortConfig(effort),
     system: system + "\n\nRespond with ONLY valid JSON.",
     messages: [{ role: "user", content: prompt }],
   });
@@ -235,11 +296,14 @@ Return JSON: {"answer":"concise answer","category":"GENERAL|VISA_SPONSORSHIP|WOR
 }
 
 // ─── Combined tailor + analyze + cover letter (FAST path) ────────────────────
-// Single Claude call with prompt caching. Resume + system prompt are cached so
-// every subsequent job in the same session reads them at ~10% cost.
-// Replaces 3 separate calls (analyze + tailor + cover letter) with 1.
+// One model call returns a job-tailored SUMMARY + cover letter + ATS analysis.
+// The résumé itself is the fixed, page-tested template (see resume-template.ts);
+// only the Professional Summary is swapped in. This is far more reliable than
+// asking the model to emit a whole LaTeX document (which overflowed pages and
+// produced uncompilable output). System prompt + candidate profile are cached.
 
 export interface FullTailorResult {
+  tailoredSummary: string;
   tailoredLatex: string;
   coverLetter: string;
   atsScore: number;
@@ -254,115 +318,102 @@ export interface FullTailorResult {
   };
 }
 
+// Turn a parsed model response into a FullTailorResult, building the final LaTeX
+// from the fixed template + tailored summary. Defensive about field shapes.
+function buildTailorResult(raw: Record<string, unknown>): FullTailorResult {
+  const ja = (raw.jobAnalysis as Record<string, unknown>) || {};
+  const tailoredSummary = asString(raw.tailoredSummary) || asString(raw.summary);
+  const sectionsModified = asStringArray(raw.sectionsModified);
+  if (!sectionsModified.length) sectionsModified.push("summary");
+  return {
+    tailoredSummary,
+    tailoredLatex: buildResumeLatex(tailoredSummary),
+    coverLetter: asString(raw.coverLetter),
+    atsScore: typeof raw.atsScore === "number" ? raw.atsScore : 5,
+    keywordsAdded: asStringArray(raw.keywordsAdded),
+    sectionsModified,
+    tailoringNotes: asString(raw.tailoringNotes),
+    jobAnalysis: {
+      atsKeywords: asStringArray(ja.atsKeywords),
+      requiredSkills: asStringArray(ja.requiredSkills),
+      technologies: asStringArray(ja.technologies),
+      experienceLevel: asString(ja.experienceLevel) || "mid",
+    },
+  };
+}
+
 export async function claudeFullTailor(
   resumeData: Record<string, unknown>,
-  originalLatex: string,
   jobDescription: string,
   jobTitle: string,
   companyName: string
 ): Promise<FullTailorResult> {
-  // Ollama fallback: do 3 sequential calls (slower but works without API key)
-  if (USE_OLLAMA) {
-    const jobAnalysis = await claudeAnalyzeJob(jobDescription) as Record<string, unknown>;
-    const tailored = await claudeTailorResume(originalLatex, jobDescription, resumeData, jobAnalysis) as {
-      latexContent: string; atsScore: number; keywordsAdded?: string[]; sectionsModified?: string[]; tailoringNotes?: string;
-    };
-    const cl = await claudeGenerateCoverLetter(jobDescription, companyName, jobTitle, resumeData) as { content: string };
-    return {
-      tailoredLatex: tailored.latexContent || originalLatex,
-      coverLetter: cl.content || "",
-      atsScore: tailored.atsScore ?? 5,
-      keywordsAdded: tailored.keywordsAdded || [],
-      sectionsModified: tailored.sectionsModified || [],
-      tailoringNotes: tailored.tailoringNotes || "",
-      jobAnalysis: {
-        atsKeywords: (jobAnalysis.atsKeywords as string[]) || [],
-        requiredSkills: (jobAnalysis.requiredSkills as string[]) || [],
-        technologies: (jobAnalysis.technologies as string[]) || [],
-        experienceLevel: (jobAnalysis.experienceLevel as string) || "mid",
-      },
-    };
-  }
-
-  // Claude API path — single call with prompt caching
-  const client = await getClient();
   const contactInfo = (resumeData.contactInfo as Record<string, string>) || {};
   const skills = (resumeData.skills as string[] || []).slice(0, 20).join(", ");
   const tech = (resumeData.technologies as string[] || []).slice(0, 20).join(", ");
   const yrs = resumeData.yearsOfExperience || 0;
-  const candidateName = contactInfo.name || "Applicant";
+  const candidateName = contactInfo.name || "Patel Takshkumar Girishbhai";
 
-  // Stream with .finalMessage() so longer outputs don't hit HTTP timeouts
-  const stream = client.messages.stream({
-    model: MODEL,
-    max_tokens: 16000,
-    thinking: { type: "adaptive" },
-    output_config: { effort: "high" },
-    system: [
-      {
-        type: "text",
-        text: `You are an expert ATS resume tailor and cover letter writer.
+  const systemRules = `You are an expert ATS resume tailor and cover letter writer.
 
 STRICT RULES:
 - NEVER fabricate experience, education, skills, or accomplishments
-- Only rewrite, reorder, and emphasize content the candidate already has
-- Inject the target keywords ONLY where they fit truthfully into existing bullets
-- Keep resume to ONE page (no new sections, no padding)
-- Use a professional, confident, concise tone
+- Only emphasize content the candidate already has
+- The PROFESSIONAL SUMMARY is the only part of the resume that changes — write it as plain text (no markdown, no LaTeX), 2-3 sentences, ~55 words max, weaving in the job's most relevant keywords truthfully
 - Cover letter: 3 short paragraphs (hook → why-you-fit → close)
-- Return ONLY a single JSON object — no markdown fences, no prose, no preamble`,
-      },
-      {
-        type: "text",
-        text: `CANDIDATE PROFILE (same for every job in this session):
-Name: ${candidateName}
-Email: ${contactInfo.email || ""}
-Phone: ${contactInfo.phone || ""}
-Location: ${contactInfo.location || ""}
-LinkedIn: ${contactInfo.linkedin || ""}
-GitHub: ${contactInfo.github || ""}
+- Return ONLY a single JSON object — no markdown fences, no prose, no preamble`;
 
+  const candidateProfile = `CANDIDATE PROFILE (same for every job this session):
+Name: ${candidateName}
 Skills: ${skills}
 Technologies: ${tech}
 Years of experience: ${yrs}
+Background: M.S. Software Engineering (UT Arlington, May 2026); Python data pipelines & IoT systems; PHP/MySQL & full-stack web development; Azure AZ-900; Linux/UNIX, TCP/IP, Wireshark, security. Only claim skills/experience consistent with this profile.`;
 
-ORIGINAL LATEX RESUME (modify this to match each job):
-\`\`\`latex
-${originalLatex.slice(0, 4000)}
-\`\`\``,
-        cache_control: { type: "ephemeral" },
-      },
-    ],
-    messages: [
-      {
-        role: "user",
-        content: `JOB POSTING — ${jobTitle} @ ${companyName}:
+  const userPrompt = `JOB POSTING — ${jobTitle} @ ${companyName}:
 
 ${jobDescription.slice(0, 3000)}
 
-In ONE response, do all four:
-1. Analyze the job → extract ATS keywords, required skills, technologies, experience level
-2. Tailor the LaTeX resume → rewrite bullets, inject job keywords naturally, reorder skills to lead with relevant ones
-3. Write a 3-paragraph cover letter personalised to this exact role and company
-4. Score the tailored resume's ATS match (1 = perfect, 10 = poor)
+Do all of the following for this candidate:
+1. Analyze the job → ATS keywords, required skills, technologies, experience level (entry|mid|senior).
+2. Write a tailored PROFESSIONAL SUMMARY (plain text, 2-3 sentences, ~55 words) for THIS role using only the candidate's real skills.
+3. Write a 3-paragraph cover letter personalised to this exact role and company.
+4. Score the resume's ATS match for this job (1 = perfect, 10 = poor).
 
-Return ONLY this JSON object:
+Return ONLY this JSON object (no markdown fences):
 {
-  "jobAnalysis": {
-    "atsKeywords": ["..."],
-    "requiredSkills": ["..."],
-    "technologies": ["..."],
-    "experienceLevel": "entry|mid|senior"
-  },
-  "tailoredLatex": "FULL LATEX CODE HERE",
-  "coverLetter": "Dear Hiring Manager,\\n\\n[paragraph 1]\\n\\n[paragraph 2]\\n\\n[paragraph 3]\\n\\nSincerely,\\n${candidateName}",
-  "atsScore": 7,
+  "jobAnalysis": {"atsKeywords":["..."],"requiredSkills":["..."],"technologies":["..."],"experienceLevel":"entry|mid|senior"},
+  "tailoredSummary": "2-3 sentence plain-text summary",
+  "coverLetter": "Dear Hiring Manager,\\n\\n[p1]\\n\\n[p2]\\n\\n[p3]\\n\\nSincerely,\\n${candidateName}",
+  "atsScore": 5,
   "keywordsAdded": ["..."],
-  "sectionsModified": ["experience", "skills"],
-  "tailoringNotes": "brief description of what changed"
-}`,
-      },
+  "tailoringNotes": "what you emphasised"
+}`;
+
+  // Ollama fallback (local) — single JSON completion.
+  if (USE_OLLAMA) {
+    const raw = await ollamaCompleteJSON<Record<string, unknown>>(
+      userPrompt,
+      `${systemRules}\n\n${candidateProfile}`,
+      2000
+    );
+    return buildTailorResult(raw);
+  }
+
+  // Claude / Bedrock path — streaming + prompt caching.
+  // adaptive thinking + effort only exist on Opus 4.6+/Sonnet 4.6 — omit on
+  // Haiku 4.5 (Bedrock default), which would otherwise 400.
+  const client = await getClient();
+  const stream = client.messages.stream({
+    model: MODEL,
+    max_tokens: 2000,
+    ...(MODEL_SUPPORTS_EFFORT ? { thinking: { type: "adaptive" as const } } : {}),
+    ...effortConfig(TAILOR_EFFORT),
+    system: [
+      { type: "text", text: systemRules },
+      { type: "text", text: candidateProfile, cache_control: { type: "ephemeral" } },
     ],
+    messages: [{ role: "user", content: userPrompt }],
   });
 
   const finalMessage = await stream.finalMessage();
@@ -371,21 +422,17 @@ Return ONLY this JSON object:
     throw new Error("No text response from Claude");
   }
 
-  const parsed = JSON.parse(stripJsonFences(textBlock.text)) as FullTailorResult;
+  const raw = JSON.parse(stripJsonFences(textBlock.text)) as Record<string, unknown>;
 
-  // Log cache stats so user can see caching is working
   const usage = finalMessage.usage;
   if (usage) {
-    const cacheHit = usage.cache_read_input_tokens ?? 0;
-    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
-    const uncached = usage.input_tokens;
     // eslint-disable-next-line no-console
     console.log(
-      `[claudeFullTailor] tokens: in=${uncached} cache_read=${cacheHit} cache_write=${cacheWrite} out=${usage.output_tokens}`
+      `[claudeFullTailor] tokens: in=${usage.input_tokens} cache_read=${usage.cache_read_input_tokens ?? 0} out=${usage.output_tokens}`
     );
   }
 
-  return parsed;
+  return buildTailorResult(raw);
 }
 
 // ─── Generate LaTeX from scratch ──────────────────────────────────────────────
