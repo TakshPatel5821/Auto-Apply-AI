@@ -276,23 +276,69 @@ Return JSON:
 }
 
 // ─── Answer screening question ────────────────────────────────────────────────
+// Valid memory categories — keep in sync with the Prisma MemoryCategory enum.
+const VALID_CATEGORIES = [
+  "GENERAL",
+  "VISA_SPONSORSHIP",
+  "WORK_AUTHORIZATION",
+  "SALARY",
+  "EXPERIENCE",
+  "RELOCATION",
+  "DEMOGRAPHICS",
+  "AVAILABILITY",
+  "REFERENCES",
+  "CUSTOM",
+] as const;
+
+// Coerce whatever the model returns into a valid enum value (defaults GENERAL).
+export function normalizeCategory(raw: unknown): string {
+  const s = String(raw || "").toUpperCase().trim();
+  // Models sometimes echo the whole "A|B|C" list — take the first valid token.
+  for (const token of s.split(/[|,/\s]+/)) {
+    if ((VALID_CATEGORIES as readonly string[]).includes(token)) return token;
+  }
+  return "GENERAL";
+}
+
 export async function claudeAnswerQuestion(
   question: string,
   context: Record<string, unknown>,
   previousAnswers: { question: string; answer: string }[]
-) {
+): Promise<{ answer: string; category: string }> {
   const recent = previousAnswers.slice(-3).map((a) => `${a.question}: ${a.answer}`).join(" | ");
+  const contact = (context.contactInfo as Record<string, string>) || {};
+  const profile = [
+    contact.name && `Name: ${contact.name}`,
+    contact.email && `Email: ${contact.email}`,
+    contact.phone && `Phone: ${contact.phone}`,
+    contact.location && `Location: ${contact.location}`,
+    context.yearsOfExperience && `Years of experience: ${context.yearsOfExperience}`,
+  ].filter(Boolean).join("\n");
 
-  return ai(
-    `Answer this job application question truthfully and briefly.
+  const raw = (await ai(
+    `You are filling out a job application for a candidate. Answer the ONE question below truthfully, briefly, and in the FIRST PERSON. Use the candidate facts when relevant. Do NOT repeat the question. Do NOT output placeholder text.
 
-QUESTION: "${question}"
-CONTEXT: ${recent || "No prior answers"}
+CANDIDATE FACTS:
+${profile || "No specific facts available"}
 
-Return JSON: {"answer":"concise answer","category":"GENERAL|VISA_SPONSORSHIP|WORK_AUTHORIZATION|SALARY|EXPERIENCE|RELOCATION|AVAILABILITY"}`,
-    "Job application answerer. Return JSON only.",
+RECENT ANSWERS: ${recent || "None"}
+
+QUESTION TO ANSWER: "${question}"
+
+Pick the single best category from: GENERAL, VISA_SPONSORSHIP, WORK_AUTHORIZATION, SALARY, EXPERIENCE, RELOCATION, DEMOGRAPHICS, AVAILABILITY, REFERENCES, CUSTOM.
+
+Reply with ONLY a JSON object in this exact shape, replacing the example values with your real answer:
+{"answer": "<your actual answer to the question>", "category": "<ONE category word>"}`,
+    "You fill job application fields. Output a single JSON object only — never echo the example values.",
     128
-  );
+  )) as { answer?: unknown; category?: unknown };
+
+  let answer = String(raw?.answer ?? "").trim();
+  // Guard against the model echoing the placeholder/example verbatim.
+  if (/^<.*>$/.test(answer) || /your (actual )?answer/i.test(answer) || answer.toLowerCase() === "concise answer") {
+    answer = "";
+  }
+  return { answer, category: normalizeCategory(raw?.category) };
 }
 
 // ─── Combined tailor + analyze + cover letter (FAST path) ────────────────────

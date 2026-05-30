@@ -1,11 +1,19 @@
 import { chromium, BrowserContext, Page } from "playwright";
 import { mkdirSync, existsSync } from "fs";
-import { join } from "path";
+import { join, isAbsolute } from "path";
 import { homedir } from "os";
 import { prisma } from "@/lib/db/prisma";
 import { findAnswer, saveAnswer } from "@/lib/storage/memory";
 import { claudeAnswerQuestion } from "@/lib/ai/claude";
 import { saveScreenshot } from "@/lib/storage/file-manager";
+
+// Résumé PDF paths are stored relative to the project root ("applications/..").
+// existsSync on a relative path is cwd-dependent, so resolve to absolute first.
+function resolveResumePath(p?: string | null): string | null {
+  if (!p) return null;
+  const abs = isAbsolute(p) ? p : join(process.cwd(), p);
+  return existsSync(abs) ? abs : null;
+}
 import { Logger } from "@/lib/logging/logger";
 import { scraperStatus } from "./scraper-status";
 import { MemoryCategory } from "@/types";
@@ -151,11 +159,11 @@ export class ApplyEngine {
     await prisma.application.update({ where: { id: applicationId }, data: { status: "IN_PROGRESS" } });
     await prisma.job.update({ where: { id: job.id }, data: { status: "APPLYING" } });
 
-    const resumePdfPath = application.tailoredResume?.pdfPath;
-    if (resumePdfPath && existsSync(resumePdfPath)) {
+    const resumePdfPath = resolveResumePath(application.tailoredResume?.pdfPath);
+    if (resumePdfPath) {
       await Logger.info("APPLY", `Resume PDF ready: ${resumePdfPath}`);
     } else {
-      await Logger.warn("APPLY", `No PDF resume available (path: ${resumePdfPath || "none"}) — apply will try without upload`);
+      await Logger.warn("APPLY", `No PDF resume available (path: ${application.tailoredResume?.pdfPath || "none"}) — apply will try without upload`);
     }
 
     try {
@@ -343,6 +351,9 @@ export class ApplyEngine {
         return true;
       }
 
+      // Handle LinkedIn email field — ensure it's set to the correct email
+      await this.setLinkedInEmailField(process.env.LINKEDIN_EMAIL || 'takshpatel051102@gmail.com');
+
       // Upload resume if there's a file input
       await this.uploadResumeIfVisible(application);
 
@@ -479,7 +490,26 @@ export class ApplyEngine {
   ): Promise<boolean> {
     await Logger.info("APPLY", `Step 5/6: Filling external form on ${this.page!.url()}`);
     await this.delay(2000, 3000);
+
+    // Check if we're redirected to LinkedIn login
+    const currentUrl = this.page!.url();
+    if (currentUrl.includes("linkedin.com/login") || currentUrl.includes("linkedin.com/uas/login")) {
+      await Logger.info("APPLY", "Redirected to LinkedIn login — attempting to login");
+      const loginSuccess = await this.handleLinkedInLogin();
+      if (!loginSuccess) {
+        await Logger.error("APPLY", "LinkedIn login failed");
+        await this.takeStepScreenshot(application.folderPath, "linkedin-login-failed");
+        return false;
+      }
+      await this.delay(3000, 4000);
+    }
+
     await this.dismissPopups();
+
+    // Wait for content to load (handles iframes, lazy loading, etc.)
+    await this.page!.waitForLoadState("networkidle").catch(() => null);
+    await this.delay(1500, 2500);
+
     await this.takeStepScreenshot(application.folderPath, "external-form");
 
     // Site-specific quirks
@@ -488,84 +518,182 @@ export class ApplyEngine {
       return this.fillWorkdayForm(application);
     }
 
-    // Upload resume FIRST (some forms auto-fill from resume)
-    await this.uploadResumeIfVisible(application);
+    // ── Multi-step form loop ──────────────────────────────────────────────────
+    // External ATS forms (iCIMS, ADP, Greenhouse, Lever, etc.) commonly have
+    // several sections: Resume → Contact → Eligibility → Self-ID → Submit. We
+    // walk each step, filling fields and clicking "Next"/"Save & Go to Next
+    // Section" until we reach a real Submit. We ONLY report success on a
+    // genuine confirmation — never assume. If we get stuck (validation errors,
+    // unknown buttons), we hand off to the human instead of faking a submit.
+    const MAX_STEPS = 8;
+    for (let step = 1; step <= MAX_STEPS; step++) {
+      await this.dismissPopups();
 
-    // Then fill remaining fields
-    await this.fillVisibleFields(application, scope);
+      // Did a previous click already land us on a confirmation page?
+      if (await this.detectSuccessPage()) {
+        await Logger.success("APPLY", "Submission confirmed!");
+        return true;
+      }
 
-    await this.delay(800, 1500);
-    await this.takeStepScreenshot(application.folderPath, "form-filled");
+      await Logger.info("APPLY", `Form step ${step}: filling fields...`);
+      await this.uploadResumeIfVisible(application);
+      await this.fillVisibleFields(application, scope);
+      await this.delay(700, 1200);
+      await this.takeStepScreenshot(application.folderPath, `step-${step}-filled`);
 
-    // Find and click submit
-    await Logger.info("APPLY", "Step 6/6: Locating submit button...");
-    const submitted = await this.clickSubmitButton();
-    if (!submitted) {
-      await Logger.error("APPLY", "Could not find submit button");
-      await this.takeStepScreenshot(application.folderPath, "no-submit");
-      return false;
+      const sigBefore = await this.pageSignature();
+
+      // Prefer a real final-submit button; otherwise advance to the next step.
+      let action: "submit" | "advance" | null = null;
+      if (await this.clickFinalSubmit()) {
+        action = "submit";
+      } else if (await this.clickAdvance()) {
+        action = "advance";
+      }
+
+      if (!action) {
+        await Logger.warn("APPLY", "No Submit or Next button found — handing off to human");
+        await this.takeStepScreenshot(application.folderPath, `step-${step}-no-button`);
+        break;
+      }
+
+      await Logger.info("APPLY", `Clicked ${action === "submit" ? "Submit" : "Next/Continue"} — waiting...`);
+      await this.delay(3000, 5000);
+      await this.takeStepScreenshot(application.folderPath, `step-${step}-after-${action}`);
+
+      // Real confirmation? Done.
+      if (await this.detectSuccessPage()) {
+        await Logger.success("APPLY", "Submission confirmed!");
+        return true;
+      }
+
+      // Did the page actually change? If not, we're stuck (likely a validation
+      // error on a field we couldn't fill). Stop and let the human finish.
+      const sigAfter = await this.pageSignature();
+      if (sigAfter === sigBefore) {
+        await Logger.warn("APPLY", `Form did not advance after ${action} — likely a required field we couldn't fill. Handing off to human.`);
+        await this.takeStepScreenshot(application.folderPath, `step-${step}-stuck`);
+        break;
+      }
+      // Page advanced to a new step — continue the loop.
     }
 
-    await Logger.info("APPLY", "Submit clicked — waiting for confirmation");
-    await this.delay(4000, 6000);
-    await this.takeStepScreenshot(application.folderPath, "post-submit");
-
-    const success = await this.detectSuccessPage();
-    if (success) {
-      await Logger.success("APPLY", "Submission confirmed!");
-      return true;
-    }
-
-    await Logger.warn("APPLY", "Could not confirm success — assuming submitted (check screenshots)");
-    return true;
+    // We could not confirm an automatic submission. Rather than lie, pause and
+    // let the user finish in the browser, then re-verify honestly.
+    return this.waitForHumanTakeover(
+      application,
+      `Finish & submit "${application.job.jobTitle}" @ ${application.job.companyName} in the browser, then click Resume`
+    );
   }
 
-  // Workday-specific multi-step flow (skeleton — most Workday flows need login)
+  // Workday-specific flow — these almost always require an account/login the
+  // first time, so we hand off to the human, then verify honestly.
   private async fillWorkdayForm(application: NonNullable<ApplicationWithRelations>): Promise<boolean> {
-    await Logger.warn("APPLY", "Workday detected — these usually require manual login first time. Pausing for human takeover.");
-    await this.waitForHumanInput(
-      "Workday login + first step",
-      "body",
-      "CUSTOM" as MemoryCategory,
-      application.job.platform,
+    await Logger.warn("APPLY", "Workday detected — usually needs a manual login the first time.");
+    // Try to pre-fill anything visible to save the user time.
+    await this.uploadResumeIfVisible(application).catch(() => {});
+    await this.fillVisibleFields(application, "body").catch(() => {});
+    return this.waitForHumanTakeover(
+      application,
+      `Log in & submit "${application.job.jobTitle}" @ ${application.job.companyName} on Workday, then click Resume`,
       10 * 60 * 1000
     );
-    return this.fillVisibleFields(application, "body").then(() => this.clickSubmitButton());
   }
 
   // ─── Find and click submit ─────────────────────────────────────────────────
 
-  private async clickSubmitButton(): Promise<boolean> {
+  // Click a genuine FINAL submit button (the one that completes the whole
+  // application). Kept deliberately narrow so we don't mistake a step's "Next"
+  // for the real submit. Returns true only if such a button was found+clicked.
+  private async clickFinalSubmit(): Promise<boolean> {
     const candidates = [
-      'button[type="submit"]',
-      'input[type="submit"]',
+      'button[aria-label="Submit application"]',
       'button:has-text("Submit application")',
       'button:has-text("Submit Application")',
-      'button:has-text("Submit")',
+      'button:has-text("Submit your application")',
+      'button:has-text("Submit Your Application")',
       'button:has-text("Send application")',
       'button:has-text("Send Application")',
-      'button:has-text("Send")',
-      'button:has-text("Apply Now")',
-      'button:has-text("Apply now")',
+      'button:has-text("Complete application")',
       'button:has-text("Complete Application")',
+      'input[type="submit"][value*="Submit application" i]',
       'a:has-text("Submit application")',
-      '.btn-primary[type="submit"]',
-      '[data-automation-id="bottom-navigation-next-button"]',
+      // Plain "Submit"/"Send" — last, and only as a final action.
+      'button:has-text("Submit")',
+      'button:has-text("Send")',
+      'input[type="submit"][value*="submit" i]',
     ];
+    return this.clickFirstVisible(candidates, "Submit");
+  }
 
-    for (const sel of candidates) {
+  // Click a button that ADVANCES to the next step of a multi-step form.
+  private async clickAdvance(): Promise<boolean> {
+    const candidates = [
+      'button:has-text("Save & Go to Next Section")',
+      'button:has-text("Save and Go to Next Section")',
+      'button:has-text("Save & Continue")',
+      'button:has-text("Save and Continue")',
+      'button:has-text("Save & Next")',
+      'button:has-text("Continue to next step")',
+      'button[aria-label*="Continue to next step"]',
+      'button:has-text("Review your application")',
+      'button[aria-label*="Review"]',
+      'button:has-text("Review")',
+      'button:has-text("Continue")',
+      'button:has-text("Next")',
+      'button:has-text("Proceed")',
+      'button:has-text("Save and continue")',
+      '[data-automation-id="bottom-navigation-next-button"]',
+      'a:has-text("Continue")',
+      'a:has-text("Next")',
+      // Generic form-submit as a last resort (advances single-form steps).
+      'button[type="submit"]',
+      'input[type="submit"]',
+      '.btn-primary[type="submit"]',
+    ];
+    return this.clickFirstVisible(candidates, "Next");
+  }
+
+  // Click the first visible+enabled element matching any of the selectors.
+  private async clickFirstVisible(selectors: string[], kind: string): Promise<boolean> {
+    for (const sel of selectors) {
       try {
         const btn = await this.page!.$(sel);
         if (!btn) continue;
-        const visible = await btn.isVisible().catch(() => false);
-        if (!visible) continue;
+        if (!(await btn.isVisible().catch(() => false))) continue;
+        if (await btn.isDisabled().catch(() => false)) continue;
 
-        await Logger.info("APPLY", `Clicking submit: ${sel}`);
+        await btn.scrollIntoViewIfNeeded().catch(() => null);
+        await this.delay(200, 500);
+        await Logger.info("APPLY", `${kind} → ${sel}`);
         await btn.click({ timeout: 5000 });
         return true;
       } catch { /* try next */ }
     }
     return false;
+  }
+
+  // A lightweight fingerprint of the current form page. We compare it before
+  // and after a click to tell whether we actually advanced (vs. stuck on a
+  // validation error). Combines URL, visible-input count, and the top heading.
+  private async pageSignature(): Promise<string> {
+    try {
+      const url = this.page!.url().split("?")[0];
+      const info = await this.page!.evaluate(() => {
+        const visibleInputs = Array.from(
+          document.querySelectorAll("input:not([type=hidden]), textarea, select")
+        ).filter((el) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        }).length;
+        const heading =
+          document.querySelector("h1, h2, [role='heading']")?.textContent?.trim().slice(0, 80) || "";
+        return `${visibleInputs}|${heading}`;
+      });
+      return `${url}|${info}`;
+    } catch {
+      return Math.random().toString(); // force "changed" on error
+    }
   }
 
   private async detectSuccessPage(): Promise<boolean> {
@@ -576,7 +704,9 @@ export class ApplyEngine {
         url.includes("success") ||
         url.includes("confirmation") ||
         url.includes("submitted") ||
-        url.includes("applied")
+        url.includes("applied") ||
+        url.includes("complete") ||
+        url.includes("finish")
       ) {
         return true;
       }
@@ -589,9 +719,14 @@ export class ApplyEngine {
         body.includes("application submitted") ||
         body.includes("application received") ||
         body.includes("thank you for applying") ||
+        body.includes("thank you") ||
         body.includes("your application was sent") ||
         body.includes("we received your") ||
-        body.includes("successfully applied")
+        body.includes("successfully applied") ||
+        body.includes("application complete") ||
+        body.includes("application sent") ||
+        body.includes("confirmed") ||
+        body.includes("success")
       );
     } catch {
       return false;
@@ -626,11 +761,88 @@ export class ApplyEngine {
     }
   }
 
+  // ─── LinkedIn login handler ──────────────────────────────────────────────────
+
+  private async handleLinkedInLogin(): Promise<boolean> {
+    const email = process.env.LINKEDIN_EMAIL || "takshpatel051102@gmail.com";
+    const password = process.env.LINKEDIN_PASSWORD || "T@k$h@020921";
+
+    try {
+      // Try to find and fill the email input
+      const emailInput = await this.page!.$('input[type="email"], input[id*="email"], input[name*="email"]');
+      if (emailInput) {
+        await Logger.info("APPLY", `Entering LinkedIn email: ${email}`);
+        await emailInput.fill(email);
+        await this.delay(500, 800);
+      }
+
+      // Find and fill the password input
+      const passwordInput = await this.page!.$('input[type="password"], input[name*="password"]');
+      if (passwordInput) {
+        await Logger.info("APPLY", "Entering LinkedIn password");
+        await passwordInput.fill(password);
+        await this.delay(500, 800);
+      }
+
+      // Click sign in button
+      const signInBtn = await this.page!.$('button[type="submit"], button[aria-label*="Sign in"], button:has-text("Sign in"), button:has-text("Sign In")');
+      if (signInBtn) {
+        await Logger.info("APPLY", "Clicking Sign In button");
+        await signInBtn.click();
+        await this.delay(4000, 6000);
+
+        // Check if login was successful
+        const stillOnLogin = this.page!.url().includes("linkedin.com/login");
+        if (stillOnLogin) {
+          await Logger.warn("APPLY", "Still on login page — login may have failed");
+          return false;
+        }
+
+        await Logger.success("APPLY", "LinkedIn login successful");
+        return true;
+      } else {
+        await Logger.warn("APPLY", "Could not find LinkedIn sign-in button");
+        return false;
+      }
+    } catch (e) {
+      await Logger.error("APPLY", `LinkedIn login error: ${e}`);
+      return false;
+    }
+  }
+
+  // ─── LinkedIn email field ────────────────────────────────────────────────────
+
+  private async setLinkedInEmailField(email: string): Promise<void> {
+    try {
+      const emailInputs = await this.page!.$$('input[type="email"], input[type="text"][placeholder*="email" i], input[placeholder*="email" i]');
+      if (emailInputs.length === 0) return;
+
+      for (const input of emailInputs) {
+        const currentValue = await input.inputValue().catch(() => "");
+        if (currentValue.trim()) {
+          // Field already filled, check if it's the right email
+          if (!currentValue.includes(email)) {
+            await Logger.info("APPLY", `Updating email field from "${currentValue}" to "${email}"`);
+            await input.fill(email);
+            await this.delay(500, 800);
+          }
+        } else {
+          // Empty email field, fill it
+          await Logger.info("APPLY", `Setting email field to "${email}"`);
+          await input.fill(email);
+          await this.delay(500, 800);
+        }
+      }
+    } catch (e) {
+      await Logger.warn("APPLY", `Email field update error: ${e}`);
+    }
+  }
+
   // ─── Resume upload ──────────────────────────────────────────────────────────
 
   private async uploadResumeIfVisible(application: NonNullable<ApplicationWithRelations>): Promise<void> {
-    const pdfPath = application.tailoredResume?.pdfPath;
-    if (!pdfPath || !existsSync(pdfPath)) {
+    const pdfPath = resolveResumePath(application.tailoredResume?.pdfPath);
+    if (!pdfPath) {
       await Logger.warn("APPLY", "Skipping resume upload — no PDF available");
       return;
     }
@@ -650,16 +862,28 @@ export class ApplyEngine {
           accept.includes("pdf") ||
           accept.includes("doc") ||
           accept === "*" ||
-          /resume|cv/i.test(name) ||
-          /resume|cv/i.test(id);
+          /resume|cv|attachment|document|file/i.test(name) ||
+          /resume|cv|attachment|document|file/i.test(id);
 
         if (isResumeInput) {
-          await Logger.info("APPLY", `Uploading resume to file input (name=${name}, id=${id})`);
+          await Logger.info("APPLY", `Uploading resume PDF to file input (name=${name}, id=${id})`);
           try {
             await input.setInputFiles(pdfPath);
-            await this.delay(2000, 3500);
-            await Logger.success("APPLY", "Resume uploaded");
-            return;
+            // Wait longer for upload to complete, especially on slow connections
+            await this.delay(3000, 5000);
+
+            // Verify upload succeeded by checking for upload confirmation
+            const uploadSuccess = await this.page!.evaluate(() => {
+              const success = document.body.innerText.toLowerCase();
+              return !success.includes("error") && !success.includes("failed");
+            }).catch(() => true); // Default to true if we can't verify
+
+            if (uploadSuccess) {
+              await Logger.success("APPLY", `Resume uploaded: ${pdfPath}`);
+              return;
+            } else {
+              await Logger.warn("APPLY", "Upload might have failed — check screenshots");
+            }
           } catch (e) {
             await Logger.warn("APPLY", `setInputFiles failed: ${e}`);
           }
@@ -737,12 +961,16 @@ export class ApplyEngine {
       };
 
       const inputs = root.querySelectorAll(
-        'input:not([type="hidden"]):not([type="submit"]):not([type="file"]):not([type="button"]):not([type="radio"]):not([type="checkbox"]):not([type="image"]), textarea, select'
+        'input:not([type="hidden"]):not([type="submit"]):not([type="file"]):not([type="button"]):not([type="image"]), textarea, select'
       );
 
       inputs.forEach((el) => {
         const htmlEl = el as HTMLElement;
-        // Skip invisible
+        // Skip completely invisible (display:none, visibility:hidden)
+        const style = window.getComputedStyle(htmlEl);
+        if (style.display === "none" || style.visibility === "hidden") return;
+
+        // Allow elements that might be scrolled out of view (still need width/height)
         const rect = htmlEl.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
 
@@ -818,6 +1046,16 @@ export class ApplyEngine {
     const resumeData = (application.resume?.parsedData as Record<string, unknown>) || {};
     const answeredQuestions = (application.answeredQuestions as { question: string; answer: string }[]) || [];
 
+    // Skip junk "fields" that aren't real questions: unlabeled inputs
+    // (field_1, field_2…) and stray UI controls (Save job, search, etc.).
+    // These produce useless AI calls and false human-input pauses.
+    const junk = /^field_\d+$/i.test(field.label) ||
+      /^(save( job)?|search|dismiss|close|follow|share|set alert|skip)$/i.test(field.label.trim());
+    if (junk && !field.required) {
+      await Logger.info("APPLY", `  ⏭ skipping non-question field: "${field.label}"`);
+      return;
+    }
+
     // Skip pre-filled text fields
     if (!["radio", "checkbox", "select"].includes(field.type)) {
       try {
@@ -862,7 +1100,7 @@ export class ApplyEngine {
           }
         } catch (e) {
           await Logger.warn("APPLY", `  ⚠ AI error for "${field.label}": ${e} — pausing for human`);
-          const human = await this.waitForHumanInput(field.label, field.selector, "CUSTOM" as MemoryCategory, application.job.platform);
+          const human = await this.waitForHumanInput(field.label, field.selector, "GENERAL", application.job.platform);
           answer = human || "";
         }
       }
@@ -969,6 +1207,52 @@ export class ApplyEngine {
     }
 
     return humanAnswer || null;
+  }
+
+  // Full-application takeover: pause, let the user finish the application in the
+  // already-open browser, then VERIFY. Returns true only if we can actually
+  // confirm a submission (or the user signals done and the page looks complete).
+  // This is the honest alternative to assuming a submit happened.
+  private async waitForHumanTakeover(
+    application: NonNullable<ApplicationWithRelations>,
+    reason: string,
+    maxWaitMs = 8 * 60 * 1000
+  ): Promise<boolean> {
+    scraperStatus.waitingForUser = true;
+    scraperStatus.reason = reason;
+
+    await Logger.warn("APPLY", "═════════════════════════════════════════");
+    await Logger.warn("APPLY", "⏸  WAITING FOR HUMAN TAKEOVER");
+    await Logger.warn("APPLY", reason);
+    await Logger.warn("APPLY", "Finish in the browser, then click RESUME on the dashboard");
+    await Logger.warn("APPLY", "═════════════════════════════════════════");
+
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      await new Promise((r) => setTimeout(r, 2000));
+      // User clicked Resume?
+      if (!scraperStatus.waitingForUser) break;
+      // Or the page reached a confirmation on its own while they worked.
+      if (await this.detectSuccessPage().catch(() => false)) {
+        await Logger.success("APPLY", "Detected confirmation page during takeover");
+        break;
+      }
+    }
+    scraperStatus.waitingForUser = false;
+
+    await this.takeStepScreenshot(application.folderPath, "after-human-takeover");
+
+    const confirmed = await this.detectSuccessPage().catch(() => false);
+    if (confirmed) {
+      await Logger.success("APPLY", "Application confirmed after human takeover");
+      return true;
+    }
+
+    await Logger.warn(
+      "APPLY",
+      "Could not confirm submission after takeover — marking as NOT submitted so you can retry (no false success)"
+    );
+    return false;
   }
 
   // ─── Screenshots ────────────────────────────────────────────────────────────

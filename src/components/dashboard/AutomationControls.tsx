@@ -10,6 +10,8 @@ interface AutomationState {
   currentJob?: string;
   currentAction?: string;
   startedAt?: string;
+  waitingForUser?: boolean;
+  waitingReason?: string;
 }
 
 interface Resume {
@@ -238,7 +240,22 @@ export function AutomationControls({
         </div>
       )}
 
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-2">
+        {state.waitingForUser && (
+          <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 space-y-2">
+            <div className="text-xs text-yellow-400 font-semibold uppercase">⏸ Waiting for Your Input</div>
+            <div className="text-sm text-yellow-300">{state.waitingReason || "Complete the action in the browser"}</div>
+            <button
+              onClick={pauseResume}
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium text-sm transition-colors"
+            >
+              <Play className="w-4 h-4" />
+              Resume Automation
+            </button>
+          </div>
+        )}
+
         {!state.isRunning ? (
           <>
             <button
@@ -259,22 +276,26 @@ export function AutomationControls({
           </>
         ) : (
           <>
-            <button
-              onClick={pauseResume}
-              disabled={loading}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium text-sm transition-colors"
-            >
-              <Pause className="w-4 h-4" />
-              {state.isPaused ? "Resume" : "Pause"}
-            </button>
-            <button
-              onClick={stopAutomation}
-              disabled={loading}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium text-sm transition-colors"
-            >
-              <Square className="w-4 h-4" />
-              Stop
-            </button>
+            {!state.waitingForUser && (
+              <>
+                <button
+                  onClick={pauseResume}
+                  disabled={loading}
+                  className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium text-sm transition-colors"
+                >
+                  <Pause className="w-4 h-4" />
+                  {state.isPaused ? "Resume" : "Pause"}
+                </button>
+                <button
+                  onClick={stopAutomation}
+                  disabled={loading}
+                  className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium text-sm transition-colors"
+                >
+                  <Square className="w-4 h-4" />
+                  Stop
+                </button>
+              </>
+            )}
           </>
         )}
       </div>
