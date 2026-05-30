@@ -58,10 +58,14 @@ export function saveFile(
 ): string {
   ensureDir(folderPath);
   const filePath = path.join(folderPath, fileName);
-  if (typeof content === "string") {
+  if (Buffer.isBuffer(content)) {
+    fs.writeFileSync(filePath, content);
+  } else if (typeof content === "string") {
     fs.writeFileSync(filePath, content, "utf-8");
   } else {
-    fs.writeFileSync(filePath, content);
+    // Defensive: an unexpected object would otherwise throw ERR_INVALID_ARG_TYPE
+    // and abort the whole tailor pipeline. Serialize so the write always succeeds.
+    fs.writeFileSync(filePath, JSON.stringify(content, null, 2), "utf-8");
   }
   return filePath;
 }
