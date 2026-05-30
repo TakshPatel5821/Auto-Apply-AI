@@ -3,7 +3,7 @@ import { mkdirSync, existsSync } from "fs";
 import { join, isAbsolute } from "path";
 import { homedir } from "os";
 import { prisma } from "@/lib/db/prisma";
-import { findAnswer, saveAnswer } from "@/lib/storage/memory";
+import { findAnswer, saveAnswer, saveHumanAnswer } from "@/lib/storage/memory";
 import { claudeAnswerQuestion } from "@/lib/ai/claude";
 import { saveScreenshot } from "@/lib/storage/file-manager";
 
@@ -16,7 +16,7 @@ function resolveResumePath(p?: string | null): string | null {
 }
 import { Logger } from "@/lib/logging/logger";
 import { scraperStatus } from "./scraper-status";
-import { MemoryCategory } from "@/types";
+import { detectAts, AtsAdapter } from "./ats-adapters";
 
 type ApplicationWithRelations = Awaited<ReturnType<typeof getApplicationWithRelations>>;
 
@@ -80,6 +80,8 @@ const STEALTH_SCRIPT = () => {
 export class ApplyEngine {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  // The current form scope being filled — used when capturing human-entered data.
+  private currentScope = "body";
 
   // ─── Browser lifecycle ──────────────────────────────────────────────────────
 
@@ -357,6 +359,9 @@ export class ApplyEngine {
       // Upload resume if there's a file input
       await this.uploadResumeIfVisible(application);
 
+      // Attach the job-specific cover letter if this step asks for one
+      await this.attachCoverLetterIfRequested(application);
+
       // Fill all form fields inside the modal
       await this.fillVisibleFields(application, '.jobs-easy-apply-modal, .artdeco-modal');
 
@@ -390,9 +395,16 @@ export class ApplyEngine {
         continue;
       }
 
-      await Logger.warn("APPLY", "No next/submit button found in modal — stopping");
+      // No automated path forward — ask the user to nudge it, then auto-resume.
+      await Logger.warn("APPLY", "No next/submit button found in modal — asking you to continue");
       await this.takeStepScreenshot(application.folderPath, "stuck");
-      return false;
+      const progressed = await this.pauseForHumanThenCapture(
+        application,
+        ".jobs-easy-apply-modal, .artdeco-modal",
+        "Easy Apply is stuck — fill the field or click the button in the browser and I'll continue"
+      );
+      if (!progressed) return false;
+      // Loop continues: re-scan modal for success / next step.
     }
 
     await Logger.warn("APPLY", "Easy Apply ran too many steps without finishing");
@@ -512,9 +524,17 @@ export class ApplyEngine {
 
     await this.takeStepScreenshot(application.folderPath, "external-form");
 
-    // Site-specific quirks
+    // Identify the ATS template so we can use platform-specific selectors.
     const url = this.page!.url();
-    if (url.includes("workday") || url.includes("myworkdayjobs")) {
+    const ats = detectAts(url);
+    if (ats) {
+      await Logger.info("APPLY", `Detected ATS: ${ats.label}${ats.notes ? ` — ${ats.notes}` : ""}`);
+    } else {
+      await Logger.info("APPLY", "Unknown ATS template — using generic handler");
+    }
+
+    // Workday (and other login-gated platforms) need a human account first.
+    if (ats?.requiresLogin && (ats.id === "workday")) {
       return this.fillWorkdayForm(application);
     }
 
@@ -530,31 +550,49 @@ export class ApplyEngine {
       await this.dismissPopups();
 
       // Did a previous click already land us on a confirmation page?
-      if (await this.detectSuccessPage()) {
+      if (await this.detectSuccessPage(ats)) {
         await Logger.success("APPLY", "Submission confirmed!");
         return true;
       }
 
       await Logger.info("APPLY", `Form step ${step}: filling fields...`);
-      await this.uploadResumeIfVisible(application);
-      await this.fillVisibleFields(application, scope);
+      await this.uploadResumeIfVisible(application, ats);
+      await this.attachCoverLetterIfRequested(application);
+      const unfilled = await this.fillVisibleFields(application, scope);
       await this.delay(700, 1200);
       await this.takeStepScreenshot(application.folderPath, `step-${step}-filled`);
+
+      // If we couldn't answer some fields, STOP here and let the user fill them.
+      // We auto-detect their input and continue — no Resume button needed.
+      if (unfilled.length > 0) {
+        const progressed = await this.pauseForHumanThenCapture(
+          application,
+          scope,
+          `Fill these in the browser then I'll continue: ${unfilled.slice(0, 6).join(", ")}`
+        );
+        if (!progressed) break; // timed out
+        continue;              // re-scan: their answers are now filled/saved
+      }
 
       const sigBefore = await this.pageSignature();
 
       // Prefer a real final-submit button; otherwise advance to the next step.
       let action: "submit" | "advance" | null = null;
-      if (await this.clickFinalSubmit()) {
+      if (await this.clickFinalSubmit(ats)) {
         action = "submit";
-      } else if (await this.clickAdvance()) {
+      } else if (await this.clickAdvance(ats)) {
         action = "advance";
       }
 
       if (!action) {
-        await Logger.warn("APPLY", "No Submit or Next button found — handing off to human");
+        await Logger.warn("APPLY", "No Submit or Next button found — asking you to continue in the browser");
         await this.takeStepScreenshot(application.folderPath, `step-${step}-no-button`);
-        break;
+        const progressed = await this.pauseForHumanThenCapture(
+          application, scope,
+          "I can't find the next/submit button — click it (or fill remaining fields) in the browser and I'll continue"
+        );
+        if (!progressed) break;
+        continue;
       }
 
       await Logger.info("APPLY", `Clicked ${action === "submit" ? "Submit" : "Next/Continue"} — waiting...`);
@@ -562,24 +600,28 @@ export class ApplyEngine {
       await this.takeStepScreenshot(application.folderPath, `step-${step}-after-${action}`);
 
       // Real confirmation? Done.
-      if (await this.detectSuccessPage()) {
+      if (await this.detectSuccessPage(ats)) {
         await Logger.success("APPLY", "Submission confirmed!");
         return true;
       }
 
       // Did the page actually change? If not, we're stuck (likely a validation
-      // error on a field we couldn't fill). Stop and let the human finish.
+      // error on a field we couldn't fill). Pause for the human, then resume.
       const sigAfter = await this.pageSignature();
       if (sigAfter === sigBefore) {
-        await Logger.warn("APPLY", `Form did not advance after ${action} — likely a required field we couldn't fill. Handing off to human.`);
+        await Logger.warn("APPLY", `Form did not advance after ${action} — probably a required field I missed.`);
         await this.takeStepScreenshot(application.folderPath, `step-${step}-stuck`);
-        break;
+        const progressed = await this.pauseForHumanThenCapture(
+          application, scope,
+          "Form didn't advance — please fix/fill the highlighted fields in the browser and I'll continue"
+        );
+        if (!progressed) break;
+        continue;
       }
       // Page advanced to a new step — continue the loop.
     }
 
-    // We could not confirm an automatic submission. Rather than lie, pause and
-    // let the user finish in the browser, then re-verify honestly.
+    // Exhausted steps without confirmation. Final honest fallback.
     return this.waitForHumanTakeover(
       application,
       `Finish & submit "${application.job.jobTitle}" @ ${application.job.companyName} in the browser, then click Resume`
@@ -605,8 +647,9 @@ export class ApplyEngine {
   // Click a genuine FINAL submit button (the one that completes the whole
   // application). Kept deliberately narrow so we don't mistake a step's "Next"
   // for the real submit. Returns true only if such a button was found+clicked.
-  private async clickFinalSubmit(): Promise<boolean> {
+  private async clickFinalSubmit(ats?: AtsAdapter | null): Promise<boolean> {
     const candidates = [
+      ...(ats?.submitButtons || []),
       'button[aria-label="Submit application"]',
       'button:has-text("Submit application")',
       'button:has-text("Submit Application")',
@@ -627,8 +670,9 @@ export class ApplyEngine {
   }
 
   // Click a button that ADVANCES to the next step of a multi-step form.
-  private async clickAdvance(): Promise<boolean> {
+  private async clickAdvance(ats?: AtsAdapter | null): Promise<boolean> {
     const candidates = [
+      ...(ats?.advanceButtons || []),
       'button:has-text("Save & Go to Next Section")',
       'button:has-text("Save and Go to Next Section")',
       'button:has-text("Save & Continue")',
@@ -696,8 +740,14 @@ export class ApplyEngine {
     }
   }
 
-  private async detectSuccessPage(): Promise<boolean> {
+  private async detectSuccessPage(ats?: AtsAdapter | null): Promise<boolean> {
     try {
+      // Platform-specific success element (most reliable signal).
+      for (const sel of ats?.successSelectors || []) {
+        const el = await this.page!.$(sel).catch(() => null);
+        if (el && await el.isVisible().catch(() => false)) return true;
+      }
+
       const url = this.page!.url();
       if (
         url.includes("thank") ||
@@ -715,18 +765,20 @@ export class ApplyEngine {
         () => (document.body.innerText ?? "").slice(0, 4000).toLowerCase()
       );
 
+      // Platform-specific success phrases.
+      for (const phrase of ats?.successText || []) {
+        if (body.includes(phrase.toLowerCase())) return true;
+      }
+
       return (
         body.includes("application submitted") ||
         body.includes("application received") ||
         body.includes("thank you for applying") ||
-        body.includes("thank you") ||
         body.includes("your application was sent") ||
         body.includes("we received your") ||
         body.includes("successfully applied") ||
         body.includes("application complete") ||
-        body.includes("application sent") ||
-        body.includes("confirmed") ||
-        body.includes("success")
+        body.includes("application sent")
       );
     } catch {
       return false;
@@ -840,7 +892,10 @@ export class ApplyEngine {
 
   // ─── Resume upload ──────────────────────────────────────────────────────────
 
-  private async uploadResumeIfVisible(application: NonNullable<ApplicationWithRelations>): Promise<void> {
+  private async uploadResumeIfVisible(
+    application: NonNullable<ApplicationWithRelations>,
+    ats?: AtsAdapter | null
+  ): Promise<void> {
     const pdfPath = resolveResumePath(application.tailoredResume?.pdfPath);
     if (!pdfPath) {
       await Logger.warn("APPLY", "Skipping resume upload — no PDF available");
@@ -848,14 +903,25 @@ export class ApplyEngine {
     }
 
     try {
-      // Find all file inputs (including hidden ones — many sites style them invisibly)
-      const fileInputs = await this.page!.$$('input[type="file"]');
+      // Prefer the platform's known resume input, then fall back to all file inputs.
+      const fileInputs = [];
+      for (const sel of ats?.fileInput || []) {
+        const found = await this.page!.$$(sel);
+        fileInputs.push(...found);
+      }
+      if (fileInputs.length === 0) {
+        // many sites style file inputs invisibly — grab them all
+        fileInputs.push(...(await this.page!.$$('input[type="file"]')));
+      }
       if (fileInputs.length === 0) return;
 
       for (const input of fileInputs) {
         const accept = (await input.getAttribute("accept").catch(() => "")) || "";
         const name = (await input.getAttribute("name").catch(() => "")) || "";
         const id = (await input.getAttribute("id").catch(() => "")) || "";
+
+        // Don't put the résumé into a cover-letter / photo slot.
+        if (/cover|letter|photo|portrait|headshot/i.test(`${name} ${id}`)) continue;
 
         const isResumeInput =
           !accept ||
@@ -894,27 +960,103 @@ export class ApplyEngine {
     }
   }
 
+  // ─── Cover letter ─────────────────────────────────────────────────────────────
+
+  // If the form asks for a cover letter — either a paste-in text box OR a file
+  // upload — fill/upload the job-specific cover letter we generated at tailor
+  // time. Safe to call every step (it no-ops if nothing matches).
+  private async attachCoverLetterIfRequested(
+    application: NonNullable<ApplicationWithRelations>
+  ): Promise<void> {
+    const cl = application.coverLetter;
+    if (!cl) return;
+    const content = (cl.content || "").trim();
+    const clPdf = resolveResumePath(cl.pdfPath);
+
+    try {
+      // 1) Paste-in text areas (e.g. "Cover Letter", "Why do you want to work here?")
+      if (content) {
+        const textareas = await this.page!.$$("textarea");
+        for (const ta of textareas) {
+          if (!(await ta.isVisible().catch(() => false))) continue;
+          const meta = await ta.evaluate((el) => {
+            const e = el as HTMLTextAreaElement;
+            const lbl = e.id
+              ? document.querySelector(`label[for="${CSS.escape(e.id)}"]`)?.textContent || ""
+              : "";
+            const container =
+              e.closest("[class*='field'], [class*='question'], label, .form-group")?.textContent || "";
+            return `${e.name} ${e.id} ${e.placeholder} ${e.getAttribute("aria-label") || ""} ${lbl} ${container}`.toLowerCase();
+          }).catch(() => "");
+
+          if (/cover\s*letter|motivation|why (do|would) you|message to|additional information/i.test(meta)) {
+            const cur = await ta.inputValue().catch(() => "");
+            if (!cur.trim()) {
+              await ta.fill(content);
+              await Logger.success("APPLY", "Pasted cover letter into text area");
+              await this.delay(400, 800);
+            }
+          }
+        }
+      }
+
+      // 2) File-upload slot specifically for a cover letter.
+      if (clPdf) {
+        const fileInputs = await this.page!.$$('input[type="file"]');
+        for (const fi of fileInputs) {
+          const meta = await fi.evaluate((el) => {
+            const e = el as HTMLInputElement;
+            const lbl = e.id
+              ? document.querySelector(`label[for="${CSS.escape(e.id)}"]`)?.textContent || ""
+              : "";
+            const container =
+              e.closest("[class*='field'], [class*='question'], label, .form-group")?.textContent || "";
+            return `${e.name} ${e.id} ${lbl} ${container}`.toLowerCase();
+          }).catch(() => "");
+
+          if (/cover\s*letter|cover/i.test(meta)) {
+            try {
+              await fi.setInputFiles(clPdf);
+              await Logger.success("APPLY", `Uploaded cover letter PDF: ${clPdf}`);
+              await this.delay(2000, 3500);
+            } catch (e) {
+              await Logger.warn("APPLY", `Cover letter upload failed: ${e}`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      await Logger.warn("APPLY", `Cover letter attach error: ${e}`);
+    }
+  }
+
   // ─── Field filling ──────────────────────────────────────────────────────────
 
+  // Returns the labels of fields it could NOT fill (unknown / needs human).
   private async fillVisibleFields(
     application: NonNullable<ApplicationWithRelations>,
     scope: string
-  ): Promise<void> {
+  ): Promise<string[]> {
+    this.currentScope = scope;
     const fields = await this.detectFields(scope);
     if (fields.length === 0) {
       await Logger.info("APPLY", "No fillable fields detected in this view");
-      return;
+      return [];
     }
     await Logger.info("APPLY", `Detected ${fields.length} fields to fill`);
 
+    const unfilled: string[] = [];
     for (const field of fields) {
       try {
-        await this.fillField(field, application);
+        const filled = await this.fillField(field, application);
+        if (!filled) unfilled.push(field.label);
         await this.delay(250, 600);
       } catch (e) {
         await Logger.warn("APPLY", `Field "${field.label}" failed: ${e}`);
+        unfilled.push(field.label);
       }
     }
+    return unfilled;
   }
 
   private async detectFields(scope: string): Promise<DetectedField[]> {
@@ -1042,18 +1184,20 @@ export class ApplyEngine {
     }, scope) as Promise<DetectedField[]>;
   }
 
-  private async fillField(field: DetectedField, application: NonNullable<ApplicationWithRelations>): Promise<void> {
+  // Fills one field. Returns true if it was filled (or safely skippable),
+  // false if we genuinely don't know the answer (so the caller can pause once
+  // for the human instead of pausing per-field).
+  private async fillField(field: DetectedField, application: NonNullable<ApplicationWithRelations>): Promise<boolean> {
     const resumeData = (application.resume?.parsedData as Record<string, unknown>) || {};
     const answeredQuestions = (application.answeredQuestions as { question: string; answer: string }[]) || [];
 
     // Skip junk "fields" that aren't real questions: unlabeled inputs
     // (field_1, field_2…) and stray UI controls (Save job, search, etc.).
-    // These produce useless AI calls and false human-input pauses.
     const junk = /^field_\d+$/i.test(field.label) ||
       /^(save( job)?|search|dismiss|close|follow|share|set alert|skip)$/i.test(field.label.trim());
     if (junk && !field.required) {
       await Logger.info("APPLY", `  ⏭ skipping non-question field: "${field.label}"`);
-      return;
+      return true; // not our problem — don't trigger a human pause
     }
 
     // Skip pre-filled text fields
@@ -1062,12 +1206,22 @@ export class ApplyEngine {
         const cur = await this.page!.inputValue(field.selector).catch(() => "");
         if (cur.trim().length > 0) {
           await Logger.info("APPLY", `  ✓ pre-filled: "${field.label}" = "${cur.slice(0, 50)}"`);
-          return;
+          return true;
         }
       } catch { /* continue */ }
     }
 
-    // 1) Memory
+    // Auto-affirm standard consent/agreement checkboxes (required to submit).
+    if (
+      field.type === "checkbox" &&
+      /agree|consent|certify|terms|privacy|policy|acknowledge|authorize|gdpr|confirm|i understand|read and/i.test(field.label)
+    ) {
+      await Logger.info("APPLY", `  ☑ consenting: "${field.label.slice(0, 60)}"`);
+      await this.applyAnswer(field, "yes");
+      return true;
+    }
+
+    // 1) Memory (exact + semantic — same question phrased differently)
     let answer = await findAnswer(field.label);
 
     if (answer) {
@@ -1081,33 +1235,27 @@ export class ApplyEngine {
       } else {
         // 3) Claude AI
         try {
-          const aiResult = await claudeAnswerQuestion(
-            field.label,
-            resumeData,
-            answeredQuestions
-          ) as { answer: string; category: string };
-
+          const aiResult = await claudeAnswerQuestion(field.label, resumeData, answeredQuestions);
           answer = aiResult.answer?.trim() || "";
-          const category = (aiResult.category as MemoryCategory) || "GENERAL";
-
           if (answer) {
             await Logger.info("APPLY", `  🤖 AI: "${field.label}" → "${answer.slice(0, 60)}"`);
-            await saveAnswer(field.label, answer, category, application.job.platform);
-          } else {
-            await Logger.warn("APPLY", `  ⚠ AI empty for "${field.label}" — pausing for human`);
-            const human = await this.waitForHumanInput(field.label, field.selector, category, application.job.platform);
-            answer = human || "";
+            await saveAnswer(field.label, answer, aiResult.category, application.job.platform);
           }
         } catch (e) {
-          await Logger.warn("APPLY", `  ⚠ AI error for "${field.label}": ${e} — pausing for human`);
-          const human = await this.waitForHumanInput(field.label, field.selector, "GENERAL", application.job.platform);
-          answer = human || "";
+          await Logger.warn("APPLY", `  ⚠ AI error for "${field.label}": ${e}`);
         }
       }
     }
 
-    if (!answer) return;
+    // Don't know it → leave blank and report so the step pauses once for the
+    // human to fill ALL unknowns together (we then capture them to memory).
+    if (!answer) {
+      await Logger.warn("APPLY", `  ❓ Don't know "${field.label}" — will ask you to fill it`);
+      return false;
+    }
+
     await this.applyAnswer(field, answer);
+    return true;
   }
 
   // Quick resume shortcuts — saves AI calls for obvious questions
@@ -1154,59 +1302,203 @@ export class ApplyEngine {
         }).catch(() => "");
         if (labelText.toLowerCase().includes(answer.toLowerCase()) ||
             answer.toLowerCase().includes(labelText.toLowerCase())) {
-          await radio.click().catch(() => {});
+          await this.toggleCheckable(radio, true);
           return;
         }
       }
     } else if (field.type === "checkbox") {
-      const shouldCheck = /yes|true|agree|accept|authorize|confirm/i.test(answer);
-      const isChecked = await this.page!.$eval(field.selector, (el) => (el as HTMLInputElement).checked).catch(() => false);
-      if (shouldCheck !== isChecked) {
-        await this.page!.click(field.selector).catch(() => {});
-      }
+      const shouldCheck = /yes|true|agree|accept|authorize|confirm|check|i certify|acknowledge/i.test(answer);
+      const cb = await this.page!.$(field.selector);
+      if (cb) await this.toggleCheckable(cb, shouldCheck);
     } else {
       await this.page!.fill(field.selector, answer).catch(() => {});
     }
   }
 
-  // ─── Human intervention wait ───────────────────────────────────────────────
+  // Reliably set a checkbox/radio to `target`. Many ATS checkboxes are the real
+  // <input> hidden (opacity:0 / off-screen) behind a styled <label>/<span>, so a
+  // plain click on the input does nothing. We try, in order: Playwright check()
+  // with force, clicking the associated <label>, clicking the parent <label>,
+  // then a JS click + change event. Verifies state after each attempt.
+  private async toggleCheckable(
+    handle: import("playwright").ElementHandle<Element>,
+    target: boolean
+  ): Promise<void> {
+    const isChecked = async () =>
+      handle.evaluate((el) => (el as HTMLInputElement).checked).catch(() => false);
 
-  private async waitForHumanInput(
-    fieldLabel: string,
-    fieldSelector: string,
-    category: MemoryCategory,
-    platform: string,
-    maxWaitMs = 5 * 60 * 1000
-  ): Promise<string | null> {
+    if ((await isChecked()) === target) return;
+
+    // 1) Native Playwright (handles actionability; force bypasses visibility).
+    try {
+      await (target
+        ? handle.check({ force: true, timeout: 3000 })
+        : handle.uncheck({ force: true, timeout: 3000 }));
+      if ((await isChecked()) === target) return;
+    } catch { /* fall through */ }
+
+    // 2) Click the associated label[for=id] (works for styled checkboxes).
+    try {
+      const id = await handle.evaluate((el) => (el as HTMLInputElement).id).catch(() => "");
+      if (id) {
+        const lbl = await this.page!.$(`label[for="${id}"]`);
+        if (lbl) {
+          await lbl.click({ timeout: 3000 }).catch(() => {});
+          if ((await isChecked()) === target) return;
+        }
+      }
+    } catch { /* fall through */ }
+
+    // 3) Click the wrapping <label>, if any.
+    try {
+      const ok = await handle.evaluate((el, want) => {
+        const lbl = el.closest("label");
+        if (lbl) (lbl as HTMLElement).click();
+        return (el as HTMLInputElement).checked === want;
+      }, target).catch(() => false);
+      if (ok) return;
+    } catch { /* fall through */ }
+
+    // 4) Last resort: set checked directly + dispatch events so the app reacts.
+    try {
+      await handle.evaluate((el, want) => {
+        const input = el as HTMLInputElement;
+        if (input.checked !== want) {
+          input.checked = want;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          input.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        }
+      }, target);
+    } catch { /* give up silently */ }
+  }
+
+  // ─── Human intervention (auto-resume) ───────────────────────────────────────
+
+  // Pause so the user can fill what we couldn't, then AUTOMATICALLY continue —
+  // no Resume button required. We watch the form: once they start filling and
+  // then stop (input stable for a few seconds) — or the page advances, or they
+  // click Resume — we capture everything they entered into memory and return
+  // true so the caller's loop resumes. Returns false only on timeout.
+  private async pauseForHumanThenCapture(
+    application: NonNullable<ApplicationWithRelations>,
+    scope: string,
+    reason: string,
+    maxWaitMs = 8 * 60 * 1000
+  ): Promise<boolean> {
     scraperStatus.waitingForUser = true;
-    scraperStatus.reason = `Fill: ${fieldLabel}`;
+    scraperStatus.reason = reason;
 
     await Logger.warn("APPLY", "═════════════════════════════════════════");
-    await Logger.warn("APPLY", "⏸  WAITING FOR HUMAN INPUT");
-    await Logger.warn("APPLY", `Question: ${fieldLabel}`);
-    await Logger.warn("APPLY", "Fill it in the browser, then click RESUME on dashboard");
+    await Logger.warn("APPLY", "⏸  YOUR TURN — I'll continue automatically");
+    await Logger.warn("APPLY", reason);
+    await Logger.warn("APPLY", "Just fill it in the browser. (Resume button optional.)");
     await Logger.warn("APPLY", "═════════════════════════════════════════");
 
+    const baseline = await this.combinedFormState(scope);
     const start = Date.now();
+    let sawChange = false;
+    let lastState = baseline;
+    let stableTicks = 0;
+    let progressed = false;
+
     while (Date.now() - start < maxWaitMs) {
-      await new Promise((r) => setTimeout(r, 2000));
-      if (!scraperStatus.waitingForUser) break;
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // Manual override still works.
+      if (!scraperStatus.waitingForUser) { progressed = true; break; }
+      // Reached a confirmation page while they worked.
+      if (await this.detectSuccessPage().catch(() => false)) { progressed = true; break; }
+
+      const state = await this.combinedFormState(scope);
+      if (state !== baseline) sawChange = true;
+
+      if (sawChange) {
+        // Wait until they stop editing (~4.5s with no further changes).
+        if (state === lastState) stableTicks++;
+        else stableTicks = 0;
+        if (stableTicks >= 3) { progressed = true; break; }
+      }
+      lastState = state;
     }
 
     scraperStatus.waitingForUser = false;
 
-    let humanAnswer: string | null = null;
-    try {
-      humanAnswer = await this.page!.inputValue(fieldSelector).catch(() => null);
-    } catch { /* ignore */ }
-
-    if (humanAnswer && humanAnswer.trim()) {
-      humanAnswer = humanAnswer.trim();
-      await Logger.success("APPLY", `Human answered: "${humanAnswer.slice(0, 80)}"`);
-      await saveAnswer(fieldLabel, humanAnswer, category, platform);
+    if (progressed) {
+      await this.delay(600, 1000);
+      await this.captureFilledFields(application, scope);
+      await Logger.success("APPLY", "Detected your input — capturing it and continuing automatically");
+    } else {
+      await Logger.warn("APPLY", "Timed out waiting for input");
     }
+    return progressed;
+  }
 
-    return humanAnswer || null;
+  // A fingerprint that changes when the user types/selects anything OR the page
+  // navigates. Used to detect when the human has finished helping.
+  private async combinedFormState(scope: string): Promise<string> {
+    try {
+      const url = this.page!.url().split("?")[0];
+      const fill = await this.page!.evaluate((sel: string) => {
+        const root = document.querySelector(sel) || document.body;
+        const els = root.querySelectorAll("input, textarea, select");
+        let s = "";
+        els.forEach((el) => {
+          const e = el as HTMLInputElement;
+          if (e.type === "checkbox" || e.type === "radio") s += e.checked ? "1" : "0";
+          else s += `${(e.value || "").length}:`; // length only — keeps PII out of logs
+        });
+        return s;
+      }, scope);
+      return `${url}||${fill}`;
+    } catch {
+      return Math.random().toString();
+    }
+  }
+
+  // Read every filled field in the scope and save it to memory, so future
+  // applications (even with differently-worded questions) reuse the answer.
+  private async captureFilledFields(
+    application: NonNullable<ApplicationWithRelations>,
+    scope: string
+  ): Promise<void> {
+    try {
+      const fields = await this.detectFields(scope);
+      let saved = 0;
+      for (const f of fields) {
+        if (/^field_\d+$/i.test(f.label)) continue; // unlabeled — can't reuse meaningfully
+        if (f.type === "checkbox" || f.type === "radio") continue;
+
+        let value = "";
+        if (f.type === "select") {
+          value = await this.page!.$eval(
+            f.selector,
+            (el) => {
+              const s = el as HTMLSelectElement;
+              return s.options[s.selectedIndex]?.text?.trim() || "";
+            }
+          ).catch(() => "");
+        } else {
+          value = (await this.page!.inputValue(f.selector).catch(() => "")) || "";
+        }
+
+        value = value.trim();
+        if (!value) continue;
+        // Skip placeholder/non-answers.
+        if (/^(select|choose|--|please select)/i.test(value)) continue;
+
+        // Human-entered = authoritative: overwrites any prior bad memory,
+        // including a differently-worded near-duplicate.
+        await saveHumanAnswer(f.label, value, application.job.platform);
+        saved++;
+        await Logger.info("APPLY", `  💾 saved your answer: "${f.label}" → "${value.slice(0, 50)}"`);
+      }
+      if (saved > 0) {
+        await Logger.success("APPLY", `Saved ${saved} of your answers to memory for next time`);
+      }
+    } catch (e) {
+      await Logger.warn("APPLY", `Could not capture filled fields: ${e}`);
+    }
   }
 
   // Full-application takeover: pause, let the user finish the application in the
@@ -1241,6 +1533,9 @@ export class ApplyEngine {
     scraperStatus.waitingForUser = false;
 
     await this.takeStepScreenshot(application.folderPath, "after-human-takeover");
+
+    // Capture whatever the user entered so future applications reuse it.
+    await this.captureFilledFields(application, this.currentScope).catch(() => {});
 
     const confirmed = await this.detectSuccessPage().catch(() => false);
     if (confirmed) {
