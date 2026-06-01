@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>Fake ATS — EEO / Compliance</title></head>
+<body>
+  <!-- Fake application page for verifying sensitive-field handling.
+       Open it locally and run the Field Inspector extension's "Scan this page".
+       EVERY field below should show 🔒 "asks you" (amber) until the matching
+       profile value is set — none should be AI-drafted. -->
+  <h1>Apply — Senior Engineer</h1>
+
+  <section>
+    <h2>Identity</h2>
+    <label for="fn">First Name *</label><input id="fn" required />
+    <label for="ln">Last Name *</label><input id="ln" required />
+    <label for="em">Email Address *</label><input id="em" type="email" required />
+  </section>
+
+  <section>
+    <h2>Work Authorization</h2>
+    <label for="auth">Are you legally authorized to work in the US? *</label>
+    <select id="auth" required><option>Select...</option><option>Yes</option><option>No</option></select>
+
+    <label for="spon">Will you now or in the future require visa sponsorship? *</label>
+    <select id="spon" required><option>Select...</option><option>Yes</option><option>No</option></select>
+
+    <label for="gov">Do you currently hold or have you held, within the last 5 years,
+      a position as a government official? *</label>
+    <select id="gov" required><option>Select...</option><option>Yes</option><option>No</option></select>
+  </section>
+
+  <section>
+    <h2>Equal Employment Opportunity Information</h2>
+    <label for="gender">What is your gender identity? *</label>
+    <select id="gender" required><option>Select...</option><option>Man</option><option>Woman</option><option>Non-binary</option><option>Decline to self-identify</option></select>
+
+    <label for="pron">What gender pronouns do you prefer?</label>
+    <input id="pron" />
+
+    <label for="race">What is your race or ethnicity? *</label>
+    <select id="race" required><option>Select...</option><option>Asian</option><option>White</option><option>Decline to self-identify</option></select>
+
+    <label for="vet">What is your military / veteran status? *</label>
+    <select id="vet" required><option>Select...</option><option>I am not a veteran</option><option>I am a veteran</option></select>
+
+    <label for="dis">What is your disability status? *</label>
+    <select id="dis" required><option>Select...</option><option>Yes</option><option>No</option><option>Decline</option></select>
+  </section>
+
+  <section>
+    <h2>Open-ended (these MAY be AI-drafted)</h2>
+    <label for="why">Why are you interested in this role?</label>
+    <textarea id="why" maxlength="600"></textarea>
+  </section>
+</body>
+</html>

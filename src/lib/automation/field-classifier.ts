@@ -146,11 +146,11 @@ const CATEGORY_PATTERNS: { cat: FieldCategory; rx: RegExp }[] = [
   // Skills.
   { cat: "skills", rx: /\bskills?\b|technolog(y|ies)|programming\s*languages?|tools?\s*you|tech\s*stack|proficienc/i },
 
+  // Contact — BEFORE address so "Email Address" is contact, not address.
+  { cat: "contact", rx: /e-?mail|phone|mobile|telephone|\bcell\b|contact\s*number/i },
+
   // Address.
   { cat: "address", rx: /street|address|\bcity\b|town|\bstate\b|province|\bzip\b|postal\s*code|post\s*code|\bcountry\b|location/i },
-
-  // Contact.
-  { cat: "contact", rx: /e-?mail|phone|mobile|telephone|\bcell\b|contact\s*number/i },
 
   // Identity (name) — broad, so LAST among the deterministic ones.
   { cat: "identity", rx: /first\s*name|given\s*name|last\s*name|surname|family\s*name|middle\s*name|preferred\s*name|nickname|full\s*name|legal\s*name|\bname\b|fname|lname/i },
@@ -310,8 +310,9 @@ export function validateValue(
       return { ok: true };
     case "education":
       // A degree/school value shouldn't be an email/url/phone or obvious prose.
+      // Real values (degree, major, school) are short; a sentence is wrong here.
       if (looksLikeEmail(v) || looksLikeUrl(v)) return { ok: false, reason: "email/URL in an education field" };
-      if (wordCount(v) > 20) return { ok: false, reason: "prose in an education field" };
+      if (wordCount(v) > 12) return { ok: false, reason: "prose in an education field" };
       return { ok: true };
     case "salary":
       if (digitCount(v) === 0) return { ok: false, reason: "salary with no number" };
