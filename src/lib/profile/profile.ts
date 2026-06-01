@@ -14,6 +14,7 @@ export type ProfileCategory =
   | "immigration"
   | "education"
   | "professional"
+  | "preferences"   // salary / availability / relocation / work-mode / referral
   | "compliance";
 
 export interface ProfileField {
@@ -64,6 +65,7 @@ export const FIELD_SPECS: FieldSpec[] = [
   { key: "cptEligible", label: "CPT eligible", category: "immigration", kind: "yesno", compliance: true, match: /\bcpt\b|curricular practical training/i },
   { key: "optEligible", label: "OPT eligible", category: "immigration", kind: "yesno", compliance: true, match: /\bopt\b|optional practical training/i },
   { key: "stemOptEligible", label: "STEM OPT eligible", category: "immigration", kind: "yesno", compliance: true, match: /stem\s*opt/i },
+  { key: "citizenship", label: "Citizenship / Work Status", category: "immigration", kind: "text", compliance: true, match: /citizen(ship)?|are\s*you\s*a\s*(u\.?s\.?\s*)?citizen|permanent\s*resident|immigration\s*status|residency\s*status/i },
 
   // Education
   { key: "degreeLevel", label: "Degree Level", category: "education", kind: "degree", match: /degree\s*level|highest\s*(degree|education)|education\s*level/i },
@@ -74,14 +76,30 @@ export const FIELD_SPECS: FieldSpec[] = [
   { key: "gpa", label: "GPA", category: "education", kind: "text", match: /\bgpa\b|grade\s*point/i },
 
   // Professional
+  { key: "currentTitle", label: "Current Job Title", category: "professional", kind: "text", match: /current\s*(job\s*)?(title|role|position)|present\s*(title|role|position)|most\s*recent\s*(title|role|position)/i },
+  { key: "currentCompany", label: "Current Employer", category: "professional", kind: "text", match: /current\s*(employer|company|organization)|present\s*(employer|company)|most\s*recent\s*(employer|company)/i },
   { key: "yearsExperience", label: "Years of Experience", category: "professional", kind: "text", match: /years?\s*of\s*experience|years?\s*experience|total\s*experience|relevant\s*experience/i },
+  { key: "skills", label: "Key Skills", category: "professional", kind: "text", match: /key\s*skills|technical\s*skills|core\s*skills|primary\s*skills|relevant\s*skills|^skills$/i },
   { key: "linkedin", label: "LinkedIn", category: "professional", kind: "url", match: /linkedin/i },
   { key: "github", label: "GitHub", category: "professional", kind: "url", match: /github/i },
   { key: "portfolio", label: "Portfolio", category: "professional", kind: "url", match: /portfolio/i },
   { key: "website", label: "Website", category: "professional", kind: "url", match: /website|personal\s*site|web\s*page/i },
 
-  // Compliance / EEO (never AI — pause if unknown)
-  { key: "gender", label: "Gender", category: "compliance", kind: "text", compliance: true, match: /\bgender\b|\bsex\b/i },
+  // Preferences (salary is sensitive — see field-classifier; others pause-if-unset
+  // only when AI isn't allowed). Placed before compliance so order stays sane.
+  { key: "salaryExpectation", label: "Salary Expectation", category: "preferences", kind: "text", compliance: true, match: /salary|compensation|expected\s*pay|desired\s*(pay|salary)|pay\s*expectation|hourly\s*rate|expected\s*ctc|\bctc\b|minimum.*(salary|pay|rate)/i },
+  { key: "workPreference", label: "Work Mode (Remote/Onsite/Hybrid)", category: "preferences", kind: "text", match: /work\s*from\s*(the\s*)?office|on-?site|remote\s*(work|preference)?|hybrid|work\s*arrangement|work\s*setting/i },
+  { key: "preferredLocation", label: "Preferred Work Location", category: "preferences", kind: "text", match: /preferred\s*(office\s*)?location|preferred\s*work\s*location|which\s*office|location\s*preference/i },
+  { key: "willingToRelocate", label: "Willing to Relocate", category: "preferences", kind: "yesno", match: /willing\s*to\s*relocate|open\s*to\s*relocat|relocat/i },
+  { key: "willingToTravel", label: "Willing to Travel", category: "preferences", kind: "yesno", match: /willing\s*to\s*travel|able\s*to\s*travel|travel\s*requirement/i },
+  { key: "startDate", label: "Earliest Start Date / Availability", category: "preferences", kind: "text", match: /start\s*date|available.*start|when\s*can\s*you\s*(start|begin)|earliest\s*(start|availability)|availability\s*date|notice\s*period/i },
+  { key: "referralSource", label: "How did you hear about us?", category: "preferences", kind: "text", match: /how\s*did\s*you\s*hear|referral\s*source|how\s*were\s*you\s*referred|where\s*did\s*you\s*(hear|find)/i },
+
+  // Compliance / EEO (never AI — pause if unknown).
+  // NOTE: pronouns/lgbtq come BEFORE gender — "gender pronouns" contains "gender".
+  { key: "pronouns", label: "Preferred Pronouns", category: "compliance", kind: "text", compliance: true, match: /pronoun/i },
+  { key: "lgbtq", label: "LGBTQ+ Identity", category: "compliance", kind: "text", compliance: true, match: /lgbtq|sexual\s*orientation/i },
+  { key: "gender", label: "Gender", category: "compliance", kind: "text", compliance: true, match: /\bgender\b|gender\s*identity|\bsex\b/i },
   { key: "race", label: "Race / Ethnicity", category: "compliance", kind: "text", compliance: true, match: /race|ethnicity|hispanic|latino/i },
   { key: "veteranStatus", label: "Veteran Status", category: "compliance", kind: "yesno", compliance: true, match: /veteran|military|armed\s*forces/i },
   { key: "disabilityStatus", label: "Disability Status", category: "compliance", kind: "yesno", compliance: true, match: /disab(led|ility)|accessibility needs/i },
@@ -114,7 +132,13 @@ export function resolveField(label: string, profile: Profile): FieldResolution |
 // lower confidence than user-entered). Existing locked values are preserved.
 export function seedProfileFromResume(
   existing: Profile,
-  resume: { contactInfo?: Record<string, string>; yearsOfExperience?: number; education?: unknown[] }
+  resume: {
+    contactInfo?: Record<string, string>;
+    yearsOfExperience?: number;
+    education?: unknown[];
+    experience?: unknown[];
+    skills?: unknown[];
+  }
 ): Profile {
   const out: Profile = { ...existing };
   const set = (key: string, value: string | undefined, kind: ProfileField["kind"], category: ProfileCategory) => {
@@ -150,5 +174,20 @@ export function seedProfileFromResume(
     set("graduationDate", edu.endDate, "date", "education");
     if (edu.gpa) set("gpa", edu.gpa, "text", "education");
   }
+
+  // Current role from the most recent / current experience entry.
+  const exp = Array.isArray(resume.experience) ? (resume.experience as Record<string, unknown>[]) : [];
+  const current = exp.find((e) => e && (e as { current?: boolean }).current) || exp[0];
+  if (current) {
+    set("currentTitle", (current.title as string) || undefined, "text", "professional");
+    set("currentCompany", (current.company as string) || undefined, "text", "professional");
+  }
+
+  // Skills — join the parsed list into a comma-separated string.
+  const skills = Array.isArray(resume.skills)
+    ? (resume.skills as unknown[]).filter((s): s is string => typeof s === "string")
+    : [];
+  if (skills.length) set("skills", skills.slice(0, 20).join(", "), "text", "professional");
+
   return out;
 }

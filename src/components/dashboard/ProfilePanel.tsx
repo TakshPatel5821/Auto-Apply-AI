@@ -22,9 +22,10 @@ const CATEGORY_LABELS: Record<string, string> = {
   immigration: "Immigration & Work Authorization",
   education: "Education",
   professional: "Professional",
+  preferences: "Preferences (salary, availability, work mode)",
   compliance: "Compliance / EEO (never AI-filled)",
 };
-const CATEGORY_ORDER = ["identity", "contact", "immigration", "education", "professional", "compliance"];
+const CATEGORY_ORDER = ["identity", "contact", "immigration", "education", "professional", "preferences", "compliance"];
 
 export function ProfilePanel() {
   const [specs, setSpecs] = useState<Spec[]>([]);
@@ -63,6 +64,12 @@ export function ProfilePanel() {
 
   if (loading) return <div className="text-center py-12 text-gray-500 text-sm">Loading profile…</div>;
 
+  // Sensitive/compliance fields with no value — these can NEVER be AI-filled, so
+  // an empty one means the automation will PAUSE on that question every time.
+  const missingSensitive = specs.filter(
+    (s) => s.compliance && !(profile[s.key]?.value || "").trim()
+  );
+
   return (
     <div className="space-y-4">
       <div className="card-glass p-4 flex items-center justify-between">
@@ -80,6 +87,28 @@ export function ProfilePanel() {
           <Sparkles className="w-3.5 h-3.5" /> Seed from résumé
         </button>
       </div>
+
+      {missingSensitive.length > 0 && (
+        <div className="card-glass p-4 border border-amber-500/30 bg-amber-950/10">
+          <div className="flex items-center gap-2 mb-2">
+            <ShieldAlert className="w-4 h-4 text-amber-400" />
+            <h4 className="text-sm font-medium text-amber-200">
+              {missingSensitive.length} sensitive field{missingSensitive.length > 1 ? "s" : ""} not set
+            </h4>
+          </div>
+          <p className="text-xs text-amber-200/70 mb-2">
+            These are legal/EEO/compensation answers AI will never guess. Until you set them,
+            the automation pauses for you on every application that asks.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {missingSensitive.map((s) => (
+              <span key={s.key} className="px-2 py-0.5 text-[11px] rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-200">
+                {s.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {CATEGORY_ORDER.map((cat) => {
         const catSpecs = specs.filter((s) => s.category === cat);
