@@ -141,13 +141,13 @@ const CATEGORY_PATTERNS: { cat: FieldCategory; rx: RegExp }[] = [
   { cat: "education", rx: /degree|qualification|major|field\s*of\s*study|concentration|\bgpa\b|grade\s*point|university|college|school|institution|alma\s*mater|graduat(e|ion)|education\s*level/i },
 
   // Work experience (years / current role) — NOT essays.
-  { cat: "work_experience", rx: /years?\s*of\s*experience|years?\s*experience|total\s*experience|relevant\s*experience|current\s*(employer|company|title|role|position)|present\s*employer|most\s*recent\s*(employer|title|role)/i },
+  { cat: "work_experience", rx: /years?\s*of\s*experience|years?\s*experience|total\s*experience|relevant\s*experience|current\s*(employer|company|title|role|position)|present\s*(employer|company|title|role|position)|most\s*recent\s*(employer|company|title|role|position)|employment\s*history|work\s*history/i },
 
   // Skills.
   { cat: "skills", rx: /\bskills?\b|technolog(y|ies)|programming\s*languages?|tools?\s*you|tech\s*stack|proficienc/i },
 
   // Contact — BEFORE address so "Email Address" is contact, not address.
-  { cat: "contact", rx: /e-?mail|phone|mobile|telephone|\bcell\b|contact\s*number/i },
+  { cat: "contact", rx: /e-?mail|phone|mobile|telephone|\bcell\b|contact\s*number|linkedin|github|portfolio|website|personal\s*site|profile\s*url|profile\s*link|\burl\b/i },
 
   // Address.
   { cat: "address", rx: /street|address|\bcity\b|town|\bstate\b|province|\bzip\b|postal\s*code|post\s*code|\bcountry\b|location/i },
@@ -190,6 +190,22 @@ function optionsAreYesNo(options?: string[]): boolean {
   return real.every((o) => /^(yes|no|y|n|true|false)\b/.test(o) || /\b(yes|no)\b/.test(o));
 }
 
+function isShortEmploymentHistoryLabel(text: string, sectionHeading?: string): boolean {
+  const t = norm(text).replace(/[^a-z0-9]+/g, " ").trim();
+  if (!t) return false;
+
+  if (/^(job )?title$|^position( title)?$|^role( title)?$/.test(t)) return true;
+  if (/^(company|company name|employer|employer name|organization|organization name)$/.test(t)) return true;
+  if (/^(from date|to date)$/.test(t)) return true;
+
+  const section = norm(sectionHeading);
+  if (/^(start date|end date)$/.test(t) && /\b(employment|work history|experience|job history)\b/.test(section)) {
+    return true;
+  }
+
+  return false;
+}
+
 // First category whose pattern hits the given text, or "unknown".
 function matchCategory(text: string): FieldCategory {
   if (!text) return "unknown";
@@ -212,6 +228,13 @@ export function classifyField(ctx: FieldContext): Classification {
 
   // Pass 1: the field's OWN text (label + name + placeholder + aria-label).
   // A clear label must win, so the section heading is NOT mixed in here.
+  const shortSignals = [ctx.label, ctx.name, ctx.placeholder, ctx.ariaLabel]
+    .map(norm)
+    .filter(Boolean);
+  if (shortSignals.some((s) => isShortEmploymentHistoryLabel(s, ctx.sectionHeading))) {
+    return { category: "work_experience", domKind, isYesNo: optionsAreYesNo(ctx.options) };
+  }
+
   const primary = [ctx.label, ctx.name, ctx.placeholder, ctx.ariaLabel]
     .map(norm)
     .filter(Boolean)
@@ -237,6 +260,8 @@ export function classifyField(ctx: FieldContext): Classification {
 
 const EMAIL_RX = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const URL_RX = /^(https?:\/\/|www\.)|\b[a-z0-9-]+\.(com|io|dev|net|org|me|co|ai|tech|edu|gov)\b/i;
+const PHONE_RX = /^[+(]?[\d][\d\s().-]{6,}$/;
+const DATE_RX = /^(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}[/-]\d{4}|(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{4}|present|current|now)$/i;
 // Prose markers that should never appear in a deterministic/short field.
 const PROSE_RX = /\b(dear|i am|i'm|i have|my name|experience|hiring manager|sincerely|excited|passionate|relevant for)\b/i;
 
@@ -255,6 +280,16 @@ export function validateValue(
 ): ValidationResult {
   const v = (value || "").trim();
   if (!v) return { ok: false, reason: "empty" };
+
+  const allowsUrl = cls.domKind === "url" || cls.category === "contact" || cls.category === "open_ended";
+  const allowsEmail = cls.domKind === "email" || cls.category === "contact" || cls.category === "open_ended";
+  const allowsPhone = cls.domKind === "phone" || cls.category === "contact" || cls.category === "open_ended";
+
+  if (looksLikeUrl(v) && !allowsUrl) return { ok: false, reason: "URL in a non-URL field" };
+  if (looksLikeEmail(v) && !allowsEmail) return { ok: false, reason: "email in a non-email field" };
+  if (PHONE_RX.test(v) && digitCount(v) >= 7 && !allowsPhone) {
+    return { ok: false, reason: "phone number in a non-phone field" };
+  }
 
   // Dropdown/radio: the value must correspond to one of the real options.
   // (Actual option resolution is matchDropdownOption; here we reject obvious
@@ -288,6 +323,10 @@ export function validateValue(
     case "number":
       if (!/^[\d,.\s$]+$/.test(v)) return { ok: false, reason: "non-numeric value in a number field" };
       return { ok: true };
+    case "date":
+      if (looksLikeEmail(v) || looksLikeUrl(v)) return { ok: false, reason: "email/URL in a date field" };
+      if (!DATE_RX.test(v)) return { ok: false, reason: "not a recognizable date" };
+      return { ok: true };
     default:
       break;
   }
@@ -314,6 +353,10 @@ export function validateValue(
       if (looksLikeEmail(v) || looksLikeUrl(v)) return { ok: false, reason: "email/URL in an education field" };
       if (wordCount(v) > 12) return { ok: false, reason: "prose in an education field" };
       return { ok: true };
+    case "work_experience":
+      if (looksLikeEmail(v) || looksLikeUrl(v)) return { ok: false, reason: "email/URL in a work-history field" };
+      if (PROSE_RX.test(v) || wordCount(v) > 12) return { ok: false, reason: "prose in a work-history field" };
+      return { ok: true };
     case "salary":
       if (digitCount(v) === 0) return { ok: false, reason: "salary with no number" };
       return { ok: true };
@@ -321,6 +364,10 @@ export function validateValue(
     case "sponsorship":
       // These are yes/no — never a paragraph.
       if (wordCount(v) > 10) return { ok: false, reason: "prose in a yes/no authorization field" };
+      return { ok: true };
+    case "unknown":
+      if (looksLikeEmail(v) || looksLikeUrl(v)) return { ok: false, reason: "email/URL in an unknown field" };
+      if (PROSE_RX.test(v) || wordCount(v) > 12) return { ok: false, reason: "unsafe value for an unknown field" };
       return { ok: true };
     default:
       return { ok: true };

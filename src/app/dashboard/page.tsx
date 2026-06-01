@@ -12,6 +12,7 @@ import { JobsTable } from "@/components/dashboard/JobsTable";
 import { ApplicationsTable } from "@/components/dashboard/ApplicationsTable";
 import { EmailClassifierPanel } from "@/components/dashboard/EmailClassifierPanel";
 import { ProfilePanel } from "@/components/dashboard/ProfilePanel";
+import { ResumeCard } from "@/components/dashboard/ResumeCard";
 import { LogsConsole } from "@/components/dashboard/LogsConsole";
 import { QuickSetupPanel } from "@/components/dashboard/QuickSetupPanel";
 import {
@@ -324,35 +325,7 @@ export default function DashboardPage() {
               {activeTab === "resume" && (
                 <div className="space-y-6">
                   {resumes.map((resume) => (
-                    <div key={resume.id} className="card-glass p-5">
-                      <div className="flex items-start justify-between mb-4">
-                        <div>
-                          <div className="font-medium text-white">{resume.fileName}</div>
-                          <div className="text-xs text-gray-500 mt-0.5">
-                            {resume.yearsOfExperience?.toFixed(1) || "?"} years experience
-                            {resume.isActive && (
-                              <span className="ml-2 text-blue-400">Active</span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="text-xs text-gray-600">
-                          {resume._count?.tailoredVersions || 0} tailored versions
-                        </div>
-                      </div>
-                      {resume.summary && (
-                        <p className="text-sm text-gray-400 mb-4 line-clamp-3">{resume.summary}</p>
-                      )}
-                      <div className="space-y-2">
-                        <div className="text-xs text-gray-600 uppercase tracking-wider">Skills</div>
-                        <div className="flex flex-wrap gap-1">
-                          {resume.skills.slice(0, 20).map((skill: string) => (
-                            <span key={skill} className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">
-                              {skill}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
+                    <ResumeCard key={resume.id} resume={resume} onSaved={fetchAll} />
                   ))}
                   {resumes.length === 0 && (
                     <div className="text-center py-12 text-gray-600">
