@@ -26,11 +26,15 @@ export async function seedProfileFromActiveResume(): Promise<Profile> {
   const pd = (resume.parsedData as {
     contactInfo?: Record<string, string>;
     education?: unknown[];
+    experience?: unknown[];
+    skills?: unknown[];
   }) || {};
   const seeded = seedProfileFromResume(existing, {
     contactInfo: pd.contactInfo,
     yearsOfExperience: resume.yearsOfExperience ?? undefined,
     education: pd.education,
+    experience: pd.experience,
+    skills: pd.skills,
   });
   await saveProfile(seeded);
   return seeded;
