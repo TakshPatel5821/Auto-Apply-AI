@@ -20,53 +20,18 @@ function resolveResumePath(p?: string | null): string | null {
   return existsSync(abs) ? abs : null;
 }
 
-// ── Field classification + value validation ───────────────────────────────────
-// A field whose semantic kind is a URL / email / phone / profile-link must NEVER
-// receive a free-text AI answer — that's how "Dear Hiring Manager…" ended up in
-// a LinkedIn URL box. We infer the kind from the DOM input type + label, then
-// validate any candidate value against it before filling.
-type FieldKind = "email" | "phone" | "url" | "linkedin" | "github" | "text";
-
-function classifyFieldKind(domType: string, label: string): FieldKind {
-  const t = (domType || "").toLowerCase();
-  if (t === "email") return "email";
-  if (t === "url") return "url";
-  if (t === "tel") return "phone";
-  const l = (label || "").toLowerCase();
-  if (/linkedin/.test(l)) return "linkedin";
-  if (/github/.test(l)) return "github";
-  if (/portfolio|personal\s*(web)?site|\bwebsite\b|web\s*page|profile\s*(url|link)|\burl\b/.test(l)) return "url";
-  if (/e-?mail/.test(l)) return "email";
-  if (/\bphone\b|mobile|telephone|\bcell\b/.test(l)) return "phone";
-  return "text";
-}
-
-const URLISH = /^(https?:\/\/|www\.)|\b[a-z0-9-]+\.(com|io|dev|net|org|me|co|ai|tech)\b/i;
-
-// Does `value` fit a field of `kind`? Deterministic kinds reject prose.
-function valueValidForKind(kind: FieldKind, value: string): boolean {
-  const v = (value || "").trim();
-  if (!v) return false;
-  // Prose markers that should never appear in a URL/email/phone field.
-  const looksLikeProse = /\b(dear|i am|i have|i'm|experience|hiring manager|sincerely|excited|passionate)\b/i.test(v) || v.length > 200;
-  switch (kind) {
-    case "email":
-      return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
-    case "phone":
-      return /\d{7,}/.test(v.replace(/\D/g, "")) && v.length <= 25;
-    case "url":
-      return URLISH.test(v) && !looksLikeProse;
-    case "linkedin":
-      return (/linkedin\.com/i.test(v) || URLISH.test(v)) && !looksLikeProse && v.length < 200;
-    case "github":
-      return (/github\.com/i.test(v) || URLISH.test(v)) && !looksLikeProse && v.length < 200;
-    default:
-      return true; // free-text — any non-empty value is acceptable
-  }
-}
+// Field classification + value validation now live in ./field-classifier
+// (Phase 1). The engine consumes classifyField/validateValue/decideFill below.
 import { Logger } from "@/lib/logging/logger";
 import { scraperStatus } from "./scraper-status";
 import { detectAts, AtsAdapter } from "./ats-adapters";
+import {
+  classifyField,
+  validateValue,
+  decideFill,
+  isSensitive,
+  aiMayAnswer,
+} from "./field-classifier";
 
 type ApplicationWithRelations = Awaited<ReturnType<typeof getApplicationWithRelations>>;
 
@@ -1777,13 +1742,26 @@ export class ApplyEngine {
     let confidence = 0;   // 0-1; drives auto-fill vs fill+verify vs pause
     let source = "";
 
-    // Classify the field's semantic kind (DOM type + label). Deterministic kinds
-    // (url/email/phone/linkedin/github) must NEVER receive a free-text AI answer.
-    const kind = classifyFieldKind(field.type, field.label);
+    // ── Phase 1: classify the field BEFORE resolving any value. ───────────────
+    // The category decides whether AI may answer (do-not-AI), whether a value
+    // must be profile-backed (sensitive/legal), and how candidate values are
+    // validated. Built from every text signal we have on the field.
+    const cls = classifyField({
+      label: field.label,
+      type: field.type,
+      name: field.name,
+      options: field.options,
+      required: field.required,
+    });
+
+    // Reject any candidate value that doesn't make sense for this field
+    // (email in a name box, a paragraph in a yes/no dropdown, …).
+    const accept = (val: string): boolean => validateValue(cls, val, field.options).ok;
 
     // 0) Profile Engine V2 — deterministic, structured fields come FIRST.
     //    Identity / contact / visa / education resolve here with no AI.
     const resolution = resolveField(field.label, this.profile);
+    let hasProfileValue = false;
     if (resolution) {
       const { spec, field: pf } = resolution;
       if (pf && pf.value.trim()) {
@@ -1791,97 +1769,106 @@ export class ApplyEngine {
         // Locked = certain (1.0); else use the field's stored confidence.
         confidence = pf.locked ? 1 : (pf.confidence ?? 0.8);
         source = `profile[${spec.key}]`;
-        await Logger.info("APPLY", `  🧬 ${source} (${Math.round(confidence * 100)}%): "${field.label}" → "${answer.slice(0, 60)}"`);
-      } else if (spec.compliance) {
-        // Compliance/visa/EEO question with NO profile value → never guess.
-        await Logger.warn("APPLY", `  🔒 compliance "${field.label}" not in profile — will ask you (no AI guessing)`);
+        hasProfileValue = true;
+        await Logger.info("APPLY", `  🧬 ${source} (${Math.round(confidence * 100)}%): "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
+      } else if (spec.compliance || isSensitive(cls.category)) {
+        // Compliance/visa/EEO/salary question with NO profile value → never guess.
+        await Logger.warn("APPLY", `  🔒 sensitive [${cls.category}] "${field.label.slice(0, 60)}" not in profile — will ask you (no AI/memory guessing)`);
         return false;
       }
+    } else if (isSensitive(cls.category)) {
+      // Classified sensitive but no profile spec matched → still never guess.
+      await Logger.warn("APPLY", `  🔒 sensitive [${cls.category}] "${field.label.slice(0, 60)}" not in profile — will ask you (no AI/memory guessing)`);
+      return false;
     }
 
-    // 1) Memory (exact + semantic). Ignore a stored value that doesn't fit the
-    //    field's kind — protects against poisoned memory (e.g. prose in a URL).
-    if (!answer) {
+    // 1) Memory (exact + semantic) — never for sensitive categories. Ignore a
+    //    stored value that fails validation (protects against poisoned memory).
+    if (!answer && !isSensitive(cls.category)) {
       const mem = await findAnswer(field.label);
-      if (mem && valueValidForKind(kind, mem)) {
+      if (mem && accept(mem)) {
         answer = mem;
         confidence = 0.9;
         source = "memory";
-        await Logger.info("APPLY", `  💾 memory: "${field.label}" → "${answer.slice(0, 60)}"`);
+        await Logger.info("APPLY", `  💾 memory: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
+      } else if (mem) {
+        await Logger.warn("APPLY", `  ✗ ignoring memory "${mem.slice(0, 40)}…" — fails [${cls.category}/${cls.domKind}] validation`);
       }
     }
 
-    // 2) Résumé shortcuts for obvious fields (name/email/phone/links).
-    if (!answer) {
+    // 2) Résumé shortcuts for obvious fields — never for sensitive categories.
+    if (!answer && !isSensitive(cls.category)) {
       const shortcut = this.shortcutFromResume(field.label, resumeData) || "";
-      if (shortcut && valueValidForKind(kind, shortcut)) {
+      if (shortcut && accept(shortcut)) {
         answer = shortcut;
         confidence = 0.85;
         source = "resume";
-        await Logger.info("APPLY", `  📄 resume: "${field.label}" → "${answer.slice(0, 60)}"`);
+        await Logger.info("APPLY", `  📄 resume: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
         await saveAnswer(field.label, answer, "GENERAL", application.job.platform);
       }
     }
 
-    // 3) Claude AI — ONLY for open-ended free-text questions. A url/email/phone/
-    //    linkedin/github field must never get AI prose; with no real value we
-    //    leave it blank for the human instead of guessing.
+    // 3) Claude AI — ONLY for AI-allowed categories (open-ended essays). Every
+    //    other category (identity/contact/education/visa/EEO/…) must NEVER get
+    //    an AI guess; with no real value we leave it blank for the human.
     if (!answer) {
-      if (kind === "text") {
+      if (aiMayAnswer(cls.category)) {
         try {
           const aiResult = await claudeAnswerQuestion(field.label, resumeData, answeredQuestions);
           const cand = aiResult.answer?.trim() || "";
-          if (cand) {
+          if (cand && accept(cand)) {
             answer = cand;
             confidence = 0.6; // AI guesses are lowest trust
             source = "AI";
-            await Logger.info("APPLY", `  🤖 AI: "${field.label}" → "${answer.slice(0, 60)}"`);
+            await Logger.info("APPLY", `  🤖 AI: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
             await saveAnswer(field.label, answer, aiResult.category, application.job.platform);
           }
         } catch (e) {
           await Logger.warn("APPLY", `  ⚠ AI error for "${field.label}": ${e}`);
         }
       } else {
-        await Logger.warn("APPLY", `  🔗 ${kind} field "${field.label}" — no saved value; leaving blank (won't guess a ${kind})`);
+        await Logger.warn("APPLY", `  🚫 [${cls.category}] "${field.label.slice(0, 50)}" — no saved value; AI not allowed here, leaving blank`);
       }
     }
 
     // Don't know it → leave blank and report so the step pauses once for the
     // human to fill ALL unknowns together (we then capture them to memory).
     if (!answer) {
-      await Logger.warn("APPLY", `  ❓ Don't know "${field.label}" — will ask you to fill it`);
+      await Logger.warn("APPLY", `  ❓ Don't know "${field.label.slice(0, 60)}" — will ask you to fill it`);
       return false;
     }
 
     // Final validation guard (defense in depth): never write a value that
-    // doesn't fit the field's kind — e.g. prose into a URL/email/phone box.
-    if (!valueValidForKind(kind, answer)) {
-      await Logger.warn("APPLY", `  ✗ rejecting "${answer.slice(0, 40)}…" — not a valid ${kind} for "${field.label}"`);
+    // doesn't fit the field — e.g. prose into a URL/yes-no/email box.
+    if (!accept(answer)) {
+      const why = validateValue(cls, answer, field.options).reason || "invalid";
+      await Logger.warn("APPLY", `  ✗ rejecting "${answer.slice(0, 40)}…" — ${why} for [${cls.category}/${cls.domKind}] "${field.label.slice(0, 40)}"`);
       return false;
     }
 
-    // ── Confidence-based automation (#20) ─────────────────────────────────────
-    // >95% auto-fill · 85-95% fill + verify · <85% leave blank & pause for review.
-    // Required fields get a small boost (they must be filled to proceed anyway).
+    // ── Confidence gates (Phase 1.3) ──────────────────────────────────────────
+    // >=95% autofill · 85-94% fill+verify · 60-84% pause · <60% pause · sensitive
+    // without a profile value → pause. Required fields get a small boost.
     const effConfidence = field.required ? Math.min(1, confidence + 0.05) : confidence;
-    if (effConfidence < 0.85) {
-      await Logger.warn(
-        "APPLY",
-        `  ⚠ low confidence (${Math.round(effConfidence * 100)}%, ${source}) for "${field.label}" — leaving blank for your review`
-      );
+    const decision = decideFill(cls.category, effConfidence, hasProfileValue);
+    if (decision === "pause_blank" || decision === "pause_low_confidence") {
+      const why = decision === "pause_blank"
+        ? "needs a profile value"
+        : `low confidence (${Math.round(effConfidence * 100)}%, ${source})`;
+      await Logger.warn("APPLY", `  ⚠ ${why} for "${field.label.slice(0, 50)}" — leaving blank for your review`);
       return false;
     }
 
     await this.applyAnswer(field, answer, resolution?.spec.kind);
 
-    // 85-95% → verify the value actually landed; if not, hand to human.
-    if (effConfidence < 0.95) {
+    // 85-94% → verify the value actually landed; if not, hand to human.
+    if (decision === "fill_and_verify") {
       const ok = await this.verifyFieldValue(field, answer);
       if (!ok) {
         await Logger.warn("APPLY", `  ⚠ verify failed for "${field.label}" (${source}) — pausing for review`);
         return false;
       }
-      await Logger.info("APPLY", `  ✓ verified "${field.label}" (${Math.round(effConfidence * 100)}%)`);
+      await Logger.info("APPLY", `  ✓ verified "${field.label.slice(0, 50)}" (${Math.round(effConfidence * 100)}%)`);
     }
     return true;
   }
