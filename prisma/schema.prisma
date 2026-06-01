@@ -233,6 +233,10 @@ model Application {
   recoveryState Json?              // { url, phase, step, atsId, reason }
   actionLog     Json   @default("[]") // [{ t, action, target, detail }]
 
+  // Phase 9 debug/replay: per-field decisions — why each value was chosen.
+  // [{ t, step, label, category, domKind, source, confidence, decision, valuePreview, reason }]
+  fieldDecisions Json  @default("[]")
+
   folderPath String?
 
   createdAt DateTime @default(now())
