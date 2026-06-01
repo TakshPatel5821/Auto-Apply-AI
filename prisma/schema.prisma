@@ -37,6 +37,13 @@ model UserSettings {
   preferredCompanies String[] @default([])
   preferredTechStack String[] @default([])
   customSites        Json     @default("[]")
+  profile            Json     @default("{}")  // Profile Engine V2 (structured fields)
+
+  // Encrypted credentials at rest (AES-256-GCM, "enc:v1:" prefix). Never plaintext.
+  encLinkedinEmail    String?
+  encLinkedinPassword String?
+  encAtsEmail         String?
+  encAtsPassword      String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -149,11 +156,18 @@ model Job {
 
   matchScore  Float?
   atsScore    Float?
+  atsKeywordScore Int?
   confidenceLevel Float?
   requiredSkills String[]
   missingSkills  String[]
   matchingSkills String[]
   matchReason String?
+
+  // Visa / international-student signals (detected from the description)
+  sponsorshipStatus String?  // "sponsors" | "no_sponsorship" | "unknown"
+  acceptsCpt        Boolean?
+  acceptsOpt        Boolean?
+  intlFriendlyScore Int?      // 0-10
 
   status      JobStatus @default(FOUND)
   isBlacklisted Boolean @default(false)
@@ -215,6 +229,10 @@ model Application {
   error     String?
   retryCount Int     @default(0)
 
+  // Failure recovery / replay (#19): last checkpoint + full action log.
+  recoveryState Json?              // { url, phase, step, atsId, reason }
+  actionLog     Json   @default("[]") // [{ t, action, target, detail }]
+
   folderPath String?
 
   createdAt DateTime @default(now())
@@ -251,6 +269,7 @@ model ApplicationMemory {
 
   usageCount  Int     @default(1)
   lastUsed    DateTime @default(now())
+  locked      Boolean  @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

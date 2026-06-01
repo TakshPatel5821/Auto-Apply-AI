@@ -76,6 +76,8 @@ export async function PUT(req: NextRequest) {
     await automationEngine.pause();
   } else if (action === "resume") {
     await automationEngine.resume();
+  } else if (action === "confirmSubmitted") {
+    await automationEngine.confirmSubmitted();
   }
 
   return NextResponse.json({ success: true, state: automationEngine.getState() });

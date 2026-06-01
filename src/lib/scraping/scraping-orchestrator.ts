@@ -4,9 +4,12 @@ import { prisma } from "@/lib/db/prisma";
 import { LinkedInScraper } from "./linkedin";
 import { IndeedScraper } from "./indeed";
 import { CustomScraper } from "./custom-scraper";
+import { GreenhouseScraper, DEFAULT_GREENHOUSE_COMPANIES } from "./greenhouse";
 import { Logger } from "@/lib/logging/logger";
 import { ScrapedJob, SearchConfig, CustomSite } from "@/types";
 import { fastFilter } from "@/lib/matching/fast-filter";
+import { atsKeywordPct } from "@/lib/ai/ats-analyzer";
+import { detectVisaInfo } from "@/lib/matching/visa-detector";
 import { generateJobsExcel } from "@/lib/export/excel";
 import { ensureDir } from "@/lib/storage/file-manager";
 
@@ -76,14 +79,22 @@ export class ScrapingOrchestrator {
     // Resume data for fast-filter (per-job filter needs candidate skills)
     let candidateSkills: string[] = [];
     let candidateTech: string[] = [];
+    let candidateYears = 0;
 
     if (resumeId) {
       const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
       if (resume) {
         candidateSkills = resume.skills || [];
         candidateTech = resume.technologies || [];
+        candidateYears = resume.yearsOfExperience || 0;
       }
     }
+
+    // Whether the user is targeting entry-level/intern roles (drives the
+    // experience-gap filter — senior postings get skipped).
+    const entryLevelTarget =
+      (config.experienceLevels || []).some((l) => /intern|entry|junior|new\s*grad/i.test(l)) ||
+      config.keywords.some((k) => /intern|entry|junior|new\s*grad/i.test(k));
 
     const searchKeywords = config.keywords;
 
@@ -111,11 +122,13 @@ export class ScrapingOrchestrator {
           job.description,
           candidateSkills,
           candidateTech,
-          searchKeywords
+          searchKeywords,
+          { candidateYears, entryLevelTarget }
         );
 
         const matchScore = filterScoreToMatchScore(filter.score);
         const isFit = !filter.skip && matchScore <= 6;
+        const visa = detectVisaInfo(job.description || "");
 
         if (isFit) fitCount++;
         else notFitCount++;
@@ -147,9 +160,14 @@ export class ScrapingOrchestrator {
             // Preliminary scoring from fast filter (AI step will refine later)
             matchScore,
             atsScore: filter.score / 10, // 0-10 scale
+            atsKeywordScore: atsKeywordPct(filter.matchedKeywords, filter.missingKeywords),
             matchingSkills: filter.matchedKeywords,
             missingSkills: filter.missingKeywords,
             matchReason: filter.reason,
+            sponsorshipStatus: visa.sponsorshipStatus,
+            acceptsCpt: visa.acceptsCpt,
+            acceptsOpt: visa.acceptsOpt,
+            intlFriendlyScore: visa.intlFriendlyScore,
             isBlacklisted,
             isSpam,
             status: "FOUND",
@@ -215,8 +233,25 @@ export class ScrapingOrchestrator {
         });
       }
 
-      // Custom sites
+      // Settings (preferred companies for Greenhouse, custom sites).
       const settings = await prisma.userSettings.findUnique({ where: { userId: "local" } });
+
+      // Greenhouse scrapes by COMPANY board (no global keyword search). Uses the
+      // user's preferred companies, else a curated default set so the toggle
+      // works out of the box.
+      if (config.platforms.includes("greenhouse") && newCount < maxJobs) {
+        const userCompanies = (settings?.preferredCompanies || []).filter(Boolean);
+        const companies = userCompanies.length > 0 ? userCompanies : DEFAULT_GREENHOUSE_COMPANIES;
+        const src = userCompanies.length > 0 ? "your companies" : "default companies";
+        await Logger.info("SCRAPER", `── Greenhouse (${companies.length} ${src}) ──`);
+        const scraper = new GreenhouseScraper();
+        // Stream each job into the pipeline live (same as LinkedIn) — respecting
+        // the overall maxJobs cap via the onJob guard.
+        await scraper.scrapeJobs(companies, allKeywords, allLocations, async (job) => {
+          if (newCount >= maxJobs) return;
+          await onJob(job);
+        });
+      }
       const customSites = ((settings?.customSites as unknown as CustomSite[]) || []).filter((s) => s.enabled);
       for (const site of customSites) {
         if (newCount >= maxJobs) break;
@@ -375,6 +410,7 @@ export class ScrapingOrchestrator {
             data: {
               matchScore: scored.matchScore,
               atsScore: scored.atsScore,
+              atsKeywordScore: atsKeywordPct(scored.matchingSkills || [], scored.missingSkills || []),
               confidenceLevel: confidence,
               requiredSkills: [],
               missingSkills: scored.missingSkills || [],

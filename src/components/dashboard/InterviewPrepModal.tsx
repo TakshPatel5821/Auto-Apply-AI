@@ -6,6 +6,7 @@ import { X, Loader2, RefreshCw, Code, MessageSquare, Building2, HelpCircle, List
 interface InterviewPrep {
   technicalQuestions: { question: string; guidance: string }[];
   behavioralQuestions: { question: string; star: string }[];
+  systemDesignQuestions?: { question: string; guidance: string }[];
   companyTalkingPoints: string[];
   questionsToAsk: string[];
   prepTips: string[];
@@ -58,7 +59,7 @@ export function InterviewPrepModal({
   return (
     <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
       <div
-        className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-3xl max-h-[88vh] flex flex-col overflow-hidden"
+        className="card-glass w-full max-w-3xl max-h-[88vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -111,6 +112,17 @@ export function InterviewPrepModal({
                   </div>
                 ))}
               </Section>
+
+              {prep.systemDesignQuestions && prep.systemDesignQuestions.length > 0 && (
+                <Section icon={MessageSquare} title="System design questions" color="text-orange-400">
+                  {prep.systemDesignQuestions.map((q, i) => (
+                    <div key={i} className="bg-gray-800/50 rounded-lg p-3">
+                      <div className="text-sm text-white font-medium">{q.question}</div>
+                      <div className="text-sm text-gray-400 mt-1">{q.guidance}</div>
+                    </div>
+                  ))}
+                </Section>
+              )}
 
               <Section icon={Building2} title="Why you fit" color="text-emerald-400">
                 <BulletList items={prep.companyTalkingPoints} />

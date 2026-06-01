@@ -15,8 +15,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className={inter.className}>{children}</body>
+    // suppressHydrationWarning: browser extensions (e.g. Bitdefender adds
+    // bis_register / __processed_* attributes to <body> before React hydrates),
+    // which would otherwise trigger a harmless attribute-mismatch warning.
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <body className={inter.className} suppressHydrationWarning>{children}</body>
     </html>
   );
 }

@@ -97,20 +97,23 @@ export function StatsCards({
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
-      {cards.map((card) => (
+      {cards.map((card, i) => (
         <div
           key={card.label}
-          className={`bg-gray-900 border border-gray-800 rounded-xl p-3 ${
+          style={{ animationDelay: `${i * 30}ms` }}
+          className={`group card-glass card-hover p-3.5 relative overflow-hidden animate-fade-in ${
             card.highlight ? `ring-1 ${card.ring}` : ""
           }`}
         >
-          <div className="flex items-center gap-2 mb-2">
-            <div className={`p-1.5 rounded-lg ${card.bg}`}>
+          {/* faint corner glow on hover */}
+          <div className={`pointer-events-none absolute -right-6 -top-6 w-16 h-16 rounded-full ${card.bg} blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-300`} />
+          <div className="flex items-center justify-between mb-2">
+            <div className={`p-1.5 rounded-lg ${card.bg} ring-1 ring-inset ring-white/5`}>
               <card.icon className={`w-3.5 h-3.5 ${card.color}`} />
             </div>
-            <div className={`text-xl font-bold ${card.color}`}>{card.value}</div>
+            <div className={`text-2xl font-bold tabular-nums ${card.color}`}>{card.value}</div>
           </div>
-          <div className="text-[10px] uppercase tracking-wider text-gray-500">{card.label}</div>
+          <div className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">{card.label}</div>
         </div>
       ))}
     </div>

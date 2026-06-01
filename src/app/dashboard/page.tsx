@@ -10,6 +10,8 @@ import { ResumeUpload } from "@/components/dashboard/ResumeUpload";
 import { CustomSitesPanel } from "@/components/dashboard/CustomSitesPanel";
 import { JobsTable } from "@/components/dashboard/JobsTable";
 import { ApplicationsTable } from "@/components/dashboard/ApplicationsTable";
+import { EmailClassifierPanel } from "@/components/dashboard/EmailClassifierPanel";
+import { ProfilePanel } from "@/components/dashboard/ProfilePanel";
 import { LogsConsole } from "@/components/dashboard/LogsConsole";
 import { QuickSetupPanel } from "@/components/dashboard/QuickSetupPanel";
 import {
@@ -23,9 +25,14 @@ import {
   RefreshCw,
   BarChart3,
   Compass,
+  Lock,
+  Unlock,
+  Trash2,
+  Sparkles,
+  UserCircle,
 } from "lucide-react";
 
-type Tab = "jobs" | "applications" | "analytics" | "career" | "resume" | "memory" | "settings";
+type Tab = "jobs" | "applications" | "analytics" | "career" | "profile" | "resume" | "memory" | "settings";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -158,6 +165,7 @@ export default function DashboardPage() {
     { id: "applications", label: "Applications", icon: Send, count: stats.totalApplications },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
     { id: "career", label: "Career", icon: Compass },
+    { id: "profile", label: "Profile", icon: UserCircle },
     { id: "resume", label: "Resume", icon: FileText, count: resumes.length },
     { id: "memory", label: "Memory", icon: Brain, count: memories.length },
     { id: "settings", label: "Settings", icon: Settings },
@@ -165,67 +173,69 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
-          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <div className="text-gray-400 text-sm">Loading dashboard...</div>
+          <div className="w-10 h-10 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mx-auto mb-4" />
+          <div className="text-gray-400 text-sm">Loading dashboard…</div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
+    <div className="min-h-screen text-white">
       {/* Header */}
-      <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur-sm sticky top-0 z-10">
+      <header className="border-b border-white/[0.06] bg-gray-950/70 backdrop-blur-xl sticky top-0 z-20">
         <div className="max-w-screen-2xl mx-auto px-6 py-3 flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-violet-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
               <Briefcase className="w-4 h-4 text-white" />
             </div>
-            <span className="font-bold text-white">AI Job Agent</span>
+            <span className="font-bold text-lg text-gradient">AI Job Agent</span>
           </div>
 
           <div
-            className={`flex items-center gap-1.5 text-xs px-3 py-1 rounded-full ${
+            className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border ${
               automationState.isRunning
                 ? automationState.isPaused
-                  ? "bg-yellow-500/20 text-yellow-400"
-                  : "bg-green-500/20 text-green-400"
-                : "bg-gray-800 text-gray-500"
+                  ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/20"
+                  : "bg-green-500/10 text-green-400 border-green-500/20"
+                : "bg-white/5 text-gray-500 border-white/10"
             }`}
           >
             <div className={`w-1.5 h-1.5 rounded-full ${
               automationState.isRunning && !automationState.isPaused
-                ? "bg-green-400 animate-pulse"
+                ? "bg-green-400 animate-pulse shadow-[0_0_6px_2px_rgba(74,222,128,0.5)]"
                 : automationState.isPaused
                 ? "bg-yellow-400"
                 : "bg-gray-600"
             }`} />
-            {automationState.isRunning
+            <span className="max-w-[260px] truncate">{automationState.isRunning
               ? automationState.isPaused
                 ? "Paused"
                 : automationState.currentAction || "Running"
-              : "Idle"}
+              : "Idle"}</span>
           </div>
 
           <div className="ml-auto flex items-center gap-2">
             <button
               onClick={fetchAll}
-              className="p-2 text-gray-500 hover:text-gray-300 transition-colors"
+              className="p-2 text-gray-500 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+              title="Refresh"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
             <button
               onClick={() => exportExcel("jobs")}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 rounded-lg transition-colors"
             >
               <Download className="w-3.5 h-3.5" />
               Export
             </button>
             <button
               onClick={handleLogout}
-              className="p-2 text-gray-500 hover:text-red-400 transition-colors"
+              className="p-2 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
+              title="Log out"
             >
               <LogOut className="w-4 h-4" />
             </button>
@@ -246,7 +256,7 @@ export default function DashboardPage() {
               resumes={resumes}
               onRefresh={fetchAll}
             />
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+            <div className="card-glass p-5">
               <h3 className="text-sm font-semibold text-white mb-4">Resume</h3>
               <ResumeUpload resumes={resumes} onUpload={fetchAll} />
             </div>
@@ -256,21 +266,23 @@ export default function DashboardPage() {
           {/* Main content */}
           <div className="lg:col-span-3 space-y-4">
             {/* Tabs */}
-            <div className="flex gap-1 bg-gray-900 border border-gray-800 rounded-xl p-1">
+            <div className="flex gap-1 card-glass p-1 overflow-x-auto">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
                     activeTab === tab.id
-                      ? "bg-gray-800 text-white"
-                      : "text-gray-500 hover:text-gray-300"
+                      ? "bg-gradient-to-br from-blue-500/90 to-violet-600/90 text-white shadow-lg shadow-blue-500/20"
+                      : "text-gray-500 hover:text-gray-200 hover:bg-white/5"
                   }`}
                 >
                   <tab.icon className="w-4 h-4" />
                   <span className="hidden sm:inline">{tab.label}</span>
                   {tab.count !== undefined && tab.count > 0 && (
-                    <span className="text-xs bg-gray-700 rounded-full px-1.5 py-0.5">
+                    <span className={`text-xs rounded-full px-1.5 py-0.5 ${
+                      activeTab === tab.id ? "bg-white/20" : "bg-white/10"
+                    }`}>
                       {tab.count}
                     </span>
                   )}
@@ -279,13 +291,14 @@ export default function DashboardPage() {
             </div>
 
             {/* Tab Content */}
-            <div>
+            <div className="animate-fade-in">
               {activeTab === "jobs" && (
                 <JobsTable jobs={jobs} onRefresh={fetchAll} />
               )}
 
               {activeTab === "applications" && (
                 <div className="space-y-4">
+                  <EmailClassifierPanel onApplied={fetchAll} />
                   <div className="flex justify-end">
                     <button
                       onClick={() => exportExcel("applications")}
@@ -306,10 +319,12 @@ export default function DashboardPage() {
 
               {activeTab === "career" && <CareerAdvisorPanel />}
 
+              {activeTab === "profile" && <ProfilePanel />}
+
               {activeTab === "resume" && (
                 <div className="space-y-6">
                   {resumes.map((resume) => (
-                    <div key={resume.id} className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+                    <div key={resume.id} className="card-glass p-5">
                       <div className="flex items-start justify-between mb-4">
                         <div>
                           <div className="font-medium text-white">{resume.fileName}</div>
@@ -381,6 +396,35 @@ function MemoryTab({
     onRefresh();
   }
 
+  async function toggleLock(id: string, locked: boolean) {
+    await fetch("/api/memory", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, locked }),
+    });
+    onRefresh();
+  }
+
+  async function saveEdit(id: string, answer: string) {
+    await fetch("/api/memory", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, answer }),
+    });
+    onRefresh();
+  }
+
+  async function cleanup() {
+    const res = await fetch("/api/memory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "cleanup" }),
+    });
+    const data = await res.json();
+    alert(`Removed ${data.removed ?? 0} bad/mismatched answers.`);
+    onRefresh();
+  }
+
   async function addMemory(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = e.currentTarget;
@@ -400,7 +444,7 @@ function MemoryTab({
 
   return (
     <div className="space-y-4">
-      <form onSubmit={addMemory} className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+      <form onSubmit={addMemory} className="card-glass p-4 space-y-3">
         <h3 className="text-sm font-medium text-white">Add Application Answer</h3>
         <input
           name="question"
@@ -432,28 +476,26 @@ function MemoryTab({
         </div>
       </form>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-800">
+      <div className="card-glass overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
           <span className="text-sm font-medium text-white">Saved Answers ({memories.length})</span>
+          <button
+            onClick={cleanup}
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-amber-400 transition-colors"
+            title="Remove answers that don't match their field (e.g. email saved into 'Degree')"
+          >
+            <Sparkles className="w-3.5 h-3.5" /> Clean up bad answers
+          </button>
         </div>
         <div className="divide-y divide-gray-800">
           {memories.map((m) => (
-            <div key={m.id} className="px-4 py-3 flex items-start justify-between gap-3">
-              <div className="flex-1 min-w-0">
-                <div className="text-sm text-gray-300">{m.questionText}</div>
-                <div className="text-sm text-blue-400 mt-0.5">{m.answerText}</div>
-                <div className="flex gap-2 mt-1">
-                  <span className="text-xs text-gray-600">{m.category}</span>
-                  <span className="text-xs text-gray-700">used {m.usageCount}x</span>
-                </div>
-              </div>
-              <button
-                onClick={() => deleteMemory(m.id)}
-                className="text-gray-600 hover:text-red-400 transition-colors text-xs"
-              >
-                Remove
-              </button>
-            </div>
+            <MemoryRow
+              key={m.id}
+              m={m}
+              onDelete={() => deleteMemory(m.id)}
+              onToggleLock={() => toggleLock(m.id, !m.locked)}
+              onSaveEdit={(ans) => saveEdit(m.id, ans)}
+            />
           ))}
           {memories.length === 0 && (
             <div className="text-center py-8 text-gray-600 text-sm">
@@ -461,6 +503,75 @@ function MemoryTab({
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MemoryRow({
+  m,
+  onDelete,
+  onToggleLock,
+  onSaveEdit,
+}: {
+  m: any;
+  onDelete: () => void;
+  onToggleLock: () => void;
+  onSaveEdit: (answer: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(m.answerText);
+
+  return (
+    <div className={`px-4 py-3 flex items-start justify-between gap-3 ${m.locked ? "bg-blue-950/20" : ""}`}>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm text-gray-300 flex items-center gap-1.5">
+          {m.locked && <Lock className="w-3 h-3 text-blue-400 flex-shrink-0" />}
+          {m.questionText}
+        </div>
+        {editing ? (
+          <div className="flex gap-2 mt-1">
+            <input
+              value={val}
+              onChange={(e) => setVal(e.target.value)}
+              className="flex-1 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={() => { onSaveEdit(val); setEditing(false); }}
+              className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded"
+            >
+              Save
+            </button>
+            <button onClick={() => { setVal(m.answerText); setEditing(false); }} className="text-gray-500 text-xs px-1">
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div
+            className="text-sm text-blue-400 mt-0.5 cursor-pointer hover:underline"
+            onClick={() => setEditing(true)}
+            title="Click to edit"
+          >
+            {m.answerText}
+          </div>
+        )}
+        <div className="flex gap-2 mt-1">
+          <span className="text-xs text-gray-600">{m.category}</span>
+          <span className="text-xs text-gray-700">used {m.usageCount}x</span>
+          {m.locked && <span className="text-xs text-blue-500">locked</span>}
+        </div>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        <button
+          onClick={onToggleLock}
+          className={`transition-colors ${m.locked ? "text-blue-400 hover:text-blue-300" : "text-gray-600 hover:text-blue-400"}`}
+          title={m.locked ? "Unlock (allow AI to update)" : "Lock (AI can't change this answer)"}
+        >
+          {m.locked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+        </button>
+        <button onClick={onDelete} className="text-gray-600 hover:text-red-400 transition-colors" title="Remove">
+          <Trash2 className="w-4 h-4" />
+        </button>
       </div>
     </div>
   );
@@ -481,6 +592,7 @@ function SettingsTab({
     maxApplicationsPerDay: s?.maxApplicationsPerDay ?? 20,
     autoApply: s?.autoApply ?? false,
     blacklistCompanies: s?.blacklistCompanies?.join(", ") || "",
+    preferredCompanies: s?.preferredCompanies?.join(", ") || "",
     preferredTechStack: s?.preferredTechStack?.join(", ") || "Python, JavaScript, PHP, Azure, MySQL, React",
     minSalary: s?.minSalary != null ? String(s.minSalary) : "",
   });
@@ -504,6 +616,7 @@ function SettingsTab({
         maxApplicationsPerDay: form.maxApplicationsPerDay,
         autoApply: form.autoApply,
         blacklistCompanies: form.blacklistCompanies.split(",").map((s: string) => s.trim()).filter(Boolean),
+        preferredCompanies: form.preferredCompanies.split(",").map((s: string) => s.trim()).filter(Boolean),
         preferredTechStack: form.preferredTechStack.split(",").map((s: string) => s.trim()).filter(Boolean),
         minSalary: form.minSalary.trim() !== "" ? (parseInt(form.minSalary) || null) : null,
       }),
@@ -512,13 +625,16 @@ function SettingsTab({
   }
 
   return (
-    <form onSubmit={save} className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-5">
+    <div className="space-y-5">
+    <CredentialsCard />
+    <form onSubmit={save} className="card-glass p-6 space-y-5">
       <h3 className="text-base font-semibold text-white">Search & Automation Settings</h3>
 
       {[
         { label: "Search Keywords (comma-separated)", key: "searchKeywords", placeholder: "Software Engineer, Frontend Engineer" },
         { label: "Locations (comma-separated)", key: "searchLocations", placeholder: "Remote, New York, San Francisco" },
         { label: "Blacklisted Companies", key: "blacklistCompanies", placeholder: "Company A, Company B" },
+        { label: "Greenhouse Companies (for Greenhouse source)", key: "preferredCompanies", placeholder: "stripe, airbnb, databricks" },
         { label: "Preferred Tech Stack", key: "preferredTechStack", placeholder: "React, TypeScript, Python" },
       ].map((field) => (
         <div key={field.key}>
@@ -589,6 +705,99 @@ function SettingsTab({
       >
         Save Settings
       </button>
+    </form>
+    </div>
+  );
+}
+
+function CredentialsCard() {
+  const [status, setStatus] = useState<{ linkedin: boolean; ats: boolean } | null>(null);
+  const [form, setForm] = useState({ linkedinEmail: "", linkedinPassword: "", atsEmail: "", atsPassword: "" });
+  const [msg, setMsg] = useState("");
+
+  const loadStatus = useCallback(async () => {
+    const res = await fetch("/api/credentials");
+    if (res.ok) setStatus((await res.json()).status);
+  }, []);
+  useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    const res = await fetch("/api/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form),
+    });
+    if (res.ok) {
+      setStatus((await res.json()).status);
+      setForm({ linkedinEmail: "", linkedinPassword: "", atsEmail: "", atsPassword: "" });
+      setMsg("Saved — encrypted at rest");
+      setTimeout(() => setMsg(""), 3000);
+    }
+  }
+
+  async function migrate() {
+    const res = await fetch("/api/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "migrate" }),
+    });
+    const data = await res.json();
+    setStatus(data.status);
+    setMsg(data.migrated ? "Imported .env credentials (now encrypted)" : "Nothing to import");
+    setTimeout(() => setMsg(""), 3000);
+  }
+
+  return (
+    <form onSubmit={save} className="card-glass p-6 space-y-4">
+      <div className="flex items-center gap-2">
+        <Lock className="w-4 h-4 text-emerald-400" />
+        <h3 className="text-base font-semibold text-white">Credentials (encrypted)</h3>
+      </div>
+      <p className="text-xs text-gray-500">
+        Passwords are encrypted at rest (AES-256-GCM) — never stored in plaintext. Leave a field blank to keep the existing value.
+      </p>
+
+      <div className="flex gap-3 text-xs">
+        <span className={status?.linkedin ? "text-emerald-400" : "text-gray-500"}>
+          {status?.linkedin ? "✓ LinkedIn saved" : "○ LinkedIn not set"}
+        </span>
+        <span className={status?.ats ? "text-emerald-400" : "text-gray-500"}>
+          {status?.ats ? "✓ ATS saved" : "○ ATS not set"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {[
+          { key: "linkedinEmail", label: "LinkedIn Email", type: "text" },
+          { key: "linkedinPassword", label: "LinkedIn Password", type: "password" },
+          { key: "atsEmail", label: "ATS Email (Workday etc.)", type: "text" },
+          { key: "atsPassword", label: "ATS Password", type: "password" },
+        ].map((f) => (
+          <div key={f.key}>
+            <label className="text-xs text-gray-400 block mb-1">{f.label}</label>
+            <input
+              type={f.type}
+              value={form[f.key as keyof typeof form]}
+              onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
+              placeholder="•••• (unchanged)"
+              autoComplete="off"
+              className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+            />
+          </div>
+        ))}
+      </div>
+
+      {msg && <div className="text-xs text-emerald-400">{msg}</div>}
+
+      <div className="flex gap-2">
+        <button type="submit" className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg transition-colors">
+          Save Encrypted
+        </button>
+        <button type="button" onClick={migrate} className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 text-sm rounded-lg transition-colors">
+          Import from .env
+        </button>
+      </div>
     </form>
   );
 }

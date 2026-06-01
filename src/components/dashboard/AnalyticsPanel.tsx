@@ -30,6 +30,8 @@ interface Analytics {
     offers: number;
     avgAts: number;
     interviewRate: number;
+    responseRate: number;
+    offerRate: number;
   };
 }
 
@@ -44,7 +46,7 @@ const tooltipStyle = {
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+    <div className="card-glass p-4">
       <h3 className="text-sm font-medium text-gray-300 mb-3">{title}</h3>
       {children}
     </div>
@@ -53,7 +55,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+    <div className="card-glass p-4">
       <div className="text-2xl font-bold text-white">{value}</div>
       <div className="text-xs text-gray-500 mt-0.5">{label}</div>
     </div>
@@ -101,12 +103,14 @@ export function AnalyticsPanel() {
       </div>
 
       {/* Headline numbers */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
         <Stat label="Applications" value={data.summary.totalApplications} />
         <Stat label="Submitted" value={data.summary.submitted} />
         <Stat label="Interviews" value={data.summary.interviews} />
         <Stat label="Offers" value={data.summary.offers} />
+        <Stat label="Response rate" value={`${data.summary.responseRate}%`} />
         <Stat label="Interview rate" value={`${data.summary.interviewRate}%`} />
+        <Stat label="Offer rate" value={`${data.summary.offerRate}%`} />
         <Stat label="Avg ATS" value={`${data.summary.avgAts}/10`} />
       </div>
 

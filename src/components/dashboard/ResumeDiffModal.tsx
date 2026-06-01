@@ -67,7 +67,7 @@ export function ResumeDiffModal({
       onClick={onClose}
     >
       <div
-        className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-6xl h-[85vh] flex flex-col overflow-hidden"
+        className="card-glass w-full max-w-6xl h-[85vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

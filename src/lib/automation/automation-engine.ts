@@ -4,6 +4,8 @@ import { prisma } from "@/lib/db/prisma";
 import { scrapingOrchestrator } from "@/lib/scraping/scraping-orchestrator";
 import { tailorResumeForJob } from "./resume-tailor";
 import { claudeMatchJobToResume } from "@/lib/ai/claude";
+import { atsKeywordPct } from "@/lib/ai/ats-analyzer";
+import { extractRequiredYears } from "@/lib/matching/fast-filter";
 import { ApplyEngine } from "./apply-engine";
 import { Logger } from "@/lib/logging/logger";
 import { AutomationState, SearchConfig } from "@/types";
@@ -108,6 +110,13 @@ class AutomationEngine {
     await Logger.info("ENGINE", `Max jobs to scrape: ${searchConfig.maxJobs}`);
 
     try {
+      // Pre-warm account-gated ATS logins ONCE (auto mode only) so every
+      // Greenhouse-portal apply in this batch is already authenticated.
+      if (this.runMode === "auto" && !this.stopRequested) {
+        this.state.currentAction = "Pre-warming ATS logins…";
+        await this.applyEngine.prewarmLogins().catch(() => {});
+      }
+
       // Streaming pipeline: scraping uses the cheap local filter; each fit job is
       // handed off to the Claude pipeline (analyze → tailor → Overleaf CV → apply)
       // the moment it's found, running concurrently with continued scraping.
@@ -229,6 +238,28 @@ class AutomationEngine {
     const existing = await prisma.application.findFirst({ where: { jobId } });
     if (existing) return;
 
+    // Skip jobs whose description never loaded (e.g. LinkedIn detail panel
+    // failed). Tailoring a résumé against a stub is wasted work + bad output.
+    if ((job.description || "").trim().length < 120) {
+      await Logger.warn("ENGINE", `Skipping ${job.companyName} — description too short (${(job.description || "").trim().length} chars); likely failed to load`);
+      await prisma.job.update({ where: { id: jobId }, data: { status: "SKIPPED" } }).catch(() => {});
+      return;
+    }
+
+    // Experience re-check: backlog jobs scraped BEFORE the experience filter
+    // existed can still be marked "fit" in the DB. Re-gate here so a senior role
+    // (e.g. "4 years experience") is never tailored for an entry-level candidate.
+    const candidateYears = Number(this.runResumeData.yearsOfExperience) || 0;
+    const requiredYears = extractRequiredYears(job.description || "");
+    const isIntern = /\b(intern|internship|co-?op|new\s*grad|entry[ -]?level|junior)\b/i.test(
+      `${job.jobTitle} ${job.description}`
+    );
+    if (!isIntern && requiredYears > 0 && requiredYears > candidateYears + 1) {
+      await Logger.warn("ENGINE", `Skipping ${job.jobTitle} @ ${job.companyName} — needs ~${requiredYears} yrs (you have ${candidateYears})`);
+      await prisma.job.update({ where: { id: jobId }, data: { status: "SKIPPED" } }).catch(() => {});
+      return;
+    }
+
     this.state.currentJob = `${job.jobTitle} @ ${job.companyName}`;
     this.state.lastActivity = new Date();
 
@@ -238,7 +269,14 @@ class AutomationEngine {
     let matchScore: number = job.matchScore ?? 6;
     this.state.currentAction = `Analyzing: ${job.jobTitle} @ ${job.companyName}`;
     try {
-      const scored = (await claudeMatchJobToResume(job.description, this.runResumeData)) as {
+      // Analyze only REFINES the already-decided filter score, so cap it: if the
+      // local model stalls, fall back to the filter score in ~90s instead of
+      // blocking the whole pipeline for minutes.
+      const analyzeMs = Number(process.env.ANALYZE_TIMEOUT_MS) || 90000;
+      const scored = (await Promise.race([
+        claudeMatchJobToResume(job.description, this.runResumeData),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("analyze timeout")), analyzeMs)),
+      ])) as {
         matchScore?: number;
         atsScore?: number;
         matchingSkills?: string[];
@@ -247,13 +285,16 @@ class AutomationEngine {
         confidenceLevel?: number;
       };
       matchScore = scored.matchScore ?? matchScore;
+      const matching = scored.matchingSkills ?? job.matchingSkills ?? [];
+      const missing = scored.missingSkills ?? job.missingSkills ?? [];
       await prisma.job.update({
         where: { id: jobId },
         data: {
           matchScore,
           atsScore: scored.atsScore ?? job.atsScore,
-          matchingSkills: scored.matchingSkills ?? job.matchingSkills,
-          missingSkills: scored.missingSkills ?? job.missingSkills,
+          atsKeywordScore: atsKeywordPct(matching, missing),
+          matchingSkills: matching,
+          missingSkills: missing,
           matchReason: scored.matchReason ?? job.matchReason,
           confidenceLevel: scored.confidenceLevel ?? 0.8,
           status: "ANALYZED",
@@ -281,7 +322,14 @@ class AutomationEngine {
     // ─── Tailor résumé + cover letter + Overleaf CV ───────────────────────────
     this.state.currentAction = `Tailoring: ${job.jobTitle} @ ${job.companyName}`;
     try {
-      const { tailoredResumeId, coverLetterId } = await tailorResumeForJob(this.runResumeId, jobId);
+      // Cap the tailor AI call so a wedged/stuck Ollama can't hang the whole
+      // pipeline indefinitely (default 4 min; configurable). On timeout the job
+      // is left for a later run rather than blocking everything behind it.
+      const tailorMs = Number(process.env.TAILOR_TIMEOUT_MS) || 240000;
+      const { tailoredResumeId, coverLetterId } = (await Promise.race([
+        tailorResumeForJob(this.runResumeId, jobId),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("tailor timeout — AI not responding")), tailorMs)),
+      ])) as { tailoredResumeId: string; coverLetterId: string };
       const folderPath = getApplicationFolder(job.companyName, job.jobTitle);
 
       const application = await prisma.application.create({
@@ -337,6 +385,14 @@ class AutomationEngine {
     this.state.isPaused = false;
     scraperStatus.waitingForUser = false;
     await Logger.info("ENGINE", "Automation resumed — clearing human-wait flag");
+  }
+
+  // User asserts they finished the application during a takeover. Trusted so a
+  // genuinely-submitted app we can't auto-detect isn't marked FAILED.
+  async confirmSubmitted(): Promise<void> {
+    scraperStatus.userConfirmedSubmit = true;
+    scraperStatus.waitingForUser = false;
+    await Logger.success("ENGINE", "You confirmed the application was submitted");
   }
 
   private async getApplicationsToday(): Promise<number> {

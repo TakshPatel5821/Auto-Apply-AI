@@ -1,16 +1,30 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare, GraduationCap } from "lucide-react";
+import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare, GraduationCap, Users, History } from "lucide-react";
 import { ResumeDiffModal } from "./ResumeDiffModal";
 import { InterviewPrepModal } from "./InterviewPrepModal";
+import { RecruiterOutreachModal } from "./RecruiterOutreachModal";
 
+const STATUS_OPTIONS = [
+  "SUBMITTED",
+  "CONFIRMED",
+  "INTERVIEW_SCHEDULED",
+  "OFFER_RECEIVED",
+  "REJECTED",
+  "WITHDRAWN",
+];
+
+interface ActionLogEntry { t: string; action: string; target?: string; detail?: string }
 interface Application {
   id: string;
   status: string;
   appliedAt: string | null;
   updatedAt: string;
   error?: string | null;
+  retryCount?: number;
+  recoveryState?: { url?: string; phase?: string; ts?: string } | null;
+  actionLog?: ActionLogEntry[];
   job: {
     id: string;
     companyName: string;
@@ -50,6 +64,17 @@ export function ApplicationsTable({
   const [message, setMessage] = useState<string | null>(null);
   const [diffId, setDiffId] = useState<string | null>(null);
   const [prepJobId, setPrepJobId] = useState<string | null>(null);
+  const [outreachJobId, setOutreachJobId] = useState<string | null>(null);
+  const [logApp, setLogApp] = useState<Application | null>(null);
+
+  async function updateStatus(applicationId: string, status: string) {
+    await fetch("/api/applications/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ applicationId, status }),
+    });
+    onRefresh();
+  }
 
   function setBusy(id: string, busy: boolean) {
     setBusyIds((prev) => {
@@ -106,7 +131,7 @@ export function ApplicationsTable({
     <div className="space-y-3">
       {/* Bulk action bar */}
       {applications.length > 0 && (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 flex items-center gap-3">
+        <div className="card-glass p-3 flex items-center gap-3">
           <div className="flex-1 flex items-center gap-2">
             <Send className="w-4 h-4 text-blue-400" />
             <span className="text-sm text-gray-300">
@@ -148,10 +173,10 @@ export function ApplicationsTable({
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-xl border border-gray-800">
+      <div className="overflow-x-auto card-glass">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-gray-800 bg-gray-900/50">
+            <tr className="border-b border-white/[0.06] bg-white/[0.02]">
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Company</th>
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Role</th>
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
@@ -165,7 +190,7 @@ export function ApplicationsTable({
             {applications.map((app) => {
               const busy = busyIds.has(app.id);
               return (
-                <tr key={app.id} className="border-b border-gray-800/50 hover:bg-gray-800/20 transition-colors">
+                <tr key={app.id} className="border-b border-white/[0.04] hover:bg-white/[0.03] transition-colors">
                   <td className="px-4 py-3">
                     <div className="font-medium text-white">{app.job.companyName}</div>
                     <div className="text-xs text-gray-500 capitalize flex items-center gap-1">
@@ -177,9 +202,22 @@ export function ApplicationsTable({
                   </td>
                   <td className="px-4 py-3 text-gray-300">{app.job.jobTitle}</td>
                   <td className="px-4 py-3">
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[app.status] || "bg-gray-700 text-gray-400"}`}>
-                      {app.status}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[app.status] || "bg-gray-700 text-gray-400"}`}>
+                        {app.status}
+                      </span>
+                      <select
+                        value=""
+                        onChange={(e) => e.target.value && updateStatus(app.id, e.target.value)}
+                        className="bg-gray-800 border border-gray-700 rounded text-[10px] text-gray-400 px-1 py-0.5 focus:outline-none"
+                        title="Update status"
+                      >
+                        <option value="">↻</option>
+                        {STATUS_OPTIONS.map((s) => (
+                          <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
+                        ))}
+                      </select>
+                    </div>
                     {app.error && (
                       <div className="text-[10px] text-red-400 mt-1 max-w-[200px] truncate" title={app.error}>
                         {app.error}
@@ -238,6 +276,26 @@ export function ApplicationsTable({
                           <GitCompare className="w-3.5 h-3.5" />
                         </button>
                       )}
+
+                      {/* Action log / recovery */}
+                      {(app.actionLog?.length || app.recoveryState) && (
+                        <button
+                          onClick={() => setLogApp(app)}
+                          className="p-1.5 text-gray-500 hover:text-amber-400 transition-colors"
+                          title="View action log / where it stopped"
+                        >
+                          <History className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      {/* Recruiter outreach */}
+                      <button
+                        onClick={() => setOutreachJobId(app.job.id)}
+                        className="p-1.5 text-gray-500 hover:text-blue-400 transition-colors"
+                        title="Recruiter outreach"
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                      </button>
 
                       {/* AI interview prep */}
                       <button
@@ -318,6 +376,74 @@ export function ApplicationsTable({
 
       {diffId && <ResumeDiffModal tailoredResumeId={diffId} onClose={() => setDiffId(null)} />}
       {prepJobId && <InterviewPrepModal jobId={prepJobId} onClose={() => setPrepJobId(null)} />}
+      {outreachJobId && <RecruiterOutreachModal jobId={outreachJobId} onClose={() => setOutreachJobId(null)} />}
+      {logApp && <ActionLogModal app={logApp} onClose={() => setLogApp(null)} />}
     </div>
   );
+}
+
+function ActionLogModal({ app, onClose }: { app: Application; onClose: () => void }) {
+
+  const log = app.actionLog || [];
+
+  const rec = app.recoveryState;
+
+  return (
+
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
+
+      <div className="card-glass max-w-lg w-full max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+
+        <div className="sticky top-0 bg-gray-900/90 backdrop-blur border-b border-white/10 px-5 py-3 flex items-center justify-between">
+
+          <h2 className="font-semibold text-white text-sm">Action log — {app.job.companyName}</h2>
+
+          <button onClick={onClose} className="text-gray-500 hover:text-white text-lg leading-none">×</button>
+
+        </div>
+
+        <div className="p-5 space-y-3">
+
+          {rec?.phase && (
+
+            <div className="text-xs text-amber-400">
+
+              Last checkpoint: <span className="font-medium">{rec.phase}</span>
+
+              {rec.url ? <> · <span className="text-gray-500 break-all">{rec.url}</span></> : null}
+
+            </div>
+
+          )}
+
+          {app.error && <div className="text-xs text-red-400 break-words">Error: {app.error}</div>}
+
+          <div className="space-y-1">
+
+            {log.length === 0 && <div className="text-xs text-gray-600">No actions recorded.</div>}
+
+            {log.map((a, i) => (
+
+              <div key={i} className="flex gap-2 text-xs">
+
+                <span className="text-gray-600 tabular-nums w-16 flex-shrink-0">{a.t?.slice(11, 19)}</span>
+
+                <span className="text-gray-300 w-28 flex-shrink-0">{a.action}</span>
+
+                <span className="text-gray-500 break-all">{[a.target, a.detail].filter(Boolean).join(" — ")}</span>
+
+              </div>
+
+            ))}
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  );
+
 }

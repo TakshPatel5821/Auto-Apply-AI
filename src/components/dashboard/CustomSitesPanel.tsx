@@ -63,7 +63,7 @@ export function CustomSitesPanel() {
   }
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+    <div className="card-glass p-5 space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Globe className="w-4 h-4 text-purple-400" />
