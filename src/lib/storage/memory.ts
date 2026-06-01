@@ -104,6 +104,7 @@ export async function findAnswer(
   });
   // Require a real answer — a shell row may exist only to hold rejectedAnswers.
   if (exact && exact.answerText.trim()) {
+    if (!isPlausibleAnswer(question, exact.answerText)) return null;
     await bumpUsage(exact.id);
     return exact.answerText;
   }
@@ -143,7 +144,7 @@ async function findAnswerSemantic(question: string): Promise<string | null> {
     }
 
     // 0.85+ cosine on nomic-embed-text reliably means "same intent".
-    if (best && bestScore >= 0.85) {
+    if (best && bestScore >= 0.85 && isPlausibleAnswer(question, best.answerText)) {
       await bumpUsage(best.id);
       return best.answerText;
     }
