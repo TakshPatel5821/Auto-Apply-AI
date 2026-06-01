@@ -47,13 +47,15 @@ export async function tailorResumeForJob(
 
   // Step 3: save .tex + cover letter + metadata to the application folder.
   const folderPath = getApplicationFolder(job.companyName, job.jobTitle);
+  const contactInfo =
+    (resume.parsedData as { contactInfo?: CoverContact })?.contactInfo || {};
   const paths = saveApplicationFiles(folderPath, {
     resumeTex: tailored.tailoredLatex,
     coverLetterTex: generateCoverLetterTex(
       tailored.coverLetter,
       job.companyName,
       job.jobTitle,
-      (resume.parsedData as { contactInfo?: { name?: string } })?.contactInfo?.name
+      contactInfo
     ),
     jobDescription: job.description,
     metadata: {
@@ -89,7 +91,7 @@ export async function tailorResumeForJob(
           tailored.coverLetter,
           job.companyName,
           job.jobTitle,
-          (resume.parsedData as { contactInfo?: { name?: string } })?.contactInfo?.name
+          contactInfo
         ),
         folderPath,
         "cover_letter"
@@ -137,28 +139,95 @@ export async function tailorResumeForJob(
   return { tailoredResumeId: tailoredResume.id, coverLetterId: coverLetter.id };
 }
 
+interface CoverContact {
+  name?: string;
+  email?: string;
+  phone?: string;
+  location?: string;
+  portfolio?: string;
+  website?: string;
+  linkedin?: string;
+}
+
+// Escape text for LaTeX. Backslash first, then the special characters.
+function escapeLatex(s: string): string {
+  return (s || "")
+    .replace(/\\/g, "\\textbackslash{}")
+    .replace(/([&%$#_{}])/g, "\\$1")
+    .replace(/~/g, "\\textasciitilde{}")
+    .replace(/\^/g, "\\textasciicircum{}");
+}
+
+// A professional cover-letter layout that MIRRORS the résumé: a centered name +
+// contact header, today's date, the recipient block, a proper greeting, the
+// tailored body (real paragraphs), and a signed closing. Replaces the old bare
+// `letter`-class output that had no header, no date, and an empty address.
 function generateCoverLetterTex(
   content: string,
   company: string,
   jobTitle: string,
-  candidateName?: string
+  contact: CoverContact = {}
 ): string {
-  const escapedContent = content
-    .replace(/&/g, "\\&")
-    .replace(/%/g, "\\%")
-    .replace(/\$/g, "\\$")
-    .replace(/#/g, "\\#")
-    .replace(/_/g, "\\_");
+  const name = escapeLatex(contact.name || "Applicant");
+  const contactLine = [contact.phone, contact.email, contact.location]
+    .filter(Boolean)
+    .map((s) => escapeLatex(s as string))
+    .join(" $|$ ");
+  const linkLine = [contact.portfolio || contact.website, contact.linkedin]
+    .filter(Boolean)
+    .map((s) => escapeLatex(s as string))
+    .join(" $|$ ");
 
-  return `\\documentclass[12pt]{letter}
-\\usepackage[margin=1in]{geometry}
-\\signature{${candidateName || "Applicant"}}
-\\address{}
-\\begin{document}
-\\begin{letter}{Hiring Manager\\\\${company}\\\\Re: ${jobTitle} Position}
-\\opening{Dear Hiring Manager,}
-${escapedContent}
-\\closing{Sincerely,}
-\\end{letter}
-\\end{document}`;
+  const date = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+
+  // The AI body is paragraphs only; strip any greeting/closing it may have added
+  // so we don't duplicate ours, then normalize into LaTeX paragraphs.
+  let body = (content || "").trim();
+  body = body.replace(/^\s*dear\b[^\n]*\n+/i, "");
+  body = body.replace(/\n+\s*(sincerely|best regards|kind regards|warm regards|regards|best|thank you)\b[\s\S]*$/i, "");
+  let paragraphs = body
+    .split(/\n\s*\n/)
+    .map((p) => escapeLatex(p.replace(/\s*\n\s*/g, " ").trim()))
+    .filter(Boolean)
+    .join("\n\n");
+  if (!paragraphs) {
+    paragraphs = escapeLatex(
+      `I am excited to apply for the ${jobTitle} position at ${company} and have attached my résumé for your review.`
+    );
+  }
+
+  const header = [`{\\LARGE\\bfseries ${name}}`];
+  if (contactLine) header.push(contactLine);
+  if (linkLine) header.push(linkLine);
+
+  const L: string[] = [
+    "\\documentclass[11pt]{article}",
+    "\\usepackage[margin=1in]{geometry}",
+    "\\usepackage{parskip}",
+    "\\setlength{\\parskip}{0.7em}",
+    "\\pagestyle{empty}",
+    "\\begin{document}",
+    "",
+    "{\\centering",
+    header.join("\\\\[3pt]\n"),
+    "\\par}",
+    "\\vspace{1.4em}",
+    "",
+    escapeLatex(date),
+    "",
+    "Hiring Manager\\\\",
+    `${escapeLatex(company)}\\\\`,
+    `Re: ${escapeLatex(jobTitle)}`,
+    "",
+    "Dear Hiring Manager,",
+    "",
+    paragraphs,
+    "",
+    "\\vspace{0.6em}",
+    "Sincerely,\\\\[1.4em]",
+    name,
+    "",
+    "\\end{document}",
+  ];
+  return L.join("\n");
 }
