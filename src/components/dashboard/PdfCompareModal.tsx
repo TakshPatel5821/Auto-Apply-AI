@@ -13,9 +13,9 @@ interface PdfApp {
 // plus a tab to view the cover-letter PDF. Streams files from /api/applications/file.
 export function PdfCompareModal({ app, onClose }: { app: PdfApp; onClose: () => void }) {
   const [tab, setTab] = useState<"resume" | "cover">("resume");
+  // The API falls back to the job's latest doc when a relation isn't linked, so
+  // we always offer both tabs and let the server resolve the actual file.
   const fileUrl = (type: string) => `/api/applications/file?id=${app.id}&type=${type}`;
-  const hasTailored = !!app.tailoredResume?.pdfPath;
-  const hasCover = !!app.coverLetter?.pdfPath;
 
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -34,8 +34,7 @@ export function PdfCompareModal({ app, onClose }: { app: PdfApp; onClose: () => 
               </button>
               <button
                 onClick={() => setTab("cover")}
-                disabled={!hasCover}
-                className={`text-xs px-3 py-1 rounded-lg disabled:opacity-40 ${tab === "cover" ? "bg-white/10 text-white" : "text-gray-400 hover:text-gray-200"}`}
+                className={`text-xs px-3 py-1 rounded-lg ${tab === "cover" ? "bg-white/10 text-white" : "text-gray-400 hover:text-gray-200"}`}
               >
                 Cover letter
               </button>
@@ -56,32 +55,18 @@ export function PdfCompareModal({ app, onClose }: { app: PdfApp; onClose: () => 
             <div className="flex flex-col bg-gray-950">
               <div className="px-3 py-1.5 text-xs text-gray-400 flex items-center justify-between">
                 <span>Tailored for this job</span>
-                {hasTailored && (
-                  <a href={fileUrl("resume")} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Open ↗</a>
-                )}
+                <a href={fileUrl("resume")} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Open ↗</a>
               </div>
-              {hasTailored ? (
-                <iframe src={fileUrl("resume")} className="flex-1 w-full bg-white" title="Tailored résumé" />
-              ) : (
-                <div className="flex-1 flex items-center justify-center text-sm text-gray-600">
-                  No tailored PDF yet — use Regenerate.
-                </div>
-              )}
+              <iframe src={fileUrl("resume")} className="flex-1 w-full bg-white" title="Tailored résumé" />
             </div>
           </div>
         ) : (
           <div className="flex-1 bg-gray-950 flex flex-col">
             <div className="px-3 py-1.5 text-xs text-gray-400 flex items-center justify-between">
               <span>Cover letter</span>
-              {hasCover && (
-                <a href={fileUrl("cover")} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Open ↗</a>
-              )}
+              <a href={fileUrl("cover")} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">Open ↗</a>
             </div>
-            {hasCover ? (
-              <iframe src={fileUrl("cover")} className="flex-1 w-full bg-white" title="Cover letter" />
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-sm text-gray-600">No cover letter PDF.</div>
-            )}
+            <iframe src={fileUrl("cover")} className="flex-1 w-full bg-white" title="Cover letter" />
           </div>
         )}
       </div>

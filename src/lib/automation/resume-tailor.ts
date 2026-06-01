@@ -79,7 +79,7 @@ export async function tailorResumeForJob(
   if (SKIP_PDF) {
     await Logger.info("TAILOR", "SKIP_PDF=true — saved .tex only, no PDF compiled");
   } else {
-    pdfPath = await compileLatexToPDF(tailored.tailoredLatex, folderPath).catch((e) => {
+    pdfPath = await compileLatexToPDF(tailored.tailoredLatex, folderPath, "resume").catch((e) => {
       Logger.warn("TAILOR", `PDF compilation error: ${e}`);
       return null;
     });

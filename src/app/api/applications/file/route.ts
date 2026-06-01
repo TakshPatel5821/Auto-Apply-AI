@@ -41,10 +41,36 @@ export async function GET(req: NextRequest) {
   });
   if (!app) return NextResponse.json({ error: "not found" }, { status: 404 });
 
-  const rawPath =
-    type === "cover" ? app.coverLetter?.pdfPath :
-    type === "original" ? app.resume?.originalPath :
-    app.tailoredResume?.pdfPath;
+  // Resolve the path, falling back to the JOB's latest doc when the relation
+  // isn't linked on this application (some applications never linked one).
+  let rawPath: string | null | undefined;
+  if (type === "cover") {
+    rawPath = app.coverLetter?.pdfPath;
+    if (!rawPath) {
+      rawPath = (await prisma.coverLetter.findFirst({
+        where: { jobId: app.jobId },
+        orderBy: { createdAt: "desc" },
+        select: { pdfPath: true },
+      }))?.pdfPath;
+    }
+  } else if (type === "original") {
+    rawPath = app.resume?.originalPath;
+    if (!rawPath) {
+      rawPath = (await prisma.resume.findFirst({
+        where: { userId: "local", isActive: true },
+        select: { originalPath: true },
+      }))?.originalPath;
+    }
+  } else {
+    rawPath = app.tailoredResume?.pdfPath;
+    if (!rawPath) {
+      rawPath = (await prisma.tailoredResume.findFirst({
+        where: { jobId: app.jobId },
+        orderBy: { createdAt: "desc" },
+        select: { pdfPath: true },
+      }))?.pdfPath;
+    }
+  }
 
   const filePath = resolve(rawPath);
   if (!filePath) {
@@ -53,11 +79,16 @@ export async function GET(req: NextRequest) {
 
   try {
     const buf = readFileSync(filePath);
-    const mime = MIME[extname(filePath).toLowerCase()] || "application/octet-stream";
+    const ext = extname(filePath).toLowerCase();
+    const mime = MIME[ext] || "application/octet-stream";
+    const downloadName =
+      type === "cover" ? `cover_letter${ext}` :
+      type === "original" ? `original_resume${ext}` :
+      `resume${ext}`; // tailored résumé served simply as resume.pdf
     return new NextResponse(new Uint8Array(buf), {
       headers: {
         "Content-Type": mime,
-        "Content-Disposition": `inline; filename="${type}${extname(filePath)}"`,
+        "Content-Disposition": `inline; filename="${downloadName}"`,
         "Cache-Control": "no-store",
       },
     });
