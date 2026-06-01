@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare, GraduationCap, Users, History } from "lucide-react";
 import { ResumeDiffModal } from "./ResumeDiffModal";
 import { InterviewPrepModal } from "./InterviewPrepModal";
@@ -382,68 +382,127 @@ export function ApplicationsTable({
   );
 }
 
+interface FieldDecision {
+  step: number;
+  label: string;
+  category: string;
+  domKind: string;
+  source: string | null;
+  confidence: number | null;
+  decision: string;
+  valuePreview: string | null;
+  reason: string | null;
+}
+
+const DECISION_COLORS: Record<string, string> = {
+  filled: "bg-green-900/40 text-green-300",
+  verified: "bg-green-900/40 text-green-300",
+  consent: "bg-emerald-900/40 text-emerald-300",
+  prefilled: "bg-sky-900/40 text-sky-300",
+  pause: "bg-amber-900/40 text-amber-300",
+  reject: "bg-red-900/40 text-red-300",
+};
+
 function ActionLogModal({ app, onClose }: { app: Application; onClose: () => void }) {
-
   const log = app.actionLog || [];
-
   const rec = app.recoveryState;
+  const [tab, setTab] = useState<"decisions" | "actions">("decisions");
+  const [decisions, setDecisions] = useState<FieldDecision[] | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/applications/decisions?id=${app.id}`)
+      .then((r) => (r.ok ? r.json() : { fieldDecisions: [] }))
+      .then((d) => { if (alive) setDecisions(d.fieldDecisions || []); })
+      .catch(() => { if (alive) setDecisions([]); });
+    return () => { alive = false; };
+  }, [app.id]);
+
+  // Group decisions by fill-pass step.
+  const bySteps = (decisions || []).reduce<Record<number, FieldDecision[]>>((acc, d) => {
+    (acc[d.step] ??= []).push(d);
+    return acc;
+  }, {});
 
   return (
-
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
-
-      <div className="card-glass max-w-lg w-full max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-
+      <div className="card-glass max-w-2xl w-full max-h-[82vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="sticky top-0 bg-gray-900/90 backdrop-blur border-b border-white/10 px-5 py-3 flex items-center justify-between">
-
-          <h2 className="font-semibold text-white text-sm">Action log — {app.job.companyName}</h2>
-
+          <h2 className="font-semibold text-white text-sm">Run details — {app.job.companyName}</h2>
           <button onClick={onClose} className="text-gray-500 hover:text-white text-lg leading-none">×</button>
+        </div>
 
+        <div className="px-5 pt-3 flex gap-2">
+          <button
+            onClick={() => setTab("decisions")}
+            className={`text-xs px-3 py-1 rounded-lg ${tab === "decisions" ? "bg-white/10 text-white" : "text-gray-400 hover:text-gray-200"}`}
+          >
+            Field decisions {decisions ? `(${decisions.length})` : ""}
+          </button>
+          <button
+            onClick={() => setTab("actions")}
+            className={`text-xs px-3 py-1 rounded-lg ${tab === "actions" ? "bg-white/10 text-white" : "text-gray-400 hover:text-gray-200"}`}
+          >
+            Action log ({log.length})
+          </button>
         </div>
 
         <div className="p-5 space-y-3">
-
           {rec?.phase && (
-
             <div className="text-xs text-amber-400">
-
               Last checkpoint: <span className="font-medium">{rec.phase}</span>
-
               {rec.url ? <> · <span className="text-gray-500 break-all">{rec.url}</span></> : null}
-
             </div>
-
           )}
-
           {app.error && <div className="text-xs text-red-400 break-words">Error: {app.error}</div>}
 
-          <div className="space-y-1">
+          {tab === "decisions" && (
+            <div className="space-y-3">
+              {decisions === null && <div className="text-xs text-gray-600">Loading field decisions…</div>}
+              {decisions !== null && decisions.length === 0 && (
+                <div className="text-xs text-gray-600">No field decisions recorded for this run.</div>
+              )}
+              {Object.entries(bySteps).map(([step, items]) => (
+                <div key={step}>
+                  <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Step {step}</div>
+                  <div className="space-y-1">
+                    {items.map((d, i) => (
+                      <div key={i} className="flex items-start gap-2 text-xs">
+                        <span className={`px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${DECISION_COLORS[d.decision] || "bg-gray-700 text-gray-300"}`}>
+                          {d.decision}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-gray-200 truncate" title={d.label}>{d.label}</div>
+                          <div className="text-gray-500">
+                            {d.category}/{d.domKind}
+                            {d.source ? ` · ${d.source}` : ""}
+                            {d.confidence != null ? ` · ${Math.round(d.confidence * 100)}%` : ""}
+                            {d.valuePreview ? ` · “${d.valuePreview}”` : ""}
+                            {d.reason ? ` · ${d.reason}` : ""}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
-            {log.length === 0 && <div className="text-xs text-gray-600">No actions recorded.</div>}
-
-            {log.map((a, i) => (
-
-              <div key={i} className="flex gap-2 text-xs">
-
-                <span className="text-gray-600 tabular-nums w-16 flex-shrink-0">{a.t?.slice(11, 19)}</span>
-
-                <span className="text-gray-300 w-28 flex-shrink-0">{a.action}</span>
-
-                <span className="text-gray-500 break-all">{[a.target, a.detail].filter(Boolean).join(" — ")}</span>
-
-              </div>
-
-            ))}
-
-          </div>
-
+          {tab === "actions" && (
+            <div className="space-y-1">
+              {log.length === 0 && <div className="text-xs text-gray-600">No actions recorded.</div>}
+              {log.map((a, i) => (
+                <div key={i} className="flex gap-2 text-xs">
+                  <span className="text-gray-600 tabular-nums w-16 flex-shrink-0">{a.t?.slice(11, 19)}</span>
+                  <span className="text-gray-300 w-28 flex-shrink-0">{a.action}</span>
+                  <span className="text-gray-500 break-all">{[a.target, a.detail].filter(Boolean).join(" — ")}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-
       </div>
-
     </div>
-
   );
-
 }

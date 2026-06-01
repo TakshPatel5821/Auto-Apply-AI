@@ -10,7 +10,7 @@ import { matchDropdownOptionScored } from "@/lib/profile/dropdown-intelligence";
 import { getCredentials, Credentials } from "@/lib/security/credentials";
 import { rememberedSelector, learnSelector, forgetSelector } from "./selector-memory";
 import { claudeAnswerQuestion } from "@/lib/ai/claude";
-import { saveScreenshot } from "@/lib/storage/file-manager";
+import { saveScreenshot, saveFile } from "@/lib/storage/file-manager";
 
 // Résumé PDF paths are stored relative to the project root ("applications/..").
 // existsSync on a relative path is cwd-dependent, so resolve to absolute first.
@@ -60,6 +60,20 @@ interface DetectedField {
   sectionHeading?: string;
   // Phase 6: the field's character limit (maxlength), for open-ended answers.
   maxLength?: number;
+}
+
+// Phase 9: a single per-field decision for the debug/replay view.
+interface FieldDecisionRecord {
+  t: string;
+  step: number;
+  label: string;
+  category: string;
+  domKind: string;
+  source: string | null;       // profile[x] | memory | resume | AI | consent | prefilled
+  confidence: number | null;
+  decision: string;            // filled | verified | pause | reject | skip | consent | prefilled
+  valuePreview: string | null; // truncated; "‹hidden›" for sensitive categories
+  reason: string | null;
 }
 
 const STEALTH_SCRIPT = () => {
@@ -118,6 +132,9 @@ export class ApplyEngine {
   // Phase 7: what the AGENT filled this run (field label → value), so when the
   // human later changes a value we can record the old one as negative memory.
   private appliedValues = new Map<string, string>();
+  // Phase 9 debug/replay: per-field decisions + a monotonic fill-pass counter.
+  private fieldDecisions: FieldDecisionRecord[] = [];
+  private currentStep = 0;
 
   // ─── Browser lifecycle ──────────────────────────────────────────────────────
 
@@ -189,6 +206,28 @@ export class ApplyEngine {
     if (this.actionLog.length > 200) this.actionLog.shift(); // bound it
   }
 
+  // Phase 9: record why one field was handled the way it was (for replay/debug).
+  private recordFieldDecision(
+    field: DetectedField,
+    cls: { category: string; domKind: string },
+    outcome: { decision: string; source?: string; confidence?: number; value?: string; reason?: string }
+  ): void {
+    const sensitive = isSensitive(cls.category as never);
+    this.fieldDecisions.push({
+      t: new Date().toISOString(),
+      step: this.currentStep,
+      label: field.label.slice(0, 120),
+      category: cls.category,
+      domKind: cls.domKind,
+      source: outcome.source ?? null,
+      confidence: outcome.confidence ?? null,
+      decision: outcome.decision,
+      valuePreview: outcome.value ? (sensitive ? "‹hidden›" : outcome.value.slice(0, 80)) : null,
+      reason: outcome.reason ?? null,
+    });
+    if (this.fieldDecisions.length > 500) this.fieldDecisions.shift();
+  }
+
   // Persist a recoverable checkpoint: where we are + the action log so far. On a
   // later retry we can fast-forward to this URL/phase instead of starting over.
   private async checkpoint(phase: string, extra?: Record<string, unknown>): Promise<void> {
@@ -199,6 +238,7 @@ export class ApplyEngine {
       data: {
         recoveryState: { url, phase, ts: new Date().toISOString(), ...(extra || {}) } as object,
         actionLog: this.actionLog as object,
+        fieldDecisions: this.fieldDecisions as object,
       },
     }).catch(() => {});
   }
@@ -270,6 +310,8 @@ export class ApplyEngine {
     this.currentApplicationId = applicationId;
     this.submitClicked = false;
     this.appliedValues.clear();
+    this.fieldDecisions = [];
+    this.currentStep = 0;
     this.actionLog = Array.isArray(application.actionLog)
       ? (application.actionLog as { t: string; action: string; target?: string; detail?: string }[])
       : [];
@@ -315,6 +357,7 @@ export class ApplyEngine {
             appliedAt: new Date(),
             recoveryState: { phase: "submitted", ts: new Date().toISOString() } as object,
             actionLog: this.actionLog as object,
+            fieldDecisions: this.fieldDecisions as object,
           },
         });
         await prisma.job.update({ where: { id: job.id }, data: { status: "APPLIED" } });
@@ -334,6 +377,7 @@ export class ApplyEngine {
           retryCount: { increment: 1 },
           recoveryState: { phase: "failed", url, ts: new Date().toISOString() } as object,
           actionLog: this.actionLog as object,
+          fieldDecisions: this.fieldDecisions as object,
         },
       });
       await prisma.job.update({ where: { id: job.id }, data: { status: "FAILED" } });
@@ -1754,6 +1798,7 @@ export class ApplyEngine {
     scope: string
   ): Promise<string[]> {
     this.currentScope = scope;
+    this.currentStep++; // Phase 9: monotonic fill-pass number for replay grouping
     const fields = await this.detectFields(scope);
     if (fields.length === 0) {
       await Logger.info("APPLY", "No fillable fields detected in this view");
@@ -2032,11 +2077,13 @@ export class ApplyEngine {
       } else if (spec.compliance || isSensitive(cls.category)) {
         // Compliance/visa/EEO/salary question with NO profile value → never guess.
         await Logger.warn("APPLY", `  🔒 sensitive [${cls.category}] "${field.label.slice(0, 60)}" not in profile — will ask you (no AI/memory guessing)`);
+        this.recordFieldDecision(field, cls, { decision: "pause", reason: "sensitive — not set in profile" });
         return false;
       }
     } else if (isSensitive(cls.category)) {
       // Classified sensitive but no profile spec matched → still never guess.
       await Logger.warn("APPLY", `  🔒 sensitive [${cls.category}] "${field.label.slice(0, 60)}" not in profile — will ask you (no AI/memory guessing)`);
+      this.recordFieldDecision(field, cls, { decision: "pause", reason: "sensitive — not set in profile" });
       return false;
     }
 
@@ -2102,6 +2149,7 @@ export class ApplyEngine {
     // human to fill ALL unknowns together (we then capture them to memory).
     if (!answer) {
       await Logger.warn("APPLY", `  ❓ Don't know "${field.label.slice(0, 60)}" — will ask you to fill it`);
+      this.recordFieldDecision(field, cls, { decision: "pause", reason: aiMayAnswer(cls.category) ? "no value found" : "AI not allowed for this category; no saved value" });
       return false;
     }
 
@@ -2110,6 +2158,7 @@ export class ApplyEngine {
     if (!accept(answer)) {
       const why = validateValue(cls, answer, field.options).reason || "invalid";
       await Logger.warn("APPLY", `  ✗ rejecting "${answer.slice(0, 40)}…" — ${why} for [${cls.category}/${cls.domKind}] "${field.label.slice(0, 40)}"`);
+      this.recordFieldDecision(field, cls, { decision: "reject", source, value: answer, reason: why });
       return false;
     }
 
@@ -2123,6 +2172,7 @@ export class ApplyEngine {
         ? "needs a profile value"
         : `low confidence (${Math.round(effConfidence * 100)}%, ${source})`;
       await Logger.warn("APPLY", `  ⚠ ${why} for "${field.label.slice(0, 50)}" — leaving blank for your review`);
+      this.recordFieldDecision(field, cls, { decision: "pause", source, confidence: effConfidence, value: answer, reason: why });
       return false;
     }
 
@@ -2130,6 +2180,7 @@ export class ApplyEngine {
     if (!applied) {
       // Couldn't confidently apply (e.g. no/ambiguous dropdown option) — pause.
       await Logger.warn("APPLY", `  ⚠ couldn't apply a clear value to "${field.label.slice(0, 50)}" (${cls.domKind}) — leaving blank for your review`);
+      this.recordFieldDecision(field, cls, { decision: "pause", source, confidence: effConfidence, value: answer, reason: "couldn't apply (no/ambiguous option)" });
       return false;
     }
     // Phase 7: remember what we put here so a later human edit becomes a
@@ -2141,10 +2192,15 @@ export class ApplyEngine {
       const ok = await this.verifyFieldValue(field, answer);
       if (!ok) {
         await Logger.warn("APPLY", `  ⚠ verify failed for "${field.label}" (${source}) — pausing for review`);
+        this.recordFieldDecision(field, cls, { decision: "pause", source, confidence: effConfidence, value: answer, reason: "value didn't land (verify failed)" });
         return false;
       }
       await Logger.info("APPLY", `  ✓ verified "${field.label.slice(0, 50)}" (${Math.round(effConfidence * 100)}%)`);
     }
+    this.recordFieldDecision(field, cls, {
+      decision: decision === "fill_and_verify" ? "verified" : "filled",
+      source, confidence: effConfidence, value: answer,
+    });
     return true;
   }
 
@@ -2546,6 +2602,12 @@ export class ApplyEngine {
     try {
       const buf = await this.page.screenshot({ fullPage: false });
       saveScreenshot(folderPath, buf, `${label}.png`);
+    } catch { /* ignore */ }
+    // Phase 9: also snapshot the page HTML so failures can be inspected offline.
+    try {
+      const html = await this.page.content();
+      const safe = label.replace(/[^a-z0-9_\-.]/gi, "_");
+      saveFile(folderPath, `${safe}.html`, html);
     } catch { /* ignore */ }
   }
 }
