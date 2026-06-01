@@ -21,11 +21,34 @@ export interface AtsAdapter {
   fileInput?: string[];
   advanceButtons?: string[];
   submitButtons?: string[];
+  // Confirmation that the application went through (Phase 8 trusts these).
   successSelectors?: string[];
   successText?: string[];
+  // Phase 4: per-platform validation-error markers. When a step won't advance,
+  // the engine reads these to explain WHY (which field the ATS rejected) instead
+  // of a generic "form didn't advance".
+  validationErrorSelectors?: string[];
+  // Phase 4: known weird fields / behaviors — surfaced in logs so a human pause
+  // makes sense (e.g. "phone needs a country-code dropdown first").
+  quirks?: string[];
   // Free-text note surfaced in logs to explain quirks.
   notes?: string;
 }
+
+// Generic validation-error selectors tried when an adapter doesn't define its
+// own. Covers the common ARIA / class conventions across ATS form libraries.
+export const GENERIC_VALIDATION_ERROR_SELECTORS = [
+  '[aria-invalid="true"]',
+  '[role="alert"]',
+  '.error:not(:empty)',
+  '.field-error',
+  '.field_error',
+  '.input-error',
+  '.invalid-feedback',
+  '.help-block.error',
+  '[class*="error" i]:not(:empty)',
+  '[data-automation-id*="error" i]',
+];
 
 export const ATS_ADAPTERS: AtsAdapter[] = [
   {
@@ -41,7 +64,10 @@ export const ATS_ADAPTERS: AtsAdapter[] = [
       'button[type="submit"]',
     ],
     advanceButtons: ['button:has-text("Continue")', 'button:has-text("Next")', 'button:has-text("Review")'],
+    successSelectors: ['#application_confirmation', '.application-confirmation', 'div:has-text("Thank you for applying")'],
     successText: ["thank you for applying", "application has been submitted", "your application has been submitted"],
+    validationErrorSelectors: ['.field_with_errors', 'label.error', '.error:not(:empty)', '[aria-invalid="true"]'],
+    quirks: ['Custom EEO/demographic questions render as native <select> dropdowns.', 'Phone field may require a country-code prefix.'],
     notes: "Greenhouse boards are single-page; my.greenhouse.io is the login-gated candidate portal.",
   },
   {
@@ -50,7 +76,10 @@ export const ATS_ADAPTERS: AtsAdapter[] = [
     hosts: ["lever.co", "jobs.lever"],
     fileInput: ['input[name="resume"]', 'input[type="file"][name="resume"]'],
     submitButtons: ['button:has-text("Submit application")', 'button[type="submit"]'],
+    successSelectors: ['.application-confirmation', 'div:has-text("Thank you for applying")'],
     successText: ["thank you", "application submitted", "we received your application"],
+    validationErrorSelectors: ['.application-error', '.error-list li', '[aria-invalid="true"]', '.invalid'],
+    quirks: ['Some custom cards are required <textarea> questions appended after the standard fields.'],
     notes: "Lever single-page form; fields use name attributes (name, email, resume).",
   },
   {
@@ -65,7 +94,14 @@ export const ATS_ADAPTERS: AtsAdapter[] = [
       'button:has-text("Next")',
     ],
     submitButtons: ['button:has-text("Submit")', 'button[data-automation-id="bottom-navigation-next-button"]'],
+    successSelectors: ['[data-automation-id="confirmationPage"]', '[data-automation-id="successMessage"]'],
     successText: ["you have submitted", "application submitted", "thank you for applying"],
+    validationErrorSelectors: ['[data-automation-id="errorMessage"]', '[data-automation-id="errorField"]', '[aria-invalid="true"]', '.css-error'],
+    quirks: [
+      'Multi-step wizard; each step must validate before "Save and Continue" works.',
+      'Date fields are 3 separate MM / DD / YYYY spinners.',
+      'Dropdowns are custom listboxes (not native <select>) — open then click an option.',
+    ],
     notes: "Workday requires an account; multi-step with data-automation-id selectors.",
   },
   {
@@ -76,6 +112,8 @@ export const ATS_ADAPTERS: AtsAdapter[] = [
     advanceButtons: ['a:has-text("Continue")', 'button:has-text("Continue")', 'button:has-text("Next")'],
     submitButtons: ['button:has-text("Submit")', 'a:has-text("Submit")', 'input[type="submit"]'],
     successText: ["thank you for your interest", "application has been submitted"],
+    validationErrorSelectors: ['.iCIMS_Error', '.error_message', '[aria-invalid="true"]'],
+    quirks: ['Form is usually inside an <iframe> — fields live in the iframe, not the top document.'],
     notes: "iCIMS often renders inside an iframe; multi-step.",
   },
   {
@@ -115,7 +153,9 @@ export const ATS_ADAPTERS: AtsAdapter[] = [
     hosts: ["smartrecruiters.com", "jobs.smartrecruiters"],
     fileInput: ['input[type="file"]'],
     submitButtons: ['button:has-text("Submit application")', 'button[type="submit"]'],
+    successSelectors: ['.thank-you', 'div:has-text("Thank you for applying")'],
     successText: ["thank you for applying", "application received"],
+    validationErrorSelectors: ['.error-message', '[aria-invalid="true"]', '.has-error'],
     notes: "SmartRecruiters single-page; clean field labels.",
   },
   {
@@ -124,7 +164,10 @@ export const ATS_ADAPTERS: AtsAdapter[] = [
     hosts: ["jobs.ashbyhq.com", "ashbyhq.com"],
     fileInput: ['input[type="file"]'],
     submitButtons: ['button:has-text("Submit Application")', 'button[type="submit"]'],
+    successSelectors: ['div:has-text("Thank you for applying")', '[class*="Confirmation"]'],
     successText: ["thank you", "application submitted"],
+    validationErrorSelectors: ['[aria-invalid="true"]', '[class*="error" i]:not(:empty)', '[role="alert"]'],
+    quirks: ['Dropdowns are custom comboboxes — type to filter, then pick an option.'],
     notes: "Ashby modern SPA; single page.",
   },
   {
@@ -151,6 +194,34 @@ export const ATS_ADAPTERS: AtsAdapter[] = [
     fileInput: ['input[type="file"]'],
     submitButtons: ['button:has-text("Submit application")', 'button[type="submit"]'],
     successText: ["thank you for applying", "application received"],
+    validationErrorSelectors: ['[aria-invalid="true"]', '.error:not(:empty)', '[data-role="error"]'],
+    quirks: ['Resume upload triggers an auto-parse that pre-fills fields — verify before advancing.'],
+  },
+  {
+    id: "indeed",
+    label: "Indeed Apply",
+    hosts: ["indeed.com", "smartapply.indeed.com", "apply.indeed"],
+    requiresLogin: true,
+    fileInput: ['input[type="file"]', 'input[data-testid="ResumeFileUpload-input"]'],
+    advanceButtons: [
+      'button:has-text("Continue")',
+      'button[data-testid="continue-button"]',
+      'button:has-text("Next")',
+    ],
+    submitButtons: [
+      'button:has-text("Submit your application")',
+      'button:has-text("Submit application")',
+      'button[data-testid="submit-application"]',
+      'button:has-text("Submit")',
+    ],
+    successSelectors: ['[data-testid="post-apply"]', 'div:has-text("Application submitted")'],
+    successText: ["application submitted", "your application has been submitted", "applied"],
+    validationErrorSelectors: ['[aria-invalid="true"]', '[role="alert"]', '[id$="-error"]', '.error-text'],
+    quirks: [
+      'Indeed Apply is a multi-step modal/SPA; usually requires an Indeed login.',
+      'Screener questions are radios/dropdowns rendered one step at a time.',
+    ],
+    notes: "Indeed Apply (smartapply.indeed.com) is a multi-step SPA gated behind an Indeed account.",
   },
   {
     id: "dice",
