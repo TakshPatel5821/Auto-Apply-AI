@@ -82,7 +82,7 @@ export function saveApplicationFiles(
   const paths: Record<string, string> = {};
 
   if (files.resumeTex) {
-    paths.resumeTex = saveFile(folderPath, "tailored_resume.tex", files.resumeTex);
+    paths.resumeTex = saveFile(folderPath, "resume.tex", files.resumeTex);
   }
   if (files.coverLetterTex) {
     paths.coverLetterTex = saveFile(folderPath, "cover_letter.tex", files.coverLetterTex);
