@@ -1,9 +1,10 @@
 import { prisma } from "@/lib/db/prisma";
-import { claudeFullTailor } from "@/lib/ai/claude";
+import { claudeFullTailor, checkTailorAlignment } from "@/lib/ai/claude";
 import { getApplicationFolder, saveApplicationFiles } from "@/lib/storage/file-manager";
 import { Logger } from "@/lib/logging/logger";
 import { compileLatexToPDF } from "./latex-compiler";
 import { buildResumeLatex, BASE_SUMMARY } from "./resume-template";
+import { loadProfile } from "@/lib/profile/profile-store";
 
 // Save .tex only and skip the local PDF compile (e.g. on a machine without the
 // LaTeX engine installed). Legacy SKIP_OVERLEAF is still honored.
@@ -36,19 +37,49 @@ export async function tailorResumeForJob(
   // Step 2: one model call — tailored summary + cover letter + ATS analysis.
   // The résumé LaTeX is built locally from the template + tailored summary.
   const aiStart = Date.now();
-  const tailored = await claudeFullTailor(
-    resume.parsedData as Record<string, unknown>,
-    job.description,
-    job.jobTitle,
-    job.companyName
-  );
+  const parsed = resume.parsedData as Record<string, unknown>;
+  let tailored = await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName);
+
+  // Step 2b: alignment / quality gate. Verify the summary + cover letter align
+  // with each other, the job role, and the candidate's REAL résumé (no
+  // fabrication, not generic). If it falls short, regenerate BOTH once with the
+  // reviewer's issues as feedback, and keep whichever scored higher.
+  try {
+    const a1 = await checkTailorAlignment(
+      tailored.tailoredSummary, tailored.coverLetter,
+      job.jobTitle, job.companyName, job.description, parsed
+    );
+    if (!a1.aligned) {
+      await Logger.warn("TAILOR", `Alignment ${a1.score}/10 — regenerating both: ${a1.issues.slice(0, 4).join("; ")}`);
+      const retry = await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName, a1.issues);
+      const a2 = await checkTailorAlignment(
+        retry.tailoredSummary, retry.coverLetter,
+        job.jobTitle, job.companyName, job.description, parsed
+      );
+      // Keep the better of the two attempts.
+      if (a2.score >= a1.score) {
+        tailored = retry;
+        await Logger.info("TAILOR", `Regenerated — alignment now ${a2.score}/10`);
+      } else {
+        await Logger.info("TAILOR", `Kept first attempt (${a1.score}/10 > retry ${a2.score}/10)`);
+      }
+    } else {
+      await Logger.info("TAILOR", `Alignment ${a1.score}/10 — résumé + cover letter aligned`);
+    }
+  } catch (e) {
+    await Logger.warn("TAILOR", `Alignment check skipped (non-fatal): ${e}`);
+  }
+
   const aiSeconds = ((Date.now() - aiStart) / 1000).toFixed(1);
   await Logger.info("TAILOR", `AI step done in ${aiSeconds}s (ATS score: ${tailored.atsScore}/10)`);
 
   // Step 3: save .tex + cover letter + metadata to the application folder.
   const folderPath = getApplicationFolder(job.companyName, job.jobTitle);
-  const contactInfo =
-    (resume.parsedData as { contactInfo?: CoverContact })?.contactInfo || {};
+  // Contact for the cover-letter header: résumé's parsed contact, with the
+  // structured Profile filling any gaps (e.g. when the résumé didn't parse a
+  // name) so the letter never shows a blank header / "Applicant".
+  const resumeContact = (resume.parsedData as { contactInfo?: CoverContact })?.contactInfo || {};
+  const contactInfo = await mergeProfileContact(resumeContact);
   const paths = saveApplicationFiles(folderPath, {
     resumeTex: tailored.tailoredLatex,
     coverLetterTex: generateCoverLetterTex(
@@ -147,6 +178,29 @@ interface CoverContact {
   portfolio?: string;
   website?: string;
   linkedin?: string;
+}
+
+// Fill missing résumé-contact fields from the structured Profile so the cover
+// letter always has a real name + contact line (the Profile is user-curated).
+async function mergeProfileContact(resumeContact: CoverContact): Promise<CoverContact> {
+  const p: Record<string, { value?: string }> = await loadProfile().catch(() => ({}));
+  const val = (k: string) => (p[k]?.value || "").trim() || undefined;
+  const profileName =
+    val("fullName") ||
+    [val("firstName"), val("lastName")].filter(Boolean).join(" ").trim() ||
+    undefined;
+  const city = val("city");
+  const state = val("state");
+  const profileLocation = [city, state].filter(Boolean).join(", ") || undefined;
+  return {
+    name: resumeContact.name || profileName,
+    email: resumeContact.email || val("email"),
+    phone: resumeContact.phone || val("phone"),
+    location: resumeContact.location || profileLocation,
+    portfolio: resumeContact.portfolio || val("portfolio"),
+    website: resumeContact.website || val("website"),
+    linkedin: resumeContact.linkedin || val("linkedin"),
+  };
 }
 
 // Escape text for LaTeX. Backslash first, then the special characters.
