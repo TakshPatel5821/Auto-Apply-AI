@@ -2093,8 +2093,8 @@ export class ApplyEngine {
       const mem = await findAnswer(field.label);
       if (mem && accept(mem)) {
         answer = mem;
-        confidence = 0.9;
-        source = "memory";
+        confidence = cls.category === "unknown" ? 0.6 : 0.9;
+        source = cls.category === "unknown" ? "memory-unverified" : "memory";
         await Logger.info("APPLY", `  💾 memory: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
       } else if (mem) {
         await Logger.warn("APPLY", `  ✗ ignoring memory "${mem.slice(0, 40)}…" — fails [${cls.category}/${cls.domKind}] validation`);

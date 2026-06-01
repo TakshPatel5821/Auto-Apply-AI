@@ -76,8 +76,8 @@ export const FIELD_SPECS: FieldSpec[] = [
   { key: "gpa", label: "GPA", category: "education", kind: "text", match: /\bgpa\b|grade\s*point/i },
 
   // Professional
-  { key: "currentTitle", label: "Current Job Title", category: "professional", kind: "text", match: /current\s*(job\s*)?(title|role|position)|present\s*(title|role|position)|most\s*recent\s*(title|role|position)/i },
-  { key: "currentCompany", label: "Current Employer", category: "professional", kind: "text", match: /current\s*(employer|company|organization)|present\s*(employer|company)|most\s*recent\s*(employer|company)/i },
+  { key: "currentTitle", label: "Current Job Title", category: "professional", kind: "text", match: /^(job\s*)?title$|^position( title)?$|^role( title)?$|current\s*(job\s*)?(title|role|position)|present\s*(title|role|position)|most\s*recent\s*(title|role|position)/i },
+  { key: "currentCompany", label: "Current Employer", category: "professional", kind: "text", match: /^(company|company name|employer|employer name|organization|organization name)$|current\s*(employer|company|organization)|present\s*(employer|company)|most\s*recent\s*(employer|company)/i },
   { key: "yearsExperience", label: "Years of Experience", category: "professional", kind: "text", match: /years?\s*of\s*experience|years?\s*experience|total\s*experience|relevant\s*experience/i },
   { key: "skills", label: "Key Skills", category: "professional", kind: "text", match: /key\s*skills|technical\s*skills|core\s*skills|primary\s*skills|relevant\s*skills|^skills$/i },
   { key: "linkedin", label: "LinkedIn", category: "professional", kind: "url", match: /linkedin/i },
