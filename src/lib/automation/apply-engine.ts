@@ -3,7 +3,7 @@ import { mkdirSync, existsSync } from "fs";
 import { join, isAbsolute } from "path";
 import { homedir } from "os";
 import { prisma } from "@/lib/db/prisma";
-import { findAnswer, saveAnswer, saveHumanAnswer } from "@/lib/storage/memory";
+import { findAnswer, saveAnswer, saveHumanAnswer, recordRejection, isRejected } from "@/lib/storage/memory";
 import { Profile, resolveField } from "@/lib/profile/profile";
 import { loadProfile } from "@/lib/profile/profile-store";
 import { matchDropdownOptionScored } from "@/lib/profile/dropdown-intelligence";
@@ -115,6 +115,9 @@ export class ApplyEngine {
   // declared after this — prevents false positives from job-page URLs/copy that
   // happen to contain words like "applied" or "thank you for your interest".
   private submitClicked = false;
+  // Phase 7: what the AGENT filled this run (field label → value), so when the
+  // human later changes a value we can record the old one as negative memory.
+  private appliedValues = new Map<string, string>();
 
   // ─── Browser lifecycle ──────────────────────────────────────────────────────
 
@@ -266,6 +269,7 @@ export class ApplyEngine {
     // Recovery (#19): track this application + carry forward prior action log.
     this.currentApplicationId = applicationId;
     this.submitClicked = false;
+    this.appliedValues.clear();
     this.actionLog = Array.isArray(application.actionLog)
       ? (application.actionLog as { t: string; action: string; target?: string; detail?: string }[])
       : [];
@@ -1935,7 +1939,10 @@ export class ApplyEngine {
             maxLength: field.maxLength,
           });
           const cand = aiResult.answer?.trim() || "";
-          if (cand && accept(cand)) {
+          // Phase 7: never re-propose a value the human previously rejected here.
+          if (cand && (await isRejected(field.label, cand))) {
+            await Logger.warn("APPLY", `  🚫 AI suggested a previously-rejected answer for "${field.label.slice(0, 50)}" — leaving blank`);
+          } else if (cand && accept(cand)) {
             answer = cand;
             confidence = 0.6; // AI guesses are lowest trust
             source = "AI";
@@ -1984,6 +1991,9 @@ export class ApplyEngine {
       await Logger.warn("APPLY", `  ⚠ couldn't apply a clear value to "${field.label.slice(0, 50)}" (${cls.domKind}) — leaving blank for your review`);
       return false;
     }
+    // Phase 7: remember what we put here so a later human edit becomes a
+    // learned correction (old value → negative memory).
+    this.appliedValues.set(field.label, answer);
 
     // 85-94% → verify the value actually landed; if not, hand to human.
     if (decision === "fill_and_verify") {
@@ -2299,6 +2309,15 @@ export class ApplyEngine {
         const owned = resolveField(f.label, this.profile);
         if (owned && (owned.spec.category === "identity" || owned.spec.category === "contact")) {
           continue;
+        }
+
+        // Phase 7: if the agent had filled this field and the human changed it,
+        // that's a CORRECTION — record the old value as negative memory so it's
+        // never served again, then save the corrected value.
+        const agentValue = this.appliedValues.get(f.label);
+        if (agentValue && agentValue.trim().toLowerCase() !== value.toLowerCase()) {
+          await recordRejection(f.label, agentValue, application.job.platform);
+          await Logger.info("APPLY", `  🧠 learned correction for "${f.label}": "${agentValue.slice(0, 30)}" ✗ → "${value.slice(0, 30)}" ✓`);
         }
 
         // Human-entered = authoritative: overwrites any prior bad memory,
