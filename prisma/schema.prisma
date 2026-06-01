@@ -267,6 +267,11 @@ model ApplicationMemory {
   platform     String?
   category     MemoryCategory @default(GENERAL)
 
+  // Phase 7 negative memory: values the human REJECTED for this question (the
+  // agent filled them, the human corrected them). Never re-served or re-saved
+  // by automated paths.
+  rejectedAnswers String[] @default([])
+
   usageCount  Int     @default(1)
   lastUsed    DateTime @default(now())
   locked      Boolean  @default(false)

@@ -40,6 +40,11 @@ export function hashQuestion(question: string): string {
   return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
+// Normalize an answer for equality checks (negative memory / dedupe).
+function normalizeAns(s: string): string {
+  return (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 // ─── Value ↔ label sanity check ───────────────────────────────────────────────
 // The auto-capture bug saved the email into "Degree", "Country", "Last Name"…,
 // and a phone number into "School". Before saving ANY answer we verify the value
@@ -97,7 +102,8 @@ export async function findAnswer(
     where: { userId: DEFAULT_USER_ID, questionHash: hash },
     orderBy: { usageCount: "desc" },
   });
-  if (exact) {
+  // Require a real answer — a shell row may exist only to hold rejectedAnswers.
+  if (exact && exact.answerText.trim()) {
     await bumpUsage(exact.id);
     return exact.answerText;
   }
@@ -183,6 +189,12 @@ export async function saveAnswer(
     return;
   }
 
+  // Negative memory: never auto-save a value the human previously rejected for
+  // this question (force = a human edit, which is allowed to override).
+  if (!force && existing?.rejectedAnswers?.some((r) => normalizeAns(r) === normalizeAns(answer))) {
+    return;
+  }
+
   await prisma.applicationMemory.upsert({
     where: { userId_questionHash: { userId: DEFAULT_USER_ID, questionHash: hash } },
     update: {
@@ -247,6 +259,67 @@ export async function saveHumanAnswer(
     }
   } catch {
     embeddingsDisabled = true;
+  }
+}
+
+// ─── Phase 7: negative memory ─────────────────────────────────────────────────
+// Record that `badAnswer` was the WRONG value for `question` — the agent filled
+// it and the human corrected it. The value is then never auto-served or
+// auto-saved for this question again (see findAnswer/saveAnswer guards).
+export async function recordRejection(
+  question: string,
+  badAnswer: string,
+  platform?: string
+): Promise<void> {
+  const bad = (badAnswer || "").trim();
+  if (!bad) return;
+  const hash = hashQuestion(question);
+  try {
+    const existing = await prisma.applicationMemory.findUnique({
+      where: { userId_questionHash: { userId: DEFAULT_USER_ID, questionHash: hash } },
+    });
+    if (existing) {
+      const have = (existing.rejectedAnswers || []);
+      if (have.some((a) => normalizeAns(a) === normalizeAns(bad))) return; // already known-bad
+      // Keep the most recent 20; clear answerText if it WAS the rejected value.
+      const clearAnswer = normalizeAns(existing.answerText) === normalizeAns(bad);
+      await prisma.applicationMemory.update({
+        where: { id: existing.id },
+        data: {
+          rejectedAnswers: [...have, bad].slice(-20),
+          ...(clearAnswer ? { answerText: "" } : {}),
+        },
+      });
+    } else {
+      // Shell row that only records the rejection (no good answer yet).
+      await prisma.applicationMemory.create({
+        data: {
+          userId: DEFAULT_USER_ID,
+          questionText: question,
+          questionHash: hash,
+          answerText: "",
+          platform: platform || null,
+          rejectedAnswers: [bad],
+        },
+      });
+    }
+  } catch {
+    /* best-effort — negative memory must never break an apply run */
+  }
+}
+
+// Has the human rejected `answer` for `question`? Used to discard an AI/profile
+// candidate before it's applied.
+export async function isRejected(question: string, answer: string): Promise<boolean> {
+  const a = normalizeAns(answer);
+  if (!a) return false;
+  try {
+    const row = await prisma.applicationMemory.findUnique({
+      where: { userId_questionHash: { userId: DEFAULT_USER_ID, questionHash: hashQuestion(question) } },
+    });
+    return !!row?.rejectedAnswers?.some((r) => normalizeAns(r) === a);
+  } catch {
+    return false;
   }
 }
 
