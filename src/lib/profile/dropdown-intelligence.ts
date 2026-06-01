@@ -71,37 +71,56 @@ function candidatesFor(value: string, kind?: string): string[] {
 
 export interface DropdownOption { value: string; text: string }
 
-// Choose the best option for `value` from `options`. Returns the option's
-// underlying `value` (for selectOption), or null if nothing matches well.
+// Phase 5: a scored match so the caller can PAUSE on a weak/ambiguous result
+// instead of filling blindly. Tiers: 1.0 exact (normalized) · 0.85 whole-word
+// prefix · 0.6 loose substring (≥4 chars). `ambiguous` is true when the top two
+// options score nearly the same (and it's not an exact 1.0 hit) — the engine
+// then leaves the dropdown for the human rather than guessing between them.
+export interface DropdownMatch { value: string | null; score: number; ambiguous: boolean }
+
+function isPlaceholder(text: string): boolean {
+  return /^(select|choose|please|--|\.\.\.|none|n\/a)\b/.test(norm(text));
+}
+
+export function matchDropdownOptionScored(
+  value: string,
+  options: DropdownOption[],
+  kind?: string
+): DropdownMatch {
+  if (!value || options.length === 0) return { value: null, score: 0, ambiguous: false };
+  const cands = candidatesFor(value, kind).map(norm).filter((c) => c.length >= 2);
+  if (cands.length === 0) return { value: null, score: 0, ambiguous: false };
+
+  let best: { value: string; score: number } | null = null;
+  let secondScore = 0;
+
+  for (const o of options) {
+    if (isPlaceholder(o.text)) continue;
+    const ot = norm(o.text), ov = norm(o.value);
+    let s = 0;
+    for (const c of cands) {
+      if (ot === c || ov === c) { s = Math.max(s, 1.0); }
+      else if (ot.startsWith(c + " ") || c.startsWith(ot + " ")) { s = Math.max(s, 0.85); }
+      else if (c.length >= 4 && (ot.includes(c) || c.includes(ot))) { s = Math.max(s, 0.6); }
+    }
+    if (!best || s > best.score) { secondScore = best?.score ?? secondScore; best = { value: o.value, score: s }; }
+    else if (s > secondScore) { secondScore = s; }
+  }
+
+  if (!best || best.score === 0) return { value: null, score: 0, ambiguous: false };
+  // Ambiguous when not an exact hit and the runner-up is within 0.15.
+  const ambiguous = best.score < 1.0 && best.score - secondScore < 0.15;
+  return { value: best.value, score: best.score, ambiguous };
+}
+
+// Back-compat: choose the best option, or null if nothing matches well OR the
+// match is ambiguous (so callers that ignore scoring still fail safe).
 export function matchDropdownOption(
   value: string,
   options: DropdownOption[],
   kind?: string
 ): string | null {
-  if (!value || options.length === 0) return null;
-  const cands = candidatesFor(value, kind).map(norm);
-
-  // 1) Exact (normalized) match on option text or value.
-  for (const o of options) {
-    const ot = norm(o.text), ov = norm(o.value);
-    if (cands.includes(ot) || cands.includes(ov)) return o.value;
-  }
-  // 2) Whole-word containment (avoid "in" matching "India"): match option that
-  //    starts-with or equals a candidate, or candidate starts-with option text.
-  for (const o of options) {
-    const ot = norm(o.text);
-    if (!ot) continue;
-    for (const c of cands) {
-      if (c.length < 2) continue;
-      if (ot === c || ot.startsWith(c + " ") || c.startsWith(ot + " ")) return o.value;
-    }
-  }
-  // 3) Loose substring only for longer candidates (≥4 chars) to limit false hits.
-  for (const o of options) {
-    const ot = norm(o.text);
-    for (const c of cands) {
-      if (c.length >= 4 && (ot.includes(c) || c.includes(ot))) return o.value;
-    }
-  }
-  return null;
+  const m = matchDropdownOptionScored(value, options, kind);
+  if (m.ambiguous) return null;
+  return m.value;
 }

@@ -6,7 +6,7 @@ import { prisma } from "@/lib/db/prisma";
 import { findAnswer, saveAnswer, saveHumanAnswer } from "@/lib/storage/memory";
 import { Profile, resolveField } from "@/lib/profile/profile";
 import { loadProfile } from "@/lib/profile/profile-store";
-import { matchDropdownOption, normalizeDegreeLevel } from "@/lib/profile/dropdown-intelligence";
+import { matchDropdownOptionScored } from "@/lib/profile/dropdown-intelligence";
 import { getCredentials, Credentials } from "@/lib/security/credentials";
 import { rememberedSelector, learnSelector, forgetSelector } from "./selector-memory";
 import { claudeAnswerQuestion } from "@/lib/ai/claude";
@@ -1968,7 +1968,12 @@ export class ApplyEngine {
       return false;
     }
 
-    await this.applyAnswer(field, answer, resolution?.spec.kind);
+    const applied = await this.applyAnswer(field, answer, resolution?.spec.kind);
+    if (!applied) {
+      // Couldn't confidently apply (e.g. no/ambiguous dropdown option) — pause.
+      await Logger.warn("APPLY", `  ⚠ couldn't apply a clear value to "${field.label.slice(0, 50)}" (${cls.domKind}) — leaving blank for your review`);
+      return false;
+    }
 
     // 85-94% → verify the value actually landed; if not, hand to human.
     if (decision === "fill_and_verify") {
@@ -2025,47 +2030,63 @@ export class ApplyEngine {
     return null;
   }
 
-  private async applyAnswer(field: DetectedField, answer: string, kind?: string): Promise<void> {
+  // Apply a value to a field. Returns false when it could NOT confidently set
+  // the value (no dropdown/radio option matched, or the match was ambiguous) so
+  // the caller can pause for the human instead of leaving a wrong/blank choice.
+  private async applyAnswer(field: DetectedField, answer: string, kind?: string): Promise<boolean> {
     if (field.type === "select") {
       const options = await this.page!.$$eval(
         `${field.selector} option`,
         (opts) => opts.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent?.trim() || "" }))
       ).catch(() => []);
 
-      // Dropdown Intelligence: deterministic match (state/country/degree/yesno
-      // aware), no AI. Falls back to plain contains if no smart match.
-      let chosen = matchDropdownOption(answer, options, kind);
-      if (!chosen) {
-        const a = answer.toLowerCase();
-        chosen = options.find((o) =>
-          o.text.toLowerCase().includes(a) || a.includes(o.text.toLowerCase())
-        )?.value ?? null;
+      // Phase 5: scored, deterministic match (state/country/degree/yesno aware).
+      // Never type blindly — match against the REAL options, and pause when the
+      // best match is weak or ambiguous between two options.
+      const m = matchDropdownOptionScored(answer, options, kind);
+      if (!m.value || m.ambiguous) {
+        await Logger.warn(
+          "APPLY",
+          `  ⚠ ${m.ambiguous ? "ambiguous" : "no"} dropdown match for "${answer.slice(0, 30)}" in "${field.label.slice(0, 40)}" (${options.length} options) — leaving for you`
+        );
+        return false;
       }
-      if (chosen) {
-        await this.page!.selectOption(field.selector, chosen).catch(() => {});
-      } else {
-        await Logger.warn("APPLY", `  ⚠ no dropdown option matched "${answer}" for "${field.label}"`);
-      }
+      await this.page!.selectOption(field.selector, m.value).catch(() => {});
+      return true;
     } else if (field.type === "radio") {
       const radios = await this.page!.$$(field.selector);
+      // Read each radio's label, then reuse the same scored matcher (options
+      // keyed by index) so radios get identical synonym/ambiguity handling.
+      const labels: string[] = [];
       for (const radio of radios) {
-        const labelText = await radio.evaluate((el) => {
-          const id = (el as HTMLInputElement).id;
-          const lbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim() : "";
-          return (lbl || (el as HTMLInputElement).value || "").trim();
-        }).catch(() => "");
-        if (labelText.toLowerCase().includes(answer.toLowerCase()) ||
-            answer.toLowerCase().includes(labelText.toLowerCase())) {
-          await this.toggleCheckable(radio, true);
-          return;
-        }
+        labels.push(
+          await radio.evaluate((el) => {
+            const id = (el as HTMLInputElement).id;
+            const lbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim() : "";
+            return (lbl || (el as HTMLInputElement).value || "").trim();
+          }).catch(() => "")
+        );
       }
+      const opts = labels.map((t, i) => ({ value: String(i), text: t }));
+      const m = matchDropdownOptionScored(answer, opts, kind);
+      if (m.value === null || m.ambiguous) {
+        await Logger.warn(
+          "APPLY",
+          `  ⚠ ${m.ambiguous ? "ambiguous" : "no"} radio match for "${answer.slice(0, 30)}" in "${field.label.slice(0, 40)}" — leaving for you`
+        );
+        return false;
+      }
+      await this.toggleCheckable(radios[Number(m.value)], true);
+      return true;
     } else if (field.type === "checkbox") {
       const shouldCheck = /yes|true|agree|accept|authorize|confirm|check|i certify|acknowledge/i.test(answer);
       const cb = await this.page!.$(field.selector);
-      if (cb) await this.toggleCheckable(cb, shouldCheck);
+      if (!cb) return false;
+      await this.toggleCheckable(cb, shouldCheck);
+      return true;
     } else {
       await this.page!.fill(field.selector, answer).catch(() => {});
+      return true;
     }
   }
 
