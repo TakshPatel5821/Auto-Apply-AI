@@ -452,21 +452,26 @@ export async function claudeFullTailor(
   resumeData: Record<string, unknown>,
   jobDescription: string,
   jobTitle: string,
-  companyName: string
+  companyName: string,
+  feedback?: string[]
 ): Promise<FullTailorResult> {
   const contactInfo = (resumeData.contactInfo as Record<string, string>) || {};
   const skills = (resumeData.skills as string[] || []).slice(0, 20).join(", ");
   const tech = (resumeData.technologies as string[] || []).slice(0, 20).join(", ");
   const yrs = resumeData.yearsOfExperience || 0;
-  const candidateName = contactInfo.name || "Patel Takshkumar Girishbhai";
+  const candidateName = contactInfo.name || "the candidate";
 
   const systemRules = `You are an expert ATS resume tailor and cover letter writer.
 
 STRICT RULES:
-- NEVER fabricate experience, education, skills, or accomplishments
-- Only emphasize content the candidate already has
-- The PROFESSIONAL SUMMARY is the only part of the resume that changes — write it as plain text (no markdown, no LaTeX), 2-3 sentences, ~55 words max, weaving in the job's most relevant keywords truthfully
-- Cover letter: concise — 3 short paragraphs, ~120 words total (hook → why-you-fit → close). coverLetter MUST be a single string, not an array.
+- NEVER fabricate experience, education, skills, or accomplishments. Only emphasize what the candidate already has.
+- The summary and the cover letter MUST be consistent with EACH OTHER and with the candidate's real background.
+- PROFESSIONAL SUMMARY: plain text (no markdown/LaTeX), 2-3 sentences (~55 words), weaving in the job's most relevant keywords truthfully.
+- COVER LETTER — make it genuinely good, not filler:
+  • Write ONLY the body paragraphs. Do NOT include "Dear ..." or a "Sincerely"/sign-off — those are added automatically. Including them is an error.
+  • 3 paragraphs, ~160-200 words total: (1) a specific hook tied to THIS company/role; (2) 1-2 CONCRETE skills/projects/technologies the candidate actually has that directly match the job's top requirements; (3) a confident close on the value they'd add.
+  • Be specific and truthful — reference the actual role and real candidate strengths. No clichés ("I am writing to apply"), no generic boilerplate, no invented metrics.
+  • coverLetter MUST be a single string (paragraphs separated by \\n\\n).
 - Return ONLY a single JSON object — no markdown fences, no prose, no preamble`;
 
   const candidateProfile = `CANDIDATE PROFILE (same for every job this session):
@@ -476,21 +481,25 @@ Technologies: ${tech}
 Years of experience: ${yrs}
 Background: M.S. Software Engineering (UT Arlington, May 2026); Python data pipelines & IoT systems; PHP/MySQL & full-stack web development; Azure AZ-900; Linux/UNIX, TCP/IP, Wireshark, security. Only claim skills/experience consistent with this profile.`;
 
+  const feedbackBlock = feedback && feedback.length
+    ? `\n\nThe previous attempt was rejected for these problems — FIX them this time:\n- ${feedback.slice(0, 6).join("\n- ")}\n`
+    : "";
+
   const userPrompt = `JOB POSTING — ${jobTitle} @ ${companyName}:
 
 ${jobDescription.slice(0, 3000)}
-
+${feedbackBlock}
 Do all of the following for this candidate:
 1. Analyze the job → ATS keywords, required skills, technologies, experience level (entry|mid|senior).
 2. Write a tailored PROFESSIONAL SUMMARY (plain text, 2-3 sentences, ~55 words) for THIS role using only the candidate's real skills.
-3. Write a concise cover letter — 3 short paragraphs, ~120 words total — for this exact role and company.
+3. Write the cover letter BODY (paragraphs only — no greeting, no sign-off) for this exact role and company, following the cover-letter rules above.
 4. Score the resume's ATS match for this job (1 = perfect, 10 = poor).
 
 Return ONLY this JSON object (no markdown fences):
 {
   "jobAnalysis": {"atsKeywords":["..."],"requiredSkills":["..."],"technologies":["..."],"experienceLevel":"entry|mid|senior"},
   "tailoredSummary": "2-3 sentence plain-text summary",
-  "coverLetter": "Dear Hiring Manager,\\n\\n[p1]\\n\\n[p2]\\n\\n[p3]\\n\\nSincerely,\\n${candidateName}",
+  "coverLetter": "[paragraph 1]\\n\\n[paragraph 2]\\n\\n[paragraph 3]",
   "atsScore": 5,
   "keywordsAdded": ["..."],
   "tailoringNotes": "what you emphasised"
@@ -501,7 +510,7 @@ Return ONLY this JSON object (no markdown fences):
     const raw = await ollamaCompleteJSON<Record<string, unknown>>(
       userPrompt,
       `${systemRules}\n\n${candidateProfile}`,
-      1200
+      1600
     );
     return buildTailorResult(raw);
   }
@@ -512,7 +521,7 @@ Return ONLY this JSON object (no markdown fences):
   const client = await getClient();
   const stream = client.messages.stream({
     model: MODEL,
-    max_tokens: 1200,
+    max_tokens: 1600,
     ...(MODEL_SUPPORTS_EFFORT ? { thinking: { type: "adaptive" as const } } : {}),
     ...effortConfig(TAILOR_EFFORT),
     system: [
@@ -539,6 +548,64 @@ Return ONLY this JSON object (no markdown fences):
   }
 
   return buildTailorResult(raw);
+}
+
+// ─── Alignment / quality gate ────────────────────────────────────────────────
+// After tailoring, verify the SUMMARY and COVER LETTER (a) align with each
+// other, (b) fit the job role, and (c) only use skills/experience the candidate
+// actually has (their base résumé) — and that the cover letter is specific, not
+// generic filler. Returns a score + issues so the caller can regenerate both
+// when it's not good enough. Cheap call (low effort, small tokens).
+export interface AlignmentResult {
+  score: number;       // 0-10 (10 = perfectly aligned + specific)
+  aligned: boolean;    // score >= 7
+  issues: string[];    // concrete problems to fix on regeneration
+}
+
+export async function checkTailorAlignment(
+  tailoredSummary: string,
+  coverLetter: string,
+  jobTitle: string,
+  companyName: string,
+  jobDescription: string,
+  resumeData: Record<string, unknown>
+): Promise<AlignmentResult> {
+  const skills = (resumeData.skills as string[] || []).slice(0, 25).join(", ");
+  const tech = (resumeData.technologies as string[] || []).slice(0, 25).join(", ");
+  const baseSummary = typeof resumeData.summary === "string" ? resumeData.summary : "";
+
+  const system =
+    "You are a strict reviewer of tailored job-application materials. Judge whether the SUMMARY and COVER LETTER: " +
+    "(1) are consistent with EACH OTHER; (2) fit the target job role; (3) ONLY use skills/experience present in the candidate's résumé facts (flag ANY fabrication or claim not supported by them); " +
+    "(4) are specific to this role/company and not generic filler; (5) contain no leftover placeholders or a wrong/missing name. " +
+    "Score 0-10 (10 = aligned, truthful, specific). Return ONLY JSON.";
+
+  const prompt = `TARGET ROLE: ${jobTitle} @ ${companyName}
+JOB POSTING (excerpt):
+${(jobDescription || "").slice(0, 1500)}
+
+CANDIDATE RÉSUMÉ FACTS (the source of truth — nothing may go beyond these):
+Skills: ${skills}
+Technologies: ${tech}
+Base summary: ${baseSummary.slice(0, 400)}
+
+TAILORED SUMMARY:
+${tailoredSummary}
+
+COVER LETTER:
+${coverLetter}
+
+Return ONLY this JSON: {"score": 0-10, "issues": ["short, concrete problems to fix"]}`;
+
+  try {
+    const raw = (await ai(prompt, system, 400, "low")) as { score?: unknown; issues?: unknown };
+    const score = typeof raw.score === "number" ? raw.score : Number(raw.score) || 0;
+    const issues = asStringArray(raw.issues);
+    return { score, aligned: score >= 7, issues };
+  } catch {
+    // If the check itself fails, don't block the pipeline — treat as aligned.
+    return { score: 10, aligned: true, issues: [] };
+  }
 }
 
 // ─── Generate LaTeX from scratch ──────────────────────────────────────────────
