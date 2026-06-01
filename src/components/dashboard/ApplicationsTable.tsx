@@ -334,22 +334,27 @@ export function ApplicationsTable({
                     {app.appliedAt ? new Date(app.appliedAt).toLocaleDateString() : "—"}
                   </td>
                   <td className="px-4 py-3">
-                    <div className="flex gap-1.5">
-                      {app.tailoredResume?.pdfPath && (
-                        <span title={`Resume PDF: ${app.tailoredResume.pdfPath}`} className="text-purple-400">
-                          <FileText className="w-3.5 h-3.5" />
-                        </span>
-                      )}
-                      {app.coverLetter?.pdfPath && (
-                        <span title="Cover letter PDF" className="text-blue-400">
-                          <FileIcon className="w-3.5 h-3.5" />
-                        </span>
-                      )}
-                      {!app.tailoredResume?.pdfPath && app.tailoredResume && (
-                        <span title="Resume tailored (LaTeX only — no PDF)" className="text-yellow-400">
-                          <FileText className="w-3.5 h-3.5" />
-                        </span>
-                      )}
+                    <div className="flex gap-2">
+                      {/* Open the tailored résumé PDF directly in a new tab */}
+                      <a
+                        href={`/api/applications/file?id=${app.id}&type=resume`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open résumé PDF"
+                        className="text-purple-400 hover:text-purple-300"
+                      >
+                        <FileText className="w-4 h-4" />
+                      </a>
+                      {/* Open the cover-letter PDF directly in a new tab */}
+                      <a
+                        href={`/api/applications/file?id=${app.id}&type=cover`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open cover letter PDF"
+                        className="text-blue-400 hover:text-blue-300"
+                      >
+                        <FileIcon className="w-4 h-4" />
+                      </a>
                     </div>
                   </td>
                   <td className="px-4 py-3">
