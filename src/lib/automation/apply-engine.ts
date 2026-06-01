@@ -54,6 +54,10 @@ interface DetectedField {
   required: boolean;
   options?: string[];
   selector: string;
+  // Phase 3: richer context signals so the classifier understands the blank.
+  placeholder?: string;
+  ariaLabel?: string;
+  sectionHeading?: string;
 }
 
 const STEALTH_SCRIPT = () => {
@@ -1586,29 +1590,71 @@ export class ApplyEngine {
         required: boolean;
         options?: string[];
         selector: string;
+        placeholder?: string;
+        ariaLabel?: string;
+        sectionHeading?: string;
       }> = [];
+
+      const clean = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
+
+      // Resolve aria-labelledby → concatenated text of the referenced nodes.
+      const ariaLabelledByText = (el: Element): string => {
+        const ids = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
+        if (!ids.length) return "";
+        return ids
+          .map((id) => document.getElementById(id)?.textContent || "")
+          .map(clean)
+          .filter(Boolean)
+          .join(" ");
+      };
 
       const getLabel = (el: Element): string => {
         const elId = (el as HTMLInputElement).id;
         if (elId) {
           const lbl = document.querySelector(`label[for="${CSS.escape(elId)}"]`);
-          if (lbl) return lbl.textContent?.trim() || "";
+          if (lbl) return clean(lbl.textContent);
         }
         const wrap = el.closest("label");
-        if (wrap) return wrap.textContent?.trim() || "";
+        if (wrap) return clean(wrap.textContent);
+        const byId = ariaLabelledByText(el);
+        if (byId) return byId;
         const parent = el.closest(
           ".form-group, .jobs-easy-apply-form-element, [class*='field'], [class*='question'], fieldset, [data-automation-id]"
         );
         if (parent) {
           const lbl = parent.querySelector("label, legend, .label, h3, h4, [class*='label'], [class*='title']");
-          if (lbl && lbl !== el) return lbl.textContent?.trim() || "";
+          if (lbl && lbl !== el) return clean(lbl.textContent);
         }
-        return (
+        return clean(
           (el as HTMLInputElement).getAttribute("aria-label") ||
           (el as HTMLInputElement).placeholder ||
           (el as HTMLInputElement).name ||
           ""
         );
+      };
+
+      // Nearest section heading ABOVE the field — only consulted by the
+      // classifier when the field's own text is inconclusive, so it can't
+      // override a clear label. Conservative: search within the closest
+      // section-like ancestor and its preceding siblings.
+      const getSectionHeading = (el: Element): string => {
+        const HEAD = /^(H[1-4]|LEGEND)$/;
+        let node: Element | null = el;
+        for (let depth = 0; depth < 6 && node; depth++) {
+          let sib: Element | null = node.previousElementSibling;
+          while (sib) {
+            if (HEAD.test(sib.tagName)) {
+              const t = clean(sib.textContent);
+              if (t && t.length < 120) return t;
+            }
+            const h = sib.querySelector?.("h1,h2,h3,h4,legend");
+            const ht = clean(h?.textContent);
+            if (ht && ht.length < 120) return ht;
+            sib = sib.previousElementSibling;
+          }
+          node = node.parentElement;
+        }
+        return "";
       };
 
       const makeSelector = (el: Element): string => {
@@ -1654,17 +1700,20 @@ export class ApplyEngine {
           required: (el as HTMLInputElement).required || false,
           options,
           selector,
+          placeholder: clean((el as HTMLInputElement).placeholder) || undefined,
+          ariaLabel: clean((el as HTMLInputElement).getAttribute("aria-label")) || undefined,
+          sectionHeading: getSectionHeading(el) || undefined,
         });
       });
 
       // Radio groups
       const fieldsets = root.querySelectorAll("fieldset");
       fieldsets.forEach((fs) => {
-        const legend = fs.querySelector("legend")?.textContent?.trim();
+        const legend = clean(fs.querySelector("legend")?.textContent);
         const radios = Array.from(fs.querySelectorAll('input[type="radio"]'));
         if (radios.length === 0) return;
 
-        const label = legend || (fs.querySelector("[class*='label']")?.textContent?.trim()) || "";
+        const label = legend || clean(fs.querySelector("[class*='label']")?.textContent) || "";
         if (!label) return;
 
         const options = radios.map((r) => {
@@ -1684,6 +1733,8 @@ export class ApplyEngine {
             required: false,
             options,
             selector: groupSelector,
+            // The legend IS the question; surface it as section heading too.
+            sectionHeading: getSectionHeading(fs) || undefined,
           });
         }
       });
@@ -1694,7 +1745,14 @@ export class ApplyEngine {
         const label = getLabel(cb);
         const selector = makeSelector(cb);
         if (!selector || !label) return;
-        results.push({ type: "checkbox", label, name: (cb as HTMLInputElement).name, required: false, selector });
+        results.push({
+          type: "checkbox",
+          label,
+          name: (cb as HTMLInputElement).name,
+          required: false,
+          selector,
+          sectionHeading: getSectionHeading(cb) || undefined,
+        });
       });
 
       return results;
@@ -1750,6 +1808,9 @@ export class ApplyEngine {
       label: field.label,
       type: field.type,
       name: field.name,
+      placeholder: field.placeholder,
+      ariaLabel: field.ariaLabel,
+      sectionHeading: field.sectionHeading,
       options: field.options,
       required: field.required,
     });
