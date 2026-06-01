@@ -58,6 +58,8 @@ interface DetectedField {
   placeholder?: string;
   ariaLabel?: string;
   sectionHeading?: string;
+  // Phase 6: the field's character limit (maxlength), for open-ended answers.
+  maxLength?: number;
 }
 
 const STEALTH_SCRIPT = () => {
@@ -1641,6 +1643,7 @@ export class ApplyEngine {
         placeholder?: string;
         ariaLabel?: string;
         sectionHeading?: string;
+        maxLength?: number;
       }> = [];
 
       const clean = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
@@ -1751,6 +1754,7 @@ export class ApplyEngine {
           placeholder: clean((el as HTMLInputElement).placeholder) || undefined,
           ariaLabel: clean((el as HTMLInputElement).getAttribute("aria-label")) || undefined,
           sectionHeading: getSectionHeading(el) || undefined,
+          maxLength: (el as HTMLInputElement).maxLength > 0 ? (el as HTMLInputElement).maxLength : undefined,
         });
       });
 
@@ -1923,7 +1927,13 @@ export class ApplyEngine {
     if (!answer) {
       if (aiMayAnswer(cls.category)) {
         try {
-          const aiResult = await claudeAnswerQuestion(field.label, resumeData, answeredQuestions);
+          const aiResult = await claudeAnswerQuestion(field.label, resumeData, answeredQuestions, {
+            profileFacts: this.profileFactsString(),
+            jobDescription: application.job.description || undefined,
+            companyName: application.job.companyName,
+            jobTitle: application.job.jobTitle,
+            maxLength: field.maxLength,
+          });
           const cand = aiResult.answer?.trim() || "";
           if (cand && accept(cand)) {
             answer = cand;
@@ -2008,6 +2018,24 @@ export class ApplyEngine {
     } catch {
       return false;
     }
+  }
+
+  // Phase 6: format the structured profile into grounding facts for the
+  // open-ended answer engine. Sensitive values (visa/EEO/salary) are excluded —
+  // the AI must never reference them in an essay answer.
+  private profileFactsString(): string {
+    const EXCLUDE = new Set([
+      "workAuthorized", "requiresSponsorship", "cptEligible", "optEligible",
+      "stemOptEligible", "citizenship", "gender", "race", "veteranStatus",
+      "disabilityStatus", "pronouns", "lgbtq", "salaryExpectation",
+    ]);
+    const lines: string[] = [];
+    for (const [key, f] of Object.entries(this.profile)) {
+      if (EXCLUDE.has(key)) continue;
+      const v = (f?.value || "").trim();
+      if (v) lines.push(`${key}: ${v}`);
+    }
+    return lines.join("\n");
   }
 
   // Quick resume shortcuts — saves AI calls for obvious questions

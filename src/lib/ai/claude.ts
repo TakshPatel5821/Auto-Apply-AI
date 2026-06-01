@@ -300,37 +300,83 @@ export function normalizeCategory(raw: unknown): string {
   return "GENERAL";
 }
 
+// Phase 6: the open-ended question engine. The apply engine only calls this for
+// genuinely open-ended (essay) fields — every deterministic/sensitive field is
+// answered from the structured profile, never here. The answer is GROUNDED in
+// the candidate's profile + résumé facts + the job description, with hard
+// safeguards (no invented experience, no false certifications, no unsolicited
+// visa talk) and a respected length limit.
+export interface OpenEndedContext {
+  // Pre-formatted structured candidate facts (from the Profile Engine).
+  profileFacts?: string;
+  jobDescription?: string;
+  companyName?: string;
+  jobTitle?: string;
+  // Character limit from the field's maxlength (0/undefined = no hard limit).
+  maxLength?: number;
+}
+
 export async function claudeAnswerQuestion(
   question: string,
   context: Record<string, unknown>,
-  previousAnswers: { question: string; answer: string }[]
+  previousAnswers: { question: string; answer: string }[],
+  opts: OpenEndedContext = {}
 ): Promise<{ answer: string; category: string }> {
   const recent = previousAnswers.slice(-3).map((a) => `${a.question}: ${a.answer}`).join(" | ");
   const contact = (context.contactInfo as Record<string, string>) || {};
-  const profile = [
+
+  // Prefer the structured profile facts; fall back to résumé-derived basics.
+  const resumeFacts = [
     contact.name && `Name: ${contact.name}`,
-    contact.email && `Email: ${contact.email}`,
-    contact.phone && `Phone: ${contact.phone}`,
     contact.location && `Location: ${contact.location}`,
     context.yearsOfExperience && `Years of experience: ${context.yearsOfExperience}`,
+    Array.isArray(context.skills) && (context.skills as string[]).length
+      ? `Skills: ${(context.skills as string[]).slice(0, 15).join(", ")}`
+      : "",
+    typeof context.summary === "string" && context.summary
+      ? `Summary: ${(context.summary as string).slice(0, 400)}`
+      : "",
   ].filter(Boolean).join("\n");
+  const facts = [opts.profileFacts, resumeFacts].filter(Boolean).join("\n") || "No specific facts available";
+
+  // Effective length budget: honor the field's maxlength, else a sane default.
+  const limit = opts.maxLength && opts.maxLength > 0 ? Math.min(opts.maxLength, 1500) : 600;
+  const charBudget = Math.max(120, limit - 20); // leave headroom under the cap
+  const tokenBudget = Math.min(700, Math.max(96, Math.ceil(charBudget / 3)));
+
+  const role = [opts.jobTitle, opts.companyName].filter(Boolean).join(" at ");
+  const jd = (opts.jobDescription || "").replace(/\s+/g, " ").trim().slice(0, 1500);
+
+  const system =
+    "You write answers to OPEN-ENDED job-application questions on behalf of a candidate. " +
+    "Hard rules you must never break: " +
+    "(1) Truthful — use ONLY the candidate facts provided; never invent experience, employers, job titles, metrics, or skills. " +
+    "(2) Never claim a certification, degree, clearance, or award that isn't in the facts. " +
+    "(3) Never mention visa, sponsorship, immigration, or work authorization unless the question explicitly asks about it. " +
+    "(4) Write in the first person, professional and specific to the role/company — no fluff, no clichés, no placeholders. " +
+    "(5) Stay within the character limit. (6) Do not repeat the question. " +
+    "Output a single JSON object only — never echo the example values.";
 
   const raw = (await ai(
-    `You are filling out a job application for a candidate. Answer the ONE question below truthfully, briefly, and in the FIRST PERSON. Use the candidate facts when relevant. Do NOT repeat the question. Do NOT output placeholder text.
+    `Answer the ONE question below for this candidate.
 
 CANDIDATE FACTS:
-${profile || "No specific facts available"}
+${facts}
+${role ? `\nROLE: ${role}` : ""}
+${jd ? `\nJOB CONTEXT (for relevance only — do not copy verbatim):\n${jd}` : ""}
 
-RECENT ANSWERS: ${recent || "None"}
+RECENT ANSWERS (for consistency): ${recent || "None"}
 
 QUESTION TO ANSWER: "${question}"
+
+LENGTH LIMIT: about ${charBudget} characters maximum. Be concise.
 
 Pick the single best category from: GENERAL, VISA_SPONSORSHIP, WORK_AUTHORIZATION, SALARY, EXPERIENCE, RELOCATION, DEMOGRAPHICS, AVAILABILITY, REFERENCES, CUSTOM.
 
 Reply with ONLY a JSON object in this exact shape, replacing the example values with your real answer:
 {"answer": "<your actual answer to the question>", "category": "<ONE category word>"}`,
-    "You fill job application fields. Output a single JSON object only — never echo the example values.",
-    128
+    system,
+    tokenBudget
   )) as { answer?: unknown; category?: unknown };
 
   let answer = String(raw?.answer ?? "").trim();
@@ -338,7 +384,21 @@ Reply with ONLY a JSON object in this exact shape, replacing the example values 
   if (/^<.*>$/.test(answer) || /your (actual )?answer/i.test(answer) || answer.toLowerCase() === "concise answer") {
     answer = "";
   }
+  // Enforce the hard character limit, trimming at a sentence/word boundary.
+  if (answer && opts.maxLength && opts.maxLength > 0 && answer.length > opts.maxLength) {
+    answer = trimToLength(answer, opts.maxLength);
+  }
   return { answer, category: normalizeCategory(raw?.category) };
+}
+
+// Trim text to <= max chars, preferring the last sentence end, then last space.
+function trimToLength(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const slice = text.slice(0, max);
+  const lastStop = Math.max(slice.lastIndexOf(". "), slice.lastIndexOf("! "), slice.lastIndexOf("? "));
+  if (lastStop >= max * 0.6) return slice.slice(0, lastStop + 1).trim();
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > 0 ? slice.slice(0, lastSpace) : slice).trim();
 }
 
 // ─── Combined tailor + analyze + cover letter (FAST path) ────────────────────
