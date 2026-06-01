@@ -53,11 +53,24 @@ export function quickExtract(text: string): QuickExtract {
     }
   }
 
-  // Technologies: scan for known keywords
+  // Technologies: scan for known keywords. Keywords contain regex metacharacters
+  // (C++, C#, .NET, F#), so we must escape ALL of them — escaping only "." left
+  // "/\bc++\b/" which throws "Nothing to repeat". \b also fails around symbols
+  // (no word boundary between "+" and a space), so we use token-aware lookarounds
+  // that treat letters/digits/+/#/. as part of a token.
   const found = new Set<string>();
   for (const kw of TECH_KEYWORDS) {
-    const pattern = new RegExp(`\\b${kw.replace(".", "\\.")}\\b`, "i");
-    if (pattern.test(lower)) found.add(kw);
+    try {
+      const esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // Boundary set excludes "." so a trailing sentence period ("React.")
+      // still matches, while ".NET"/"Node.js" keep their dots (matched literally).
+      const pattern = new RegExp(`(?<![a-z0-9#+])${esc}(?![a-z0-9#+])`, "i");
+      if (pattern.test(lower)) found.add(kw);
+    } catch {
+      // A malformed keyword must never break resume upload — fall back to a
+      // plain case-insensitive substring check.
+      if (lower.includes(kw.toLowerCase())) found.add(kw);
+    }
   }
   const technologies = Array.from(found);
 
