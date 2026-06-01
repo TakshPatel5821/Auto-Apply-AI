@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare, GraduationCap, Users, History } from "lucide-react";
+import { ExternalLink, FileText, FileIcon, Send, Zap, AlertCircle, RefreshCw, GitCompare, GraduationCap, Users, History, Files, RotateCw, Trash2 } from "lucide-react";
 import { ResumeDiffModal } from "./ResumeDiffModal";
 import { InterviewPrepModal } from "./InterviewPrepModal";
 import { RecruiterOutreachModal } from "./RecruiterOutreachModal";
+import { PdfCompareModal } from "./PdfCompareModal";
 
 const STATUS_OPTIONS = [
   "SUBMITTED",
@@ -66,6 +67,74 @@ export function ApplicationsTable({
   const [prepJobId, setPrepJobId] = useState<string | null>(null);
   const [outreachJobId, setOutreachJobId] = useState<string | null>(null);
   const [logApp, setLogApp] = useState<Application | null>(null);
+  const [pdfApp, setPdfApp] = useState<Application | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function regenerate(app: Application) {
+    setBusy(app.id, true);
+    setMessage(`Regenerating résumé + cover letter for ${app.job.companyName}…`);
+    const res = await fetch("/api/applications/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "tailor", jobId: app.job.id }),
+    });
+    const data = await res.json().catch(() => ({}));
+    setMessage(res.ok ? `Regenerated for ${app.job.companyName}` : data.error || "Regenerate failed");
+    setTimeout(() => setMessage(null), 5000);
+    setBusy(app.id, false);
+    onRefresh();
+  }
+
+  async function regenerateSelected() {
+    const apps = applications.filter((a) => selected.has(a.id));
+    if (apps.length === 0) return;
+    setBulkRunning(true);
+    setMessage(`Regenerating ${apps.length} selected…`);
+    let ok = 0;
+    for (const app of apps) {
+      const res = await fetch("/api/applications/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "tailor", jobId: app.job.id }),
+      });
+      if (res.ok) ok++;
+    }
+    setBulkRunning(false);
+    setSelected(new Set());
+    setMessage(`Regenerated ${ok}/${apps.length} selected`);
+    setTimeout(() => setMessage(null), 6000);
+    onRefresh();
+  }
+
+  async function deleteApp(app: Application) {
+    if (!confirm(`Delete "${app.job.companyName} — ${app.job.jobTitle}"?\n\nThis removes the company/job and its application, tailored résumé, and cover letter. This cannot be undone.`)) {
+      return;
+    }
+    setBusy(app.id, true);
+    const res = await fetch("/api/applications/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ applicationId: app.id, deleteJob: true }),
+    });
+    setBusy(app.id, false);
+    if (res.ok) {
+      setSelected((prev) => { const n = new Set(prev); n.delete(app.id); return n; });
+      onRefresh();
+    } else {
+      const d = await res.json().catch(() => ({}));
+      setMessage(d.error || "Delete failed");
+      setTimeout(() => setMessage(null), 5000);
+    }
+  }
 
   async function updateStatus(applicationId: string, status: string) {
     await fetch("/api/applications/status", {
@@ -138,6 +207,17 @@ export function ApplicationsTable({
               <span className="font-semibold text-white">{readyCount}</span> application{readyCount === 1 ? "" : "s"} ready to submit
             </span>
           </div>
+          {selected.size > 0 && (
+            <button
+              onClick={regenerateSelected}
+              disabled={bulkRunning}
+              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+              title="Re-tailor résumé + cover letter for the selected applications"
+            >
+              {bulkRunning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RotateCw className="w-4 h-4" />}
+              Regenerate selected ({selected.size})
+            </button>
+          )}
           <button
             onClick={applyAll}
             disabled={bulkRunning || readyCount === 0}
@@ -177,6 +257,16 @@ export function ApplicationsTable({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-white/[0.06] bg-white/[0.02]">
+              <th className="px-3 py-3">
+                <input
+                  type="checkbox"
+                  aria-label="Select all"
+                  checked={applications.length > 0 && selected.size === applications.length}
+                  onChange={(e) =>
+                    setSelected(e.target.checked ? new Set(applications.map((a) => a.id)) : new Set())
+                  }
+                />
+              </th>
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Company</th>
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Role</th>
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Status</th>
@@ -191,6 +281,14 @@ export function ApplicationsTable({
               const busy = busyIds.has(app.id);
               return (
                 <tr key={app.id} className="border-b border-white/[0.04] hover:bg-white/[0.03] transition-colors">
+                  <td className="px-3 py-3">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${app.job.companyName}`}
+                      checked={selected.has(app.id)}
+                      onChange={() => toggleSelect(app.id)}
+                    />
+                  </td>
                   <td className="px-4 py-3">
                     <div className="font-medium text-white">{app.job.companyName}</div>
                     <div className="text-xs text-gray-500 capitalize flex items-center gap-1">
@@ -266,16 +364,45 @@ export function ApplicationsTable({
                         <ExternalLink className="w-3.5 h-3.5" />
                       </a>
 
-                      {/* Résumé diff (base vs tailored) */}
+                      {/* Résumé diff (base vs tailored, LaTeX) */}
                       {app.tailoredResume && (
                         <button
                           onClick={() => setDiffId(app.tailoredResume!.id)}
                           className="p-1.5 text-gray-500 hover:text-purple-400 transition-colors"
-                          title="View résumé diff (base vs tailored)"
+                          title="View résumé diff (base vs tailored, source)"
                         >
                           <GitCompare className="w-3.5 h-3.5" />
                         </button>
                       )}
+
+                      {/* Compare PDFs (original vs tailored) + view cover letter */}
+                      <button
+                        onClick={() => setPdfApp(app)}
+                        className="p-1.5 text-gray-500 hover:text-purple-400 transition-colors"
+                        title="Compare PDFs (original vs tailored) + view cover letter"
+                      >
+                        <Files className="w-3.5 h-3.5" />
+                      </button>
+
+                      {/* Regenerate résumé + cover letter for this job */}
+                      <button
+                        onClick={() => regenerate(app)}
+                        disabled={busy}
+                        className="p-1.5 text-gray-500 hover:text-amber-400 disabled:opacity-40 transition-colors"
+                        title="Regenerate résumé + cover letter for this job"
+                      >
+                        {busy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RotateCw className="w-3.5 h-3.5" />}
+                      </button>
+
+                      {/* Delete this company/job */}
+                      <button
+                        onClick={() => deleteApp(app)}
+                        disabled={busy}
+                        className="p-1.5 text-gray-500 hover:text-red-400 disabled:opacity-40 transition-colors"
+                        title="Delete this company/job"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
 
                       {/* Action log / recovery */}
                       {(app.actionLog?.length || app.recoveryState) && (
@@ -378,6 +505,7 @@ export function ApplicationsTable({
       {prepJobId && <InterviewPrepModal jobId={prepJobId} onClose={() => setPrepJobId(null)} />}
       {outreachJobId && <RecruiterOutreachModal jobId={outreachJobId} onClose={() => setOutreachJobId(null)} />}
       {logApp && <ActionLogModal app={logApp} onClose={() => setLogApp(null)} />}
+      {pdfApp && <PdfCompareModal app={pdfApp} onClose={() => setPdfApp(null)} />}
     </div>
   );
 }
