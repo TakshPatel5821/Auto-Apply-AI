@@ -5,6 +5,7 @@ import { extractTextFromFile } from "@/lib/resume/parser";
 import { quickExtract } from "@/lib/resume/quick-extract";
 import { prisma } from "@/lib/db/prisma";
 import { Logger } from "@/lib/logging/logger";
+import { seedProfileFromActiveResume } from "@/lib/profile/profile-store";
 
 // Upload: save + quick extract (instant) then AI parse in background
 export async function POST(req: NextRequest) {
@@ -99,6 +100,12 @@ async function deepParseInBackground(resumeId: string, rawText: string) {
     });
 
     await Logger.success("RESUME", "AI deep parse complete", { resumeId });
+
+    // Seed the structured Profile (V2) from the freshly parsed résumé — fills
+    // blanks only, never touches fields the user has locked.
+    try {
+      await seedProfileFromActiveResume();
+    } catch { /* non-fatal */ }
   } catch (e) {
     await Logger.warn("RESUME", "AI deep parse failed, quick extract used instead", {
       resumeId,

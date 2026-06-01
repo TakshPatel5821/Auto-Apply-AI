@@ -7,12 +7,15 @@
 This tool automates the entire job application workflow:
 
 1. **Scrape** job listings from LinkedIn, Indeed, Glassdoor, and custom sites
-2. **Analyze** each job against your resume using Claude AI
-3. **Tailor** your resume and generate a cover letter for each job
+2. **Analyze** each job against your resume using Claude AI — with an automatic **ATS keyword score**
+3. **Tailor** your resume and generate a job-specific cover letter (both compiled to PDF)
 4. **Generate** a single-page PDF CV via local LaTeX compilation
-5. **Apply** intelligently on LinkedIn (Easy Apply + external forms) and other platforms
+5. **Apply** intelligently on LinkedIn (Easy Apply + external forms) and 13+ ATS platforms
 
-**Key Innovation:** Resume tailoring uses a **fixed, hand-tuned LaTeX template** with only the Professional Summary AI-generated per job — guarantees 1-page output and 100% compilable PDFs.
+**Key Innovations:**
+- Resume tailoring uses a **fixed, hand-tuned LaTeX template** with only the Professional Summary AI-generated per job — guarantees 1-page output and 100% compilable PDFs.
+- The apply engine **never fakes success** — it only reports "submitted" on a real confirmation; otherwise it pauses for you and **resumes automatically** once you fill the gap (no button press needed).
+- Anything you type during a pause is **captured to memory** and reused on future jobs — even when the same question is **worded differently** (semantic matching).
 
 ---
 
@@ -23,6 +26,8 @@ This tool automates the entire job application workflow:
 - **Node.js** 18+
 - **PostgreSQL** (local or cloud)
 - **Ollama** (for local GPU-accelerated AI) OR **AWS Bedrock** (cloud)
+- **Playwright browsers** (`npx playwright install`)
+- **Tectonic** (local LaTeX compiler) at `~/.job-agent-tools/`
 - **Git**
 
 ### 1. Install & Setup
@@ -32,8 +37,15 @@ git clone <repo-url>
 cd Application-automation-tool
 npm install
 
+# Install Playwright browsers (required for scraping + applying)
+npx playwright install
+
 # For Ollama (local AI)
-ollama pull qwen2.5:3b
+ollama pull qwen2.5:3b         # tailoring + Q&A model
+ollama pull nomic-embed-text   # semantic memory matching (recommended)
+
+# Sync the database schema
+npx prisma db push
 ```
 
 ### 2. Configure `.env`
@@ -47,10 +59,22 @@ OLLAMA_MODEL=qwen2.5:3b
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/job_agent
 
+# LinkedIn — used for Easy Apply email + external-form login when required
+LINKEDIN_EMAIL=you@example.com
+LINKEDIN_PASSWORD=your-password
+
+# ATS account credentials (Workday / Greenhouse / etc.). Each company runs its
+# OWN Workday tenant, so the engine signs in OR creates an account per tenant
+# using these. Falls back to the LinkedIn values above if unset.
+ATS_EMAIL=you@example.com
+ATS_PASSWORD=your-password
+
 # Application limits
 AUTOMATION_MAX_JOBS=20
 AUTOMATION_AUTO_APPLY=false
 ```
+
+> **Security:** `.env` holds plaintext credentials — keep it out of git (it's gitignored by default) and never share it. Fine for local single-user use.
 
 ### 3. Run
 
@@ -66,24 +90,49 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ### Tech Stack
 
-- **Frontend**: Next.js 15, React 19, TailwindCSS
+- **Frontend**: Next.js 15, React 19, TailwindCSS (glass/aurora dark theme), Recharts
 - **Backend**: TypeScript, Next.js API routes
 - **Database**: PostgreSQL + Prisma
-- **AI**: Claude (Ollama or AWS Bedrock)
-- **Automation**: Playwright
+- **AI**: Claude (Ollama local, or AWS Bedrock); `nomic-embed-text` for semantic memory
+- **Automation**: Playwright (persistent Edge/Chromium profile)
 - **PDF**: Tectonic (local LaTeX compiler)
 
 ### Key Features
 
 ✅ **Multi-platform scraping** (LinkedIn, Indeed, Glassdoor)  
+✅ **Profile Engine** (structured identity/contact/visa/education fields, deterministic form-fill, per-field lock)  
+✅ **Confidence-based automation** (>95% auto-fill · 85–95% fill + verify · <85% pause for review)  
+✅ **Compliance gating** (visa/EEO answers come only from your profile — never AI-guessed)  
+✅ **Dropdown intelligence** (maps TX→Texas, MS→Master's, USA→United States, etc. with no AI)  
+✅ **Encrypted credentials** (AES-256-GCM at rest — no plaintext passwords)  
 ✅ **AI-powered tailoring** (summary + cover letter per job)  
-✅ **Local PDF compilation** (~2.5s/job)  
-✅ **LinkedIn Easy Apply** (auto-submit)  
-✅ **External form filling** (Workday, Greenhouse, custom ATSs)  
-✅ **Memory system** (save Q&A answers, reuse across jobs)  
+✅ **ATS score analyzer** (keyword-match % + missing keywords + suggestions, auto-computed per job)  
+✅ **Job fit scoring** (Technical / Experience / Education + overall match, in the ATS panel)  
+✅ **H1B / CPT / OPT detection** (sponsorship + international-friendliness flagged per job)  
+✅ **Funnel analytics** (response / interview / offer rates, application status charts)  
+✅ **Local PDF compilation** (résumé **and** cover letter, ~2.5s each)  
+✅ **LinkedIn Easy Apply** (sets email, uploads résumé, auto-submits)  
+✅ **13+ ATS adapters** (Greenhouse, Lever, Workday, iCIMS, ADP, Taleo, Oracle Cloud, SmartRecruiters, Ashby, BambooHR, Jobvite, Workable, Dice) + generic fallback  
+✅ **Workday auto-login / account creation** (per-tenant sign-in, else creates an account with `ATS_EMAIL`/`ATS_PASSWORD`)  
+✅ **Generic login walls** (auto sign-in for Greenhouse candidate portal, Dice, etc.)  
+✅ **Session pre-warm** (auto-mode logs into Greenhouse once per batch so every apply is pre-authenticated)  
+✅ **Strict success detection** (only counts a confirmed submission — no false "submitted" from job-slug URLs)  
+✅ **Multi-step form handling** (walks each section; never fakes a submit)  
+✅ **Auto-takeover** (stops on unknown fields, auto-resumes when you fill them — no button)  
+✅ **"I submitted it" confirmation** (tell the engine you finished a manual takeover so it isn't wrongly marked failed)  
+✅ **Cover letter on demand** (pastes into text boxes or uploads PDF when a job asks)  
+✅ **Robust checkboxes** (handles styled/hidden checkboxes; auto-ticks consent boxes)  
+✅ **Semantic memory** (reuses your answers even when a question is worded differently)  
+✅ **Self-correcting memory** (fixing a wrong answer overwrites the bad one, including near-duplicates)  
+✅ **Memory lock + validation** (lock answers so AI can't change them; bad value↔field matches are rejected; one-click cleanup)  
+✅ **Recruiter outreach** (AI-drafted connection note + message + follow-up per job)  
+✅ **Interview prep workspace** (technical / behavioral-STAR / **system-design** questions, talking points, prep tips)  
+✅ **Email status detection** (paste an interview/offer/rejection email → classifies it and updates the application status)  
+✅ **Manual status updates** (set interview/offer/rejected to keep funnel analytics accurate)  
 ✅ **Resume diff viewer** (see changes per job)  
 ✅ **Excel export** (job tracker)  
 ✅ **Manual review mode** (pause before applying)  
+✅ **Modern glass UI** (frosted cards, aurora background, gradient accents)  
 ✅ **Screenshots** (every apply step, debugging)  
 
 ---
@@ -156,11 +205,176 @@ Set `AUTOMATION_AUTO_APPLY=true`. Daily limit: `AUTOMATION_MAX_JOBS`.
 
 ---
 
+## How the Apply Engine Works
+
+External job forms come in hundreds of layouts. Instead of trying to "train" a model on them, the engine combines a **pattern library of ATS adapters** with an **honest multi-step loop**:
+
+1. **Detect the ATS** by URL (Greenhouse, Lever, Workday, iCIMS, ADP, etc.) → use that platform's known selectors. Unknown sites fall back to generic heuristics.
+2. **Authenticate if needed** — login-gated platforms (Workday/ADP/Taleo) are signed into automatically. Any page that throws up a sign-in wall (e.g. Greenhouse candidate portal, Dice) is auto-logged-in with your stored ATS credentials. See Workday flow below.
+3. **Walk each section** — fill fields, upload résumé, attach cover letter, click *Next* / *Save & Go to Next Section* until a real *Submit*.
+4. **Confirm or pause** — success is reported **only** when a real confirmation page is detected. If a field is unknown, a button is missing, or the form won't advance, it **pauses**.
+5. **Auto-takeover** — you fill the gap in the open browser; the engine detects your input (no Resume button needed), **captures it to memory**, and continues.
+
+Adapters live in `src/lib/automation/ats-adapters.ts` — adding a platform is a single array entry.
+
+> **Why this matters:** earlier versions reported "✓ submitted" even when nothing happened. The engine now never claims a submission it can't verify — success requires that we actually clicked a final **Submit** *and* see a confirmation-specific page (not just a URL/word that happens to contain "applied", like a job slug `…/applied-ai-engineer/`). An unconfirmed apply is marked **FAILED** so you can retry, never silently dropped.
+
+### Login walls & session pre-warm
+
+- **Generic login handler** — when any external apply page shows a sign-in wall, the engine fills email + password from your **encrypted ATS credentials** and submits. This covers the Greenhouse candidate portal (`my.greenhouse.io`), Dice, and similar. If it can't complete (2FA/captcha), it falls back to human takeover.
+- **Session pre-warm** — at the start of an **auto-mode** batch, the engine logs into Greenhouse once (in both browser profiles it uses) so every Greenhouse application in that run is already authenticated. The session persists in the browser profile across runs.
+
+### Workday (and other account-gated ATSes)
+
+Every company runs its **own separate Workday tenant** — there is no universal Workday login. When the engine hits one it automatically:
+
+1. Clicks into the application (Apply → *Apply Manually*)
+2. **Tries to sign in** with `ATS_EMAIL` / `ATS_PASSWORD`
+3. If no account exists on that tenant, **creates one** (email, password, confirm-password, terms)
+4. Once authenticated, runs the normal multi-step form loop
+5. Only falls back to **human takeover** if auth genuinely can't complete (email verification link, captcha, security question)
+
+### When it pauses for you
+
+During a takeover the dashboard shows two buttons:
+
+- **✓ I submitted it** — you finished the application yourself; the engine trusts you and marks it **SUBMITTED** (fixes the case where a real submission can't be auto-detected).
+- **Resume / Skip** — continue without claiming a submission (stays retryable).
+
+It still auto-detects a real confirmation page on its own; the buttons are the fallback.
+
+---
+
+## ATS Score Analyzer
+
+Every scraped job gets a **keyword-match %** automatically (no extra AI call — derived from the analyze step). It appears next to the match score in the Jobs table, color-coded (green ≥80, yellow ≥60, red below).
+
+Click the **gauge icon** on any job for the deep dive:
+- **Strong matches** — required keywords your résumé already has
+- **Missing keywords** — what to add (only if you genuinely have the experience)
+- **Suggestions** — concrete, ATS-aware tips
+
+Matching is **deterministic** (keyword coverage against your résumé text), so the score is explainable — not a black box.
+
+The panel also shows a **fit breakdown** — Technical (keyword coverage), Experience (your years vs. required), Education (your degree vs. required), and a weighted **Overall** — so you can prioritize which jobs to actually pursue.
+
+---
+
+## International Students (H1B / CPT / OPT)
+
+Every scraped job is scanned for visa signals (from the description text):
+- **Sponsors** / **No sponsor** badge on the job row
+- `intlFriendlyScore` (0–10) for sorting toward visa-friendly roles
+- CPT/OPT mentions detected
+
+Detection is phrase-based and explainable (see `src/lib/matching/visa-detector.ts`). A "No sponsor" badge means the posting explicitly states it won't sponsor — useful to skip early. (A future version can cross-reference public H1B filing data.)
+
+---
+
+## Funnel Analytics
+
+The **Analytics** tab tracks the full pipeline, not just "applied":
+
+```
+Applications → Submitted → Responses → Interviews → Offers
+            response rate   interview rate   offer rate
+```
+
+Plus applications-per-day, jobs-by-source, match-score distribution, and a status funnel. Update an application's status (interview/offer/rejected) to keep the rates accurate.
+
+---
+
+## After You Apply
+
+The pipeline doesn't stop at "Applied." Each application row has tools for the rest of the journey:
+
+- **Recruiter outreach** (people icon) — AI drafts a LinkedIn connection note (<300 chars), a longer intro message, and a one-week follow-up, grounded in your real strengths. Optionally name the recruiter for personalization. One-click copy each.
+- **Interview prep** (grad-cap icon) — generates likely **technical**, **behavioral (STAR)**, and **system-design** questions scaled to the role's seniority, plus why-you-fit talking points, questions to ask, and a prep checklist — all grounded in your résumé.
+- **Email status detection** — on the Applications tab, paste an email you received (interview invite / assessment / offer / rejection). The classifier labels it, suggests a reply, and (with "Classify & update status") matches it to the application by company and updates its status automatically.
+- **Manual status dropdown** — set any application to interview/offer/rejected/etc. directly, keeping the funnel analytics honest.
+
+> **Note on email sync:** v1 is paste-an-email (no credentials needed). Live Gmail/Outlook polling needs OAuth setup (your Google Cloud / Azure app credentials) and is a future add-on.
+
+---
+
+## Profile Engine & Field Accuracy
+
+The **Profile** tab holds a structured source of truth — Identity, Contact, Immigration (work auth / sponsorship / CPT / OPT), Education, Professional. When filling a form, the engine resolves each field in this order:
+
+```
+Profile (deterministic) → Memory → Résumé shortcut → AI (open-ended only)
+```
+
+- **Deterministic structured fields** — name/email/phone/state/degree/visa never go to the AI, eliminating that source of hallucination and field-pollution.
+- **Per-field lock** 🔒 — locked values can't be changed by AI or capture.
+- **Dropdown intelligence** — `TX↔Texas`, `USA↔United States`, `MS↔Master's`, `authorized→Yes` matched deterministically against the dropdown's real options.
+- **Compliance gating** — visa/EEO fields (work auth, sponsorship, gender, race, veteran, disability) are answered **only** from your profile. If a value isn't set, the engine **pauses** rather than letting the AI guess.
+- **Auto-seed** — uploading a résumé fills blank profile fields (never overwrites locked ones). Or click **"Seed from résumé"** in the Profile tab.
+
+### Confidence-based automation
+
+Every fill carries a confidence score (profile-locked = 100%, memory ≈ 90%, résumé ≈ 85%, AI ≈ 60%):
+
+| Confidence | Behavior |
+|---|---|
+| **≥ 95%** | Auto-fill |
+| **85–95%** | Fill, then **read back to verify**; pause if it didn't land |
+| **< 85%** | Leave blank and pause for your review |
+
+This trades a little speed for accuracy — it won't blindly commit a low-trust guess.
+
+---
+
+## Security — Encrypted Credentials
+
+Passwords are **encrypted at rest** (AES-256-GCM), not stored in plaintext.
+
+- **Settings → Credentials** — enter LinkedIn / ATS email + password; they're encrypted before saving.
+- **"Import from .env"** — one-click migrate existing plaintext `.env` credentials into the encrypted store.
+- The encryption key lives in `~/.job-agent-tools/secret.key` (outside the repo, `chmod 600`), or via the `JOB_AGENT_SECRET_KEY` env var for ephemeral setups.
+- At apply time the engine decrypts in-memory only; the encrypted store takes precedence over `.env` (which remains a fallback).
+
+> This is **local** protection (the key is on the same machine) — a real upgrade over plaintext `.env` for a single-user install, not a substitute for a cloud secrets manager.
+
+---
+
+## Memory & Auto-Fill
+
+The engine answers application questions from three sources, in order:
+1. **Memory** — answers you've saved or it has captured before
+2. **Résumé shortcuts** — name, email, phone, location, links
+3. **Claude AI** — for free-text questions
+
+Anything you fill manually during a pause is saved automatically. Four things make memory robust:
+
+- **Semantic matching** — *"Are you authorized to work in the US?"* and *"Do you have US work authorization?"* resolve to the same saved answer (uses `nomic-embed-text` embeddings; falls back to exact-match if the model isn't installed).
+- **Self-correction** — if a saved answer was wrong, just fix it in the form (or the **Memory** tab). Your correction overwrites the bad entry, including near-duplicate phrasings, so it won't resurface.
+- **Value↔field validation** — automated captures are rejected when the value doesn't fit the field (e.g. an email can't be saved into a "Degree" or "Last Name" field, a phone can't land in "School"). This prevents the auto-capture pollution that used to spread one value across every field.
+- **Lock** — click the 🔒 on any answer in the **Memory** tab to freeze it. Locked answers can't be changed by the AI, capture, or semantic correction — ideal for identity fields (First Name, Last Name, email, phone). Click any answer to edit it inline; use **"Clean up bad answers"** to purge existing mismatches in one click.
+
+Standard consent checkboxes (terms/privacy/certify) are auto-ticked. Styled/hidden checkboxes are handled via label-click and JS-event fallbacks.
+
+> **First-run tip:** open **Memory → "Clean up bad answers"**, then lock your core identity fields (First/Last Name, email, phone) so they stay correct forever.
+
+---
+
 ## Troubleshooting
+
+### "Executable doesn't exist … run npx playwright install"
+
+**Fix:** Run `npx playwright install` once to download the browser binaries.
 
 ### "No Apply button found"
 
 **Fix:** Manually log into LinkedIn in `~/.job-agent-profiles/linkedin`, stay logged in. The profile is persistent.
+
+### Memory doesn't reuse differently-worded questions
+
+**Fix:** Semantic matching needs the embedding model: `ollama pull nomic-embed-text`. Without it, only exact-match reuse works (the feature silently no-ops).
+
+### Cover letter not uploaded on an old job
+
+**Fix:** Jobs tailored before the cover-letter-PDF feature have no PDF — re-tailor the job. (Paste-in text boxes still work without a PDF.)
 
 ### Slow tailoring (>60s)
 
@@ -170,12 +384,12 @@ Set `AUTOMATION_AUTO_APPLY=true`. Daily limit: `AUTOMATION_MAX_JOBS`.
 
 **Fix:** Ensure Tectonic is at `~/.job-agent-tools/tectonic.exe`. Check logs for LaTeX errors.
 
-### Database migration fails
+### Database schema out of sync / column errors
 
 **Fix:**
 ```bash
-npx prisma migrate reset   # Resets DB (loses data)
-npx prisma migrate deploy  # For production
+npx prisma db push      # Sync schema to the DB (adds new columns)
+npx prisma generate     # Regenerate the client
 ```
 
 ---
@@ -194,18 +408,40 @@ npx prisma migrate deploy  # For production
 
 ```
 src/
-├── app/                      # Next.js App Router
-│   ├── (dashboard)/          # UI pages
+├── app/
+│   ├── globals.css           # Theme: aurora bg, .card-glass / .text-gradient utilities
+│   ├── dashboard/            # Dashboard UI (tabs, header, MemoryTab w/ lock+cleanup)
 │   └── api/                  # REST endpoints
+│       ├── jobs/             #   ats-score, interview-prep, recruiter-message, …
+│       ├── applications/     #   classify-email, status, apply, …
+│       ├── automation/       #   start/stop/status (pause, resume, confirmSubmitted)
+│       └── memory/           #   CRUD + lock + cleanup
 ├── lib/
-│   ├── ai/                   # Claude, Ollama, Bedrock
-│   ├── automation/           # Tailoring, PDF, apply
-│   ├── scraping/             # Job scrapers
-│   └── db/                   # Prisma ORM
+│   ├── ai/                   # claude.ts, ollama.ts, ats-analyzer.ts (scoring + fit)
+│   ├── automation/           # apply-engine, ats-adapters, resume-tailor,
+│   │                         #   resume-template, latex-compiler, automation-engine,
+│   │                         #   scraper-status (human-takeover signals)
+│   ├── matching/             # fast-filter, visa-detector (H1B/CPT/OPT)
+│   ├── scraping/             # Job scrapers + orchestrator
+│   ├── storage/              # memory.ts (semantic + lock + validation), file-manager
+│   └── db/                   # Prisma client
+├── components/dashboard/     # JobsTable (ATS+fit panel, visa badge), ApplicationsTable
+│                             #   (status dropdown, recruiter/interview), AnalyticsPanel,
+│                             #   EmailClassifierPanel, RecruiterOutreachModal,
+│                             #   InterviewPrepModal, AutomationControls, StatsCards
 └── prisma/
-    ├── schema.prisma         # Data model
-    └── migrations/           # DB changes
+    └── schema.prisma         # Job.atsKeywordScore / sponsorshipStatus / intlFriendlyScore,
+                              #   CoverLetter.pdfPath, ApplicationMemory.locked
 ```
+
+**Key files:**
+- `lib/automation/apply-engine.ts` — multi-step apply loop, Workday auto-auth, auto-takeover, checkbox/cover-letter handling
+- `lib/automation/ats-adapters.ts` — per-platform selectors (add new ATSes here)
+- `lib/ai/ats-analyzer.ts` — ATS keyword scoring + Technical/Experience/Education fit
+- `lib/matching/visa-detector.ts` — sponsorship / CPT / OPT detection
+- `lib/storage/memory.ts` — exact + semantic recall, self-correction, lock, value↔field validation
+- `lib/automation/resume-template.ts` — your résumé (single source of truth)
+- `app/globals.css` — shared visual language (`.card-glass`, `.text-gradient`, aurora bg)
 
 ---
 
@@ -246,7 +482,22 @@ A: Not yet.
 A: Unlikely on manual mode (you click Apply). Auto-submit 50+/day might trigger rate-limits. Recommended: max 10–15/day auto.
 
 **Q: What if a job fails to apply?**  
-A: Check screenshots (in job folder) and logs. Most: form structure changed, required field we can't fill, or not logged in.
+A: Check screenshots (in job folder) and logs. The engine pauses for unknown fields and resumes when you fill them; if it can't confirm a submission it marks the job FAILED (never a false "submitted") so you can retry.
+
+**Q: It stopped mid-apply — do I have to click Resume?**  
+A: No. Just fill the highlighted field(s) in the open browser; it detects your input and continues on its own. (The Resume button still works as a manual override.)
+
+**Q: It paused on a Workday job and then I finished it myself — why did it say FAILED?**  
+A: It can't always auto-detect a confirmation page. When you finish a takeover, click **"✓ I submitted it"** (not just Resume) so it records the application as submitted.
+
+**Q: Does it really log into Workday for me?**  
+A: Yes — it signs in, or creates an account on that company's tenant, using `ATS_EMAIL`/`ATS_PASSWORD`. If the tenant requires email verification or a captcha, it hands off to you, then you click "I submitted it".
+
+**Q: A saved answer is wrong / the same value got into every field. How do I fix it?**  
+A: Open the **Memory** tab → **"Clean up bad answers"** to purge mismatches, then click any answer to edit it and 🔒 **lock** your identity fields so they can't drift again. Typing a correction during an application also overwrites the bad entry (and similarly-worded duplicates).
+
+**Q: How do I add support for a new ATS?**  
+A: Add one entry to `src/lib/automation/ats-adapters.ts` with that platform's URL + button/file selectors.
 
 **Q: How do I update my resume?**  
 A: Edit `src/lib/automation/resume-template.ts` (single source of truth).

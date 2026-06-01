@@ -40,6 +40,53 @@ export function hashQuestion(question: string): string {
   return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
+// ─── Value ↔ label sanity check ───────────────────────────────────────────────
+// The auto-capture bug saved the email into "Degree", "Country", "Last Name"…,
+// and a phone number into "School". Before saving ANY answer we verify the value
+// is plausible for the field. Mismatches are rejected so memory stays clean.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const PHONE_RE = /^[+(]?[\d][\d\s().-]{6,}$/;
+const URL_RE = /^(https?:\/\/|www\.)|\.(com|io|dev|net|org)\b|github\.com|linkedin\.com/i;
+
+export function isPlausibleAnswer(label: string, value: string): boolean {
+  const l = label.toLowerCase().replace(/\*/g, "").trim();
+  const v = value.trim();
+  if (!v) return false;
+
+  const looksEmail = EMAIL_RE.test(v);
+  const looksPhone = PHONE_RE.test(v) && /\d{7,}/.test(v.replace(/\D/g, ""));
+  const looksUrl = URL_RE.test(v);
+
+  // Field-type expectations.
+  const wantsEmail = /\bemail\b|e-mail/.test(l);
+  const wantsPhone = /\bphone\b|mobile|telephone|cell\b/.test(l);
+  const wantsUrl = /url|website|portfolio|linkedin|github|link\b/.test(l);
+  const wantsName = /first name|last name|surname|family name|full name|^name$/.test(l);
+  const wantsDate = /date|mm\/dd|dd\/mm|yyyy|birth/.test(l);
+
+  // An email value may ONLY go into an email field.
+  if (looksEmail && !wantsEmail) return false;
+  // A phone value may ONLY go into a phone field.
+  if (looksPhone && !wantsPhone && !looksEmail) return false;
+  // A bare URL may ONLY go into a url-ish field.
+  if (looksUrl && !looksEmail && !wantsUrl && !wantsPhone) return false;
+
+  // Email field must receive an email.
+  if (wantsEmail && !looksEmail) return false;
+  // Phone field must receive something phone-ish.
+  if (wantsPhone && !looksPhone) return false;
+  // Name field must not receive email/phone/url, and should be short-ish.
+  if (wantsName && (looksEmail || looksPhone || looksUrl)) return false;
+  if (wantsName && v.length > 60) return false;
+  // Date field should look like a date, not a name or email.
+  if (wantsDate && (looksEmail || looksPhone || /[a-z]{4,}/i.test(v.replace(/[a-z]+ \d/i, "")))) {
+    // allow things like "January 2020"; reject "Patel"
+    if (!/\d/.test(v)) return false;
+  }
+
+  return true;
+}
+
 export async function findAnswer(
   question: string
 ): Promise<string | null> {
@@ -109,14 +156,32 @@ async function bumpUsage(id: string): Promise<void> {
   }).catch(() => {});
 }
 
+// Automated save (AI/capture/shortcut). Validates value↔label and NEVER
+// overwrites a locked memory. `force` (human edits) bypasses validation.
 export async function saveAnswer(
   question: string,
   answer: string,
   category: MemoryCategory | string = "GENERAL",
-  platform?: string
+  platform?: string,
+  force = false
 ): Promise<void> {
+  if (!force && !isPlausibleAnswer(question, answer)) {
+    // Reject implausible auto-captures (email into "Degree", etc.).
+    return;
+  }
+
   const hash = hashQuestion(question);
   const cat = safeCategory(category);
+
+  const existing = await prisma.applicationMemory.findUnique({
+    where: { userId_questionHash: { userId: DEFAULT_USER_ID, questionHash: hash } },
+  });
+
+  // Locked memory is authoritative — automated saves can't change it.
+  if (existing?.locked && !force) {
+    await bumpUsage(existing.id);
+    return;
+  }
 
   await prisma.applicationMemory.upsert({
     where: { userId_questionHash: { userId: DEFAULT_USER_ID, questionHash: hash } },
@@ -147,7 +212,9 @@ export async function saveHumanAnswer(
   answer: string,
   platform?: string
 ): Promise<void> {
-  await saveAnswer(question, answer, "GENERAL", platform);
+  // Human-entered → authoritative: skip validation (force) so a legitimately
+  // unusual answer the user typed is always kept.
+  await saveAnswer(question, answer, "GENERAL", platform, true);
 
   if (embeddingsDisabled) return;
   try {
@@ -161,6 +228,7 @@ export async function saveHumanAnswer(
     const queryEmb = await generateEmbedding(question);
     for (const m of all) {
       if (m.questionHash === myHash) continue;
+      if (m.locked) continue; // never clobber a locked memory
       if (m.answerText.trim() === answer.trim()) continue; // already correct
 
       let emb = embeddingCache.get(m.questionHash);
@@ -180,6 +248,25 @@ export async function saveHumanAnswer(
   } catch {
     embeddingsDisabled = true;
   }
+}
+
+// Toggle the lock on a memory (locked = AI/capture can't change it).
+export async function setMemoryLock(id: string, locked: boolean): Promise<void> {
+  await prisma.applicationMemory.update({ where: { id }, data: { locked } });
+}
+
+// Delete memories whose stored answer is implausible for their field label —
+// cleans up the email-everywhere / phone-in-School pollution. Locked rows are
+// kept. Returns how many were removed.
+export async function cleanupBadMemories(): Promise<number> {
+  const all = await prisma.applicationMemory.findMany({ where: { userId: DEFAULT_USER_ID } });
+  const badIds = all
+    .filter((m) => !m.locked && !isPlausibleAnswer(m.questionText, m.answerText))
+    .map((m) => m.id);
+  if (badIds.length) {
+    await prisma.applicationMemory.deleteMany({ where: { id: { in: badIds } } });
+  }
+  return badIds.length;
 }
 
 export async function getAllMemories(category?: MemoryCategory) {

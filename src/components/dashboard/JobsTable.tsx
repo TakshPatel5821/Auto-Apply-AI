@@ -1,7 +1,16 @@
 "use client";
 
-import { useState } from "react";
-import { ExternalLink, Wand2, Send, Filter, ChevronDown, ChevronUp } from "lucide-react";
+import { useState, Fragment } from "react";
+import { ExternalLink, Wand2, Send, ChevronDown, ChevronUp, Gauge } from "lucide-react";
+
+interface AtsAnalysis {
+  score: number;
+  fit: { technical: number; experience: number; education: number; overall: number };
+  strongMatches: string[];
+  matchedKeywords: string[];
+  missingKeywords: string[];
+  suggestions: string[];
+}
 
 interface Job {
   id: string;
@@ -11,6 +20,9 @@ interface Job {
   platform: string;
   matchScore: number | null;
   atsScore: number | null;
+  atsKeywordScore: number | null;
+  sponsorshipStatus: string | null;
+  intlFriendlyScore: number | null;
   salary: string | null;
   isRemote: boolean;
   isEasyApply: boolean;
@@ -60,6 +72,9 @@ export function JobsTable({
   const [sortField, setSortField] = useState<"matchScore" | "scrapedAt">("matchScore");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [loading, setLoading] = useState<string | null>(null);
+  // ATS analysis results + the row currently expanded.
+  const [atsResults, setAtsResults] = useState<Record<string, AtsAnalysis>>({});
+  const [atsOpen, setAtsOpen] = useState<string | null>(null);
 
   const filtered = jobs
     .filter((j) => {
@@ -103,6 +118,28 @@ export function JobsTable({
     onRefresh();
   }
 
+  async function analyzeAts(jobId: string) {
+    // Toggle closed if already showing this row.
+    if (atsOpen === jobId) { setAtsOpen(null); return; }
+    if (atsResults[jobId]) { setAtsOpen(jobId); return; }
+
+    setLoading(jobId + "_ats");
+    try {
+      const res = await fetch("/api/jobs/ats-score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      const data = await res.json();
+      if (data.analysis) {
+        setAtsResults((prev) => ({ ...prev, [jobId]: data.analysis }));
+        setAtsOpen(jobId);
+      }
+    } finally {
+      setLoading(null);
+    }
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex gap-3 flex-wrap">
@@ -126,10 +163,10 @@ export function JobsTable({
         <div className="text-xs text-gray-500 self-center">{filtered.length} jobs</div>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-gray-800">
+      <div className="overflow-x-auto card-glass">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-gray-800">
+            <tr className="border-b border-white/[0.06] bg-white/[0.02]">
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Company</th>
               <th className="text-left px-4 py-3 text-gray-400 font-medium">Role</th>
               <th
@@ -149,22 +186,37 @@ export function JobsTable({
           </thead>
           <tbody>
             {filtered.slice(0, 100).map((job) => (
-              <tr key={job.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+              <Fragment key={job.id}>
+              <tr className="border-b border-white/[0.04] hover:bg-white/[0.03] transition-colors">
                 <td className="px-4 py-3">
                   <div className="font-medium text-white">{job.companyName}</div>
                   {job.salary && <div className="text-xs text-gray-500">{job.salary}</div>}
                 </td>
                 <td className="px-4 py-3">
                   <div className="text-gray-300">{job.jobTitle}</div>
-                  <div className="flex gap-1 mt-0.5">
+                  <div className="flex gap-1.5 mt-0.5 items-center flex-wrap">
                     {job.isRemote && <span className="text-xs text-cyan-400">Remote</span>}
                     {job.isEasyApply && <span className="text-xs text-green-400">Easy Apply</span>}
+                    <VisaBadge status={job.sponsorshipStatus} />
                   </div>
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
                     <ScoreBadge score={job.matchScore} />
-                    {job.atsScore && <span className="text-xs text-gray-600">ATS:{job.atsScore.toFixed(0)}</span>}
+                    {job.atsKeywordScore != null && (
+                      <span
+                        className={`text-xs font-medium ${
+                          job.atsKeywordScore >= 80
+                            ? "text-green-400"
+                            : job.atsKeywordScore >= 60
+                            ? "text-yellow-400"
+                            : "text-red-400"
+                        }`}
+                        title="ATS keyword match"
+                      >
+                        {job.atsKeywordScore}%
+                      </span>
+                    )}
                   </div>
                 </td>
                 <td className="px-4 py-3">
@@ -178,6 +230,16 @@ export function JobsTable({
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center justify-end gap-1">
+                    <button
+                      onClick={() => analyzeAts(job.id)}
+                      disabled={loading === job.id + "_ats"}
+                      className={`p-1.5 transition-colors disabled:opacity-50 ${
+                        atsOpen === job.id ? "text-cyan-400" : "text-gray-500 hover:text-cyan-400"
+                      }`}
+                      title="Analyze ATS match"
+                    >
+                      <Gauge className={`w-3.5 h-3.5 ${loading === job.id + "_ats" ? "animate-pulse" : ""}`} />
+                    </button>
                     <a
                       href={job.applyUrl || job.url}
                       target="_blank"
@@ -209,6 +271,14 @@ export function JobsTable({
                   </div>
                 </td>
               </tr>
+              {atsOpen === job.id && atsResults[job.id] && (
+                <tr className="border-b border-gray-800/50 bg-gray-900/60">
+                  <td colSpan={7} className="px-4 py-4">
+                    <AtsPanel a={atsResults[job.id]} />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -216,6 +286,97 @@ export function JobsTable({
           <div className="text-center py-12 text-gray-600">No jobs found</div>
         )}
       </div>
+    </div>
+  );
+}
+
+function VisaBadge({ status }: { status: string | null }) {
+  if (!status || status === "unknown") return null;
+  if (status === "sponsors")
+    return <span className="text-xs text-green-400" title="Mentions visa sponsorship">Sponsors</span>;
+  if (status === "no_sponsorship")
+    return <span className="text-xs text-red-400" title="States no sponsorship">No sponsor</span>;
+  return null;
+}
+
+function FitBar({ label, value, emphasize }: { label: string; value: number; emphasize?: boolean }) {
+  const c = value >= 80 ? "bg-green-500" : value >= 60 ? "bg-yellow-500" : "bg-red-500";
+  const t = value >= 80 ? "text-green-400" : value >= 60 ? "text-yellow-400" : "text-red-400";
+  return (
+    <div className={`rounded-lg p-2 ${emphasize ? "bg-gray-800/80 ring-1 ring-gray-700" : "bg-gray-800/40"}`}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[11px] text-gray-400">{label}</span>
+        <span className={`text-xs font-bold ${t}`}>{value}%</span>
+      </div>
+      <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+        <div className={`h-full ${c}`} style={{ width: `${value}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function AtsPanel({ a }: { a: AtsAnalysis }) {
+  const color =
+    a.score >= 80 ? "text-green-400" : a.score >= 60 ? "text-yellow-400" : "text-red-400";
+  const bar =
+    a.score >= 80 ? "bg-green-500" : a.score >= 60 ? "bg-yellow-500" : "bg-red-500";
+
+  return (
+    <div className="space-y-3">
+      {/* Score */}
+      <div className="flex items-center gap-3">
+        <span className="text-xs text-gray-400 uppercase tracking-wider">ATS Match</span>
+        <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden max-w-xs">
+          <div className={`h-full ${bar}`} style={{ width: `${a.score}%` }} />
+        </div>
+        <span className={`text-lg font-bold ${color}`}>{a.score}%</span>
+      </div>
+
+      {/* Fit breakdown */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <FitBar label="Technical" value={a.fit.technical} />
+        <FitBar label="Experience" value={a.fit.experience} />
+        <FitBar label="Education" value={a.fit.education} />
+        <FitBar label="Overall" value={a.fit.overall} emphasize />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Strong matches */}
+        <div>
+          <div className="text-xs text-gray-500 mb-1.5">Strong Matches ({a.strongMatches.length})</div>
+          <div className="flex flex-wrap gap-1">
+            {a.strongMatches.length === 0 && <span className="text-xs text-gray-600">None detected</span>}
+            {a.strongMatches.map((k) => (
+              <span key={k} className="text-xs bg-green-900/40 text-green-300 px-2 py-0.5 rounded">{k}</span>
+            ))}
+          </div>
+        </div>
+        {/* Missing keywords */}
+        <div>
+          <div className="text-xs text-gray-500 mb-1.5">Missing Keywords ({a.missingKeywords.length})</div>
+          <div className="flex flex-wrap gap-1">
+            {a.missingKeywords.length === 0 && <span className="text-xs text-gray-600">None — great coverage</span>}
+            {a.missingKeywords.map((k) => (
+              <span key={k} className="text-xs bg-red-900/30 text-red-300 px-2 py-0.5 rounded">{k}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Suggestions */}
+      {a.suggestions.length > 0 && (
+        <div>
+          <div className="text-xs text-gray-500 mb-1.5">Suggestions</div>
+          <ul className="space-y-1">
+            {a.suggestions.map((s, i) => (
+              <li key={i} className="text-xs text-gray-300 flex gap-2">
+                <span className="text-cyan-400">›</span>
+                <span>{s}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

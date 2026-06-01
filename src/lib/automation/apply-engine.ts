@@ -4,6 +4,11 @@ import { join, isAbsolute } from "path";
 import { homedir } from "os";
 import { prisma } from "@/lib/db/prisma";
 import { findAnswer, saveAnswer, saveHumanAnswer } from "@/lib/storage/memory";
+import { Profile, resolveField } from "@/lib/profile/profile";
+import { loadProfile } from "@/lib/profile/profile-store";
+import { matchDropdownOption, normalizeDegreeLevel } from "@/lib/profile/dropdown-intelligence";
+import { getCredentials, Credentials } from "@/lib/security/credentials";
+import { rememberedSelector, learnSelector, forgetSelector } from "./selector-memory";
 import { claudeAnswerQuestion } from "@/lib/ai/claude";
 import { saveScreenshot } from "@/lib/storage/file-manager";
 
@@ -13,6 +18,51 @@ function resolveResumePath(p?: string | null): string | null {
   if (!p) return null;
   const abs = isAbsolute(p) ? p : join(process.cwd(), p);
   return existsSync(abs) ? abs : null;
+}
+
+// ── Field classification + value validation ───────────────────────────────────
+// A field whose semantic kind is a URL / email / phone / profile-link must NEVER
+// receive a free-text AI answer — that's how "Dear Hiring Manager…" ended up in
+// a LinkedIn URL box. We infer the kind from the DOM input type + label, then
+// validate any candidate value against it before filling.
+type FieldKind = "email" | "phone" | "url" | "linkedin" | "github" | "text";
+
+function classifyFieldKind(domType: string, label: string): FieldKind {
+  const t = (domType || "").toLowerCase();
+  if (t === "email") return "email";
+  if (t === "url") return "url";
+  if (t === "tel") return "phone";
+  const l = (label || "").toLowerCase();
+  if (/linkedin/.test(l)) return "linkedin";
+  if (/github/.test(l)) return "github";
+  if (/portfolio|personal\s*(web)?site|\bwebsite\b|web\s*page|profile\s*(url|link)|\burl\b/.test(l)) return "url";
+  if (/e-?mail/.test(l)) return "email";
+  if (/\bphone\b|mobile|telephone|\bcell\b/.test(l)) return "phone";
+  return "text";
+}
+
+const URLISH = /^(https?:\/\/|www\.)|\b[a-z0-9-]+\.(com|io|dev|net|org|me|co|ai|tech)\b/i;
+
+// Does `value` fit a field of `kind`? Deterministic kinds reject prose.
+function valueValidForKind(kind: FieldKind, value: string): boolean {
+  const v = (value || "").trim();
+  if (!v) return false;
+  // Prose markers that should never appear in a URL/email/phone field.
+  const looksLikeProse = /\b(dear|i am|i have|i'm|experience|hiring manager|sincerely|excited|passionate)\b/i.test(v) || v.length > 200;
+  switch (kind) {
+    case "email":
+      return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
+    case "phone":
+      return /\d{7,}/.test(v.replace(/\D/g, "")) && v.length <= 25;
+    case "url":
+      return URLISH.test(v) && !looksLikeProse;
+    case "linkedin":
+      return (/linkedin\.com/i.test(v) || URLISH.test(v)) && !looksLikeProse && v.length < 200;
+    case "github":
+      return (/github\.com/i.test(v) || URLISH.test(v)) && !looksLikeProse && v.length < 200;
+    default:
+      return true; // free-text — any non-empty value is acceptable
+  }
 }
 import { Logger } from "@/lib/logging/logger";
 import { scraperStatus } from "./scraper-status";
@@ -82,6 +132,18 @@ export class ApplyEngine {
   private page: Page | null = null;
   // The current form scope being filled — used when capturing human-entered data.
   private currentScope = "body";
+  // Structured Profile (V2) — loaded once per apply run; the deterministic,
+  // compliance-safe source for identity/contact/visa/education fields.
+  private profile: Profile = {};
+  // Decrypted credentials for this run (from the encrypted store, .env fallback).
+  private creds: Credentials = { linkedinEmail: "", linkedinPassword: "", atsEmail: "", atsPassword: "" };
+  // Failure-recovery (#19): current application + in-memory action log for this run.
+  private currentApplicationId: string | null = null;
+  private actionLog: { t: string; action: string; target?: string; detail?: string }[] = [];
+  // True once we've actually clicked a final Submit this run. Success can ONLY be
+  // declared after this — prevents false positives from job-page URLs/copy that
+  // happen to contain words like "applied" or "thank you for your interest".
+  private submitClicked = false;
 
   // ─── Browser lifecycle ──────────────────────────────────────────────────────
 
@@ -145,11 +207,102 @@ export class ApplyEngine {
     return new Promise((r) => setTimeout(r, Math.floor(Math.random() * (max - min) + min)));
   }
 
+  // ─── Failure recovery / replay (#19) ──────────────────────────────────────────
+
+  // Append an action to the in-memory log (persisted on checkpoint/failure).
+  private logAction(action: string, target?: string, detail?: string): void {
+    this.actionLog.push({ t: new Date().toISOString(), action, target, detail });
+    if (this.actionLog.length > 200) this.actionLog.shift(); // bound it
+  }
+
+  // Persist a recoverable checkpoint: where we are + the action log so far. On a
+  // later retry we can fast-forward to this URL/phase instead of starting over.
+  private async checkpoint(phase: string, extra?: Record<string, unknown>): Promise<void> {
+    if (!this.currentApplicationId) return;
+    const url = (() => { try { return this.page?.url() || ""; } catch { return ""; } })();
+    await prisma.application.update({
+      where: { id: this.currentApplicationId },
+      data: {
+        recoveryState: { url, phase, ts: new Date().toISOString(), ...(extra || {}) } as object,
+        actionLog: this.actionLog as object,
+      },
+    }).catch(() => {});
+  }
+
+  // ─── Session pre-warm ─────────────────────────────────────────────────────────
+
+  // Log into account-gated ATS portals ONCE at the start of a batch so every
+  // later apply in the run is already authenticated (the session persists in the
+  // browser profile). Best-effort + non-fatal. Currently warms Greenhouse's
+  // candidate portal (my.greenhouse.io). Skips silently if no ATS creds are set.
+  async prewarmLogins(): Promise<void> {
+    this.creds = await getCredentials().catch(() => this.creds);
+    const email = this.creds.atsEmail || this.creds.linkedinEmail;
+    const password = this.creds.atsPassword || this.creds.linkedinPassword;
+    if (!email || !password) {
+      await Logger.info("APPLY", "Skipping login pre-warm — no ATS credentials set");
+      return;
+    }
+
+    const portals = [
+      { id: "greenhouse", label: "Greenhouse", url: "https://my.greenhouse.io/dashboard" },
+    ];
+    // A scraped Greenhouse job applies in the "linkedin" profile if it came from
+    // LinkedIn, or "apply" otherwise. Sessions are per-profile, so warm both.
+    const profiles = ["linkedin", "apply"];
+
+    for (const profile of profiles) {
+      try {
+        await this.init(profile);
+        for (const p of portals) {
+          try {
+            await Logger.info("APPLY", `Pre-warming ${p.label} session (${profile} profile)…`);
+            await this.page!.goto(p.url, { waitUntil: "domcontentloaded", timeout: 25000 });
+            await this.delay(1500, 2500);
+            await this.dismissPopups();
+            // Already signed in? No password field → done.
+            const gated = await this.page!.$('input[type="password"]').catch(() => null);
+            if (!gated || !(await gated.isVisible().catch(() => false))) {
+              await Logger.success("APPLY", `${p.label} already signed in (${profile})`);
+              continue;
+            }
+            const ok = await this.handleLoginWallIfPresent({ id: p.id, label: p.label } as AtsAdapter);
+            if (!ok) {
+              await Logger.warn("APPLY", `${p.label} pre-warm needs manual login (2FA/captcha?) — continuing anyway`);
+            }
+          } catch (e) {
+            await Logger.warn("APPLY", `${p.label} pre-warm error (non-fatal): ${e}`);
+          }
+        }
+      } catch (e) {
+        await Logger.warn("APPLY", `Login pre-warm could not start for ${profile} (non-fatal): ${e}`);
+      } finally {
+        await this.cleanup();
+      }
+    }
+  }
+
   // ─── Public entry point ──────────────────────────────────────────────────────
 
   async applyToJob(applicationId: string): Promise<boolean> {
     const application = await getApplicationWithRelations(applicationId);
     if (!application) throw new Error("Application not found");
+
+    // Load the structured profile + decrypted credentials once for this run.
+    this.profile = await loadProfile().catch(() => ({}));
+    this.creds = await getCredentials().catch(() => this.creds);
+
+    // Recovery (#19): track this application + carry forward prior action log.
+    this.currentApplicationId = applicationId;
+    this.submitClicked = false;
+    this.actionLog = Array.isArray(application.actionLog)
+      ? (application.actionLog as { t: string; action: string; target?: string; detail?: string }[])
+      : [];
+    const recovery = application.recoveryState as { url?: string; phase?: string } | null;
+    if (recovery?.phase && application.retryCount > 0) {
+      await Logger.info("APPLY", `↻ Retry — last checkpoint: ${recovery.phase}${recovery.url ? ` @ ${recovery.url}` : ""}`);
+    }
+    this.logAction("run_start", undefined, `retry=${application.retryCount}`);
 
     const { job } = application;
     await Logger.info("APPLY", `╔═══════════════════════════════════════════════`);
@@ -179,9 +332,15 @@ export class ApplyEngine {
       }
 
       if (success) {
+        this.logAction("submitted");
         await prisma.application.update({
           where: { id: applicationId },
-          data: { status: "SUBMITTED", appliedAt: new Date() },
+          data: {
+            status: "SUBMITTED",
+            appliedAt: new Date(),
+            recoveryState: { phase: "submitted", ts: new Date().toISOString() } as object,
+            actionLog: this.actionLog as object,
+          },
         });
         await prisma.job.update({ where: { id: job.id }, data: { status: "APPLIED" } });
         await Logger.success("APPLY", `✓✓✓ Application submitted: ${job.companyName} — ${job.jobTitle}`);
@@ -190,9 +349,17 @@ export class ApplyEngine {
         throw new Error("Application submission did not complete");
       }
     } catch (e) {
+      this.logAction("failed", undefined, String(e).slice(0, 200));
+      const url = (() => { try { return this.page?.url() || ""; } catch { return ""; } })();
       await prisma.application.update({
         where: { id: applicationId },
-        data: { status: "FAILED", error: String(e), retryCount: { increment: 1 } },
+        data: {
+          status: "FAILED",
+          error: String(e),
+          retryCount: { increment: 1 },
+          recoveryState: { phase: "failed", url, ts: new Date().toISOString() } as object,
+          actionLog: this.actionLog as object,
+        },
       });
       await prisma.job.update({ where: { id: job.id }, data: { status: "FAILED" } });
       await Logger.error("APPLY", `✗ Application failed: ${job.jobTitle} @ ${job.companyName}: ${e}`);
@@ -201,6 +368,7 @@ export class ApplyEngine {
       // Pause before closing so user can see the result
       await this.delay(2000, 3000);
       await this.cleanup();
+      this.currentApplicationId = null;
     }
   }
 
@@ -243,6 +411,8 @@ export class ApplyEngine {
     }
 
     await Logger.info("APPLY", `Step 3/6: Found "${buttonInfo.text}" button — using ${buttonInfo.isEasyApply ? "Easy Apply" : "External Apply"} flow`);
+    this.logAction("apply_button", buttonInfo.isEasyApply ? "easy-apply" : "external");
+    await this.checkpoint(buttonInfo.isEasyApply ? "linkedin-easy-apply" : "linkedin-external");
 
     if (buttonInfo.isEasyApply) {
       return this.runEasyApplyFlow(application, buttonInfo.selector);
@@ -354,7 +524,7 @@ export class ApplyEngine {
       }
 
       // Handle LinkedIn email field — ensure it's set to the correct email
-      await this.setLinkedInEmailField(process.env.LINKEDIN_EMAIL || 'takshpatel051102@gmail.com');
+      await this.setLinkedInEmailField(this.creds.linkedinEmail || this.creds.atsEmail);
 
       // Upload resume if there's a file input
       await this.uploadResumeIfVisible(application);
@@ -533,10 +703,15 @@ export class ApplyEngine {
       await Logger.info("APPLY", "Unknown ATS template — using generic handler");
     }
 
-    // Workday (and other login-gated platforms) need a human account first.
+    // Workday has its own multi-step auth+form flow.
     if (ats?.requiresLogin && (ats.id === "workday")) {
       return this.fillWorkdayForm(application);
     }
+
+    // Generic login wall (Greenhouse candidate portal, Dice, etc.): if the page
+    // is gated behind a sign-in form, authenticate with stored ATS creds and
+    // continue. Handles my.greenhouse.io and any board that prompts a login.
+    await this.handleLoginWallIfPresent(ats);
 
     // ── Multi-step form loop ──────────────────────────────────────────────────
     // External ATS forms (iCIMS, ADP, Greenhouse, Lever, etc.) commonly have
@@ -556,6 +731,8 @@ export class ApplyEngine {
       }
 
       await Logger.info("APPLY", `Form step ${step}: filling fields...`);
+      this.logAction("form_step", `step ${step}`);
+      await this.checkpoint(`external-step-${step}`, { ats: ats?.id });
       await this.uploadResumeIfVisible(application, ats);
       await this.attachCoverLetterIfRequested(application);
       const unfilled = await this.fillVisibleFields(application, scope);
@@ -628,16 +805,273 @@ export class ApplyEngine {
     );
   }
 
-  // Workday-specific flow — these almost always require an account/login the
-  // first time, so we hand off to the human, then verify honestly.
+  // Workday-specific flow. Each company has its OWN Workday tenant, so we either
+  // sign in (if an account exists on this tenant) or create one — automatically,
+  // with ATS_EMAIL/ATS_PASSWORD. Then we run the normal multi-step loop. Only if
+  // auth genuinely fails do we hand off to the human.
   private async fillWorkdayForm(application: NonNullable<ApplicationWithRelations>): Promise<boolean> {
-    await Logger.warn("APPLY", "Workday detected — usually needs a manual login the first time.");
-    // Try to pre-fill anything visible to save the user time.
+    await Logger.info("APPLY", "Workday detected — attempting automated sign-in / account creation.");
+
+    // Step into the application: Workday job pages show an "Apply" then an
+    // "Apply Manually" / "Autofill with Resume" choice before the auth screen.
+    await this.workdayClickInto();
+
+    const authed = await this.handleWorkdayAuth();
+    if (authed) {
+      await Logger.success("APPLY", "Workday account ready — continuing with the form");
+      // Reuse the generic multi-step loop now that we're past the gate.
+      return this.runWorkdayFormLoop(application);
+    }
+
+    // Auth couldn't be completed automatically (verification email, captcha,
+    // security question, etc.) — pre-fill what we can and hand off honestly.
+    await Logger.warn("APPLY", "Couldn't complete Workday auth automatically — handing to you.");
     await this.uploadResumeIfVisible(application).catch(() => {});
     await this.fillVisibleFields(application, "body").catch(() => {});
     return this.waitForHumanTakeover(
       application,
-      `Log in & submit "${application.job.jobTitle}" @ ${application.job.companyName} on Workday, then click Resume`,
+      `Finish Workday sign-in/submit for "${application.job.jobTitle}" @ ${application.job.companyName}, then click "I submitted it" / Resume`,
+      10 * 60 * 1000
+    );
+  }
+
+  // Click through the Workday landing → manual-apply screen to reach the auth form.
+  private async workdayClickInto(): Promise<void> {
+    const entrySelectors = [
+      '[data-automation-id="adventureButton"]',          // "Apply"
+      'a[data-automation-id="applyManually"]',           // "Apply Manually"
+      'button[data-automation-id="applyManually"]',
+      'a:has-text("Apply Manually")',
+      'button:has-text("Apply Manually")',
+      'a:has-text("Apply")',
+    ];
+    for (const sel of entrySelectors) {
+      const btn = await this.page!.$(sel).catch(() => null);
+      if (btn && await btn.isVisible().catch(() => false)) {
+        await btn.click({ timeout: 4000 }).catch(() => {});
+        await this.delay(1500, 2500);
+      }
+    }
+  }
+
+  // Try to sign in; if that fails (no account on this tenant), create one.
+  // Returns true once we're authenticated (past the login screen).
+  private async handleWorkdayAuth(): Promise<boolean> {
+    const email = this.creds.atsEmail || this.creds.linkedinEmail || "";
+    const password = this.creds.atsPassword || this.creds.linkedinPassword || "";
+    if (!email || !password) {
+      await Logger.warn("APPLY", "No ATS_EMAIL/ATS_PASSWORD set — cannot auto-auth Workday");
+      return false;
+    }
+
+    // Is there even a login form? If not, we may already be in.
+    const emailField = await this.page!.$(
+      'input[data-automation-id="email"], input[data-automation-id="userName"], input[type="email"]'
+    ).catch(() => null);
+    if (!emailField) {
+      // No login form visible — assume we're past the gate.
+      return true;
+    }
+
+    // ── Attempt 1: SIGN IN ──────────────────────────────────────────────────
+    await Logger.info("APPLY", `Workday: trying sign-in as ${email}`);
+    await this.workdayFillCreds(email, password, /*verify*/ false);
+    await this.clickFirstVisible(
+      [
+        '[data-automation-id="signInSubmitButton"]',
+        'button[data-automation-id="click_filter"]',
+        'button:has-text("Sign In")',
+        'button[type="submit"]',
+      ],
+      "Workday Sign In"
+    );
+    await this.delay(3500, 5000);
+
+    if (await this.workdayIsAuthed()) return true;
+
+    // ── Attempt 2: CREATE ACCOUNT ───────────────────────────────────────────
+    await Logger.info("APPLY", "Workday: sign-in didn't take — trying to create an account");
+    // Switch to the create-account view if there's a toggle link.
+    await this.clickFirstVisible(
+      [
+        '[data-automation-id="createAccountLink"]',
+        'button[data-automation-id="createAccountLink"]',
+        'a:has-text("Create Account")',
+        'button:has-text("Create Account")',
+      ],
+      "Workday → Create Account"
+    );
+    await this.delay(1200, 2000);
+
+    await this.workdayFillCreds(email, password, /*verify*/ true);
+    // Accept the create-account terms checkbox if present.
+    const terms = await this.page!.$(
+      'input[data-automation-id="createAccountCheckbox"], input[type="checkbox"]'
+    ).catch(() => null);
+    if (terms) await this.toggleCheckable(terms, true).catch(() => {});
+
+    await this.clickFirstVisible(
+      [
+        '[data-automation-id="createAccountSubmitButton"]',
+        'button:has-text("Create Account")',
+        'button[type="submit"]',
+      ],
+      "Workday Create Account"
+    );
+    await this.delay(3500, 5000);
+
+    return this.workdayIsAuthed();
+  }
+
+  // Fill Workday email/password (+ verify-password on the create-account form).
+  private async workdayFillCreds(email: string, password: string, verify: boolean): Promise<void> {
+    const emailSel = 'input[data-automation-id="email"], input[data-automation-id="userName"], input[type="email"]';
+    const passSel = 'input[data-automation-id="password"], input[type="password"]:not([data-automation-id="verifyPassword"])';
+    const emailEl = await this.page!.$(emailSel).catch(() => null);
+    if (emailEl) { await emailEl.fill(email).catch(() => {}); await this.delay(300, 600); }
+    const passEl = await this.page!.$(passSel).catch(() => null);
+    if (passEl) { await passEl.fill(password).catch(() => {}); await this.delay(300, 600); }
+    if (verify) {
+      const verifyEl = await this.page!.$('input[data-automation-id="verifyPassword"]').catch(() => null);
+      if (verifyEl) { await verifyEl.fill(password).catch(() => {}); await this.delay(300, 600); }
+    }
+  }
+
+  // Authenticated when the login form is gone and no auth error is shown.
+  private async workdayIsAuthed(): Promise<boolean> {
+    await this.delay(800, 1200);
+    const stillLogin = await this.page!.$(
+      'input[data-automation-id="password"], [data-automation-id="signInSubmitButton"], [data-automation-id="createAccountSubmitButton"]'
+    ).catch(() => null);
+    if (!stillLogin) return true;
+    // An error banner (wrong password, account exists, invalid) means not authed.
+    const err = await this.page!.evaluate(() => {
+      const t = document.body.innerText.toLowerCase();
+      return (
+        t.includes("incorrect") || t.includes("invalid") ||
+        t.includes("does not match") || t.includes("already exists") ||
+        t.includes("verify your email") || t.includes("check your email")
+      );
+    }).catch(() => false);
+    return !err && !stillLogin;
+  }
+
+  // Generic sign-in handler for ATS pages gated behind a login (Greenhouse
+  // candidate portal `my.greenhouse.io`, Dice, etc.). If a password field is
+  // visible, fills email+password from stored ATS creds and submits. Best-effort
+  // and non-fatal — if it can't log in, the normal flow / human takeover follows.
+  private async handleLoginWallIfPresent(ats?: AtsAdapter | null): Promise<boolean> {
+    const pw = await this.page!.$('input[type="password"]').catch(() => null);
+    if (!pw || !(await pw.isVisible().catch(() => false))) return false;
+
+    const email = this.creds.atsEmail || this.creds.linkedinEmail;
+    const password = this.creds.atsPassword || this.creds.linkedinPassword;
+    if (!email || !password) {
+      await Logger.warn("APPLY", "Login wall detected but no ATS credentials set — skipping auto-login");
+      return false;
+    }
+
+    await Logger.info("APPLY", `Login wall detected (${ats?.label || "site"}) — signing in as ${email}`);
+    this.logAction("login_wall", ats?.label || "site");
+
+    // Fill email/username (skip if there's no email field — some show password only).
+    const emailEl = await this.page!.$(
+      'input[type="email"], input[name*="email" i], input[id*="email" i], input[autocomplete="username"], input[name="user[email]"]'
+    ).catch(() => null);
+    if (emailEl) { await emailEl.fill(email).catch(() => {}); await this.delay(300, 600); }
+    await pw.fill(password).catch(() => {});
+    await this.delay(300, 600);
+
+    // Submit the login.
+    const clicked = await this.clickFirstVisible(
+      [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Sign in")',
+        'button:has-text("Sign In")',
+        'button:has-text("Log in")',
+        'button:has-text("Login")',
+        'button:has-text("Continue")',
+      ],
+      "Sign in"
+    );
+    if (!clicked) {
+      await pw.press("Enter").catch(() => {});
+    }
+    await this.page!.waitForLoadState("networkidle").catch(() => null);
+    await this.delay(2500, 4000);
+
+    // Still showing a password field? Login likely failed (bad creds / 2FA / captcha).
+    const stillGated = await this.page!.$('input[type="password"]').catch(() => null);
+    if (stillGated && await stillGated.isVisible().catch(() => false)) {
+      await Logger.warn("APPLY", "Still on login screen after sign-in attempt — may need manual login / 2FA");
+      return false;
+    }
+    await Logger.success("APPLY", "Signed in — session saved to browser profile for future applies");
+    return true;
+  }
+
+  // The shared multi-step form walk, reused for Workday after auth.
+  private async runWorkdayFormLoop(application: NonNullable<ApplicationWithRelations>): Promise<boolean> {
+    const scope = "body";
+    const MAX_STEPS = 10;
+    for (let step = 1; step <= MAX_STEPS; step++) {
+      await this.dismissPopups();
+      if (await this.detectSuccessPage()) {
+        await Logger.success("APPLY", "Workday submission confirmed!");
+        return true;
+      }
+
+      await Logger.info("APPLY", `Workday step ${step}: filling…`);
+      this.logAction("workday_step", `step ${step}`);
+      await this.checkpoint(`workday-step-${step}`);
+      await this.uploadResumeIfVisible(application).catch(() => {});
+      await this.attachCoverLetterIfRequested(application).catch(() => {});
+      const unfilled = await this.fillVisibleFields(application, scope);
+      await this.delay(700, 1200);
+      await this.takeStepScreenshot(application.folderPath, `wd-step-${step}`);
+
+      if (unfilled.length > 0) {
+        const progressed = await this.pauseForHumanThenCapture(
+          application, scope,
+          `Workday needs these filled, then I'll continue: ${unfilled.slice(0, 6).join(", ")}`
+        );
+        if (!progressed) break;
+        continue;
+      }
+
+      const sigBefore = await this.pageSignature();
+      let action: "submit" | "advance" | null = null;
+      if (await this.clickFinalSubmit()) action = "submit";
+      else if (await this.clickAdvance()) action = "advance";
+
+      if (!action) {
+        const progressed = await this.pauseForHumanThenCapture(
+          application, scope,
+          "I can't find Workday's next/submit button — click it in the browser and I'll continue"
+        );
+        if (!progressed) break;
+        continue;
+      }
+
+      await this.delay(3000, 5000);
+      if (await this.detectSuccessPage()) {
+        await Logger.success("APPLY", "Workday submission confirmed!");
+        return true;
+      }
+      const sigAfter = await this.pageSignature();
+      if (sigAfter === sigBefore) {
+        const progressed = await this.pauseForHumanThenCapture(
+          application, scope,
+          "Workday didn't advance — fix the highlighted fields and I'll continue"
+        );
+        if (!progressed) break;
+      }
+    }
+
+    return this.waitForHumanTakeover(
+      application,
+      `Finish & submit "${application.job.jobTitle}" @ ${application.job.companyName} on Workday, then click "I submitted it" / Resume`,
       10 * 60 * 1000
     );
   }
@@ -666,7 +1100,11 @@ export class ApplyEngine {
       'button:has-text("Send")',
       'input[type="submit"][value*="submit" i]',
     ];
-    return this.clickFirstVisible(candidates, "Submit");
+    const clicked = await this.clickFirstVisible(candidates, "Submit");
+    // Mark that a real final-submit happened — gates success detection so we
+    // never declare success on a job page we merely navigated to.
+    if (clicked) this.submitClicked = true;
+    return clicked;
   }
 
   // Click a button that ADVANCES to the next step of a multi-step form.
@@ -699,8 +1137,17 @@ export class ApplyEngine {
   }
 
   // Click the first visible+enabled element matching any of the selectors.
+  // Self-healing (#24): tries the previously-learned selector first, then the
+  // candidate list, then a text-based fallback scan; records the winner so it's
+  // tried first next time. `kind` doubles as the learning intent.
   private async clickFirstVisible(selectors: string[], kind: string): Promise<boolean> {
-    for (const sel of selectors) {
+    const url = this.page!.url();
+
+    // 1) Remembered winner for this (host, intent) — promoted to first try.
+    const learned = rememberedSelector(url, kind);
+    const ordered = learned ? [learned, ...selectors.filter((s) => s !== learned)] : selectors;
+
+    for (const sel of ordered) {
       try {
         const btn = await this.page!.$(sel);
         if (!btn) continue;
@@ -711,10 +1158,99 @@ export class ApplyEngine {
         await this.delay(200, 500);
         await Logger.info("APPLY", `${kind} → ${sel}`);
         await btn.click({ timeout: 5000 });
+        this.logAction("click", kind, sel);
+        learnSelector(url, kind, sel);
         return true;
       } catch { /* try next */ }
     }
-    return false;
+
+    // 2) Self-heal: no known selector matched. Scan the DOM for a button/link
+    //    whose visible text or aria-label looks right for this intent, click it,
+    //    and remember a durable selector for next time.
+    if (learned) forgetSelector(url, kind); // it stopped working
+    const healed = await this.healClick(kind);
+    return healed;
+  }
+
+  // Intent → text patterns used by the self-healing fallback scan.
+  private intentTextPatterns(kind: string): RegExp {
+    const k = kind.toLowerCase();
+    if (k.includes("submit"))
+      return /\b(submit|send) (application|app)\b|submit$|send application|complete application/i;
+    if (k.includes("next") || k.includes("continue"))
+      return /\b(next|continue|save (and|&) (continue|next)|review|proceed|save (and|&) go)\b/i;
+    if (k.includes("sign in") || k.includes("login"))
+      return /\bsign in\b|\blog in\b|\blogin\b/i;
+    if (k.includes("create account"))
+      return /create account|sign up|register/i;
+    if (k.includes("apply"))
+      return /\bapply\b|easy apply|quick apply/i;
+    return new RegExp(kind.replace(/[^a-z0-9]+/gi, "\\s*"), "i");
+  }
+
+  // Find + click the best-matching visible button/link by text for `kind`.
+  // Returns true and learns a stable selector if it succeeds.
+  private async healClick(kind: string): Promise<boolean> {
+    const rxSource = this.intentTextPatterns(kind).source;
+    const rxFlags = this.intentTextPatterns(kind).flags;
+
+    const found = await this.page!.evaluate(
+      ({ src, flags }) => {
+        const rx = new RegExp(src, flags);
+        const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim();
+        const els = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            "button, a, input[type=submit], input[type=button], [role=button]"
+          )
+        );
+        for (const el of els) {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          if ((el as HTMLButtonElement).disabled) continue;
+          const label = norm(
+            el.innerText ||
+              (el as HTMLInputElement).value ||
+              el.getAttribute("aria-label") ||
+              ""
+          );
+          if (!label || !rx.test(label)) continue;
+          // Build a durable selector for this element.
+          let selector = "";
+          const id = el.id;
+          const aria = el.getAttribute("aria-label");
+          const auto = el.getAttribute("data-automation-id");
+          if (id) selector = `#${CSS.escape(id)}`;
+          else if (auto) selector = `[data-automation-id="${auto}"]`;
+          else if (aria) selector = `${el.tagName.toLowerCase()}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
+          // Mark the element so the caller can click it even without a selector.
+          el.setAttribute("data-jobagent-heal", "1");
+          return { selector, label: label.slice(0, 60) };
+        }
+        return null;
+      },
+      { src: rxSource, flags: rxFlags }
+    ).catch(() => null);
+
+    if (!found) return false;
+
+    const clickSel = found.selector || "[data-jobagent-heal='1']";
+    try {
+      const btn = await this.page!.$(clickSel);
+      if (!btn) return false;
+      await btn.scrollIntoViewIfNeeded().catch(() => null);
+      await this.delay(200, 500);
+      await Logger.success("APPLY", `${kind} (self-healed) → "${found.label}"`);
+      await btn.click({ timeout: 5000 });
+      this.logAction("click_healed", kind, found.label);
+      // Clean the marker; learn a durable selector when we have one.
+      await this.page!.evaluate(() =>
+        document.querySelectorAll("[data-jobagent-heal]").forEach((e) => e.removeAttribute("data-jobagent-heal"))
+      ).catch(() => {});
+      if (found.selector) learnSelector(this.page!.url(), kind, found.selector);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // A lightweight fingerprint of the current form page. We compare it before
@@ -740,45 +1276,53 @@ export class ApplyEngine {
     }
   }
 
+  // Strict success detection. Declaring success wrongly is worse than missing it
+  // (it skips a real application), so we require a STRONG signal — and, for the
+  // generic text/URL heuristics, that we have actually clicked a final Submit
+  // this run. Adapter-specific successSelectors are trusted unconditionally
+  // (they're page-specific confirmation elements).
   private async detectSuccessPage(ats?: AtsAdapter | null): Promise<boolean> {
     try {
-      // Platform-specific success element (most reliable signal).
+      // 1) Platform-specific confirmation element — most reliable, no gate.
       for (const sel of ats?.successSelectors || []) {
         const el = await this.page!.$(sel).catch(() => null);
         if (el && await el.isVisible().catch(() => false)) return true;
       }
 
-      const url = this.page!.url();
-      if (
-        url.includes("thank") ||
-        url.includes("success") ||
-        url.includes("confirmation") ||
-        url.includes("submitted") ||
-        url.includes("applied") ||
-        url.includes("complete") ||
-        url.includes("finish")
-      ) {
-        return true;
-      }
+      // 2) Generic signals only count AFTER we've actually submitted. This stops
+      //    false positives from job-page URLs like ".../applied-ai-engineer/" or
+      //    instructional copy ("thank you for your interest").
+      if (!this.submitClicked) return false;
+
+      const url = this.page!.url().toLowerCase();
+      // Require a confirmation-specific PATH segment or query, not a bare
+      // substring that could live inside a job-title slug.
+      const urlConfirms =
+        /\/(thank[-_]?you|confirmation|application[-_]?(complete|submitted|received|success)|success)(\/|\?|$)/.test(url) ||
+        /[?&](status|state)=(success|submitted|complete|confirmed)/.test(url) ||
+        /applicationsubmitted|thankyou/.test(url.replace(/[-_]/g, ""));
+      if (urlConfirms) return true;
 
       const body = await this.page!.evaluate(
         () => (document.body.innerText ?? "").slice(0, 4000).toLowerCase()
       );
 
-      // Platform-specific success phrases.
+      // Platform-specific success phrases (adapter-provided).
       for (const phrase of ats?.successText || []) {
         if (body.includes(phrase.toLowerCase())) return true;
       }
 
+      // Strong, submission-specific confirmation phrases only.
       return (
         body.includes("application submitted") ||
-        body.includes("application received") ||
-        body.includes("thank you for applying") ||
+        body.includes("application has been submitted") ||
+        body.includes("application was submitted") ||
+        body.includes("your application has been received") ||
+        body.includes("we have received your application") ||
         body.includes("your application was sent") ||
-        body.includes("we received your") ||
-        body.includes("successfully applied") ||
-        body.includes("application complete") ||
-        body.includes("application sent")
+        body.includes("thank you for applying") ||
+        body.includes("successfully submitted") ||
+        body.includes("application complete")
       );
     } catch {
       return false;
@@ -816,8 +1360,8 @@ export class ApplyEngine {
   // ─── LinkedIn login handler ──────────────────────────────────────────────────
 
   private async handleLinkedInLogin(): Promise<boolean> {
-    const email = process.env.LINKEDIN_EMAIL || "takshpatel051102@gmail.com";
-    const password = process.env.LINKEDIN_PASSWORD || "T@k$h@020921";
+    const email = this.creds.linkedinEmail;
+    const password = this.creds.linkedinPassword;
 
     try {
       // Try to find and fill the email input
@@ -989,11 +1533,19 @@ export class ApplyEngine {
             return `${e.name} ${e.id} ${e.placeholder} ${e.getAttribute("aria-label") || ""} ${lbl} ${container}`.toLowerCase();
           }).catch(() => "");
 
-          if (/cover\s*letter|motivation|why (do|would) you|message to|additional information/i.test(meta)) {
+          // ONLY paste the full cover letter into an actual cover-letter box.
+          // NOT into short-answer prompts like "Why do you want to join X?",
+          // "Additional information", or "From where do you intend to work?" —
+          // those need a short, specific answer (handled as normal fields), and
+          // dumping the whole letter there looks wrong.
+          const isCoverLetterBox =
+            /cover\s*letter/i.test(meta) ||
+            /anything else you.?d like to share|add a cover letter/i.test(meta);
+          if (isCoverLetterBox) {
             const cur = await ta.inputValue().catch(() => "");
             if (!cur.trim()) {
               await ta.fill(content);
-              await Logger.success("APPLY", "Pasted cover letter into text area");
+              await Logger.success("APPLY", "Pasted cover letter into cover-letter box");
               await this.delay(400, 800);
             }
           }
@@ -1221,29 +1773,76 @@ export class ApplyEngine {
       return true;
     }
 
-    // 1) Memory (exact + semantic — same question phrased differently)
-    let answer = await findAnswer(field.label);
+    let answer = "";
+    let confidence = 0;   // 0-1; drives auto-fill vs fill+verify vs pause
+    let source = "";
 
-    if (answer) {
-      await Logger.info("APPLY", `  💾 memory: "${field.label}" → "${answer.slice(0, 60)}"`);
-    } else {
-      // 2) Try resume data shortcuts (don't burn AI on obvious things)
-      answer = this.shortcutFromResume(field.label, resumeData);
-      if (answer) {
+    // Classify the field's semantic kind (DOM type + label). Deterministic kinds
+    // (url/email/phone/linkedin/github) must NEVER receive a free-text AI answer.
+    const kind = classifyFieldKind(field.type, field.label);
+
+    // 0) Profile Engine V2 — deterministic, structured fields come FIRST.
+    //    Identity / contact / visa / education resolve here with no AI.
+    const resolution = resolveField(field.label, this.profile);
+    if (resolution) {
+      const { spec, field: pf } = resolution;
+      if (pf && pf.value.trim()) {
+        answer = pf.value.trim();
+        // Locked = certain (1.0); else use the field's stored confidence.
+        confidence = pf.locked ? 1 : (pf.confidence ?? 0.8);
+        source = `profile[${spec.key}]`;
+        await Logger.info("APPLY", `  🧬 ${source} (${Math.round(confidence * 100)}%): "${field.label}" → "${answer.slice(0, 60)}"`);
+      } else if (spec.compliance) {
+        // Compliance/visa/EEO question with NO profile value → never guess.
+        await Logger.warn("APPLY", `  🔒 compliance "${field.label}" not in profile — will ask you (no AI guessing)`);
+        return false;
+      }
+    }
+
+    // 1) Memory (exact + semantic). Ignore a stored value that doesn't fit the
+    //    field's kind — protects against poisoned memory (e.g. prose in a URL).
+    if (!answer) {
+      const mem = await findAnswer(field.label);
+      if (mem && valueValidForKind(kind, mem)) {
+        answer = mem;
+        confidence = 0.9;
+        source = "memory";
+        await Logger.info("APPLY", `  💾 memory: "${field.label}" → "${answer.slice(0, 60)}"`);
+      }
+    }
+
+    // 2) Résumé shortcuts for obvious fields (name/email/phone/links).
+    if (!answer) {
+      const shortcut = this.shortcutFromResume(field.label, resumeData) || "";
+      if (shortcut && valueValidForKind(kind, shortcut)) {
+        answer = shortcut;
+        confidence = 0.85;
+        source = "resume";
         await Logger.info("APPLY", `  📄 resume: "${field.label}" → "${answer.slice(0, 60)}"`);
         await saveAnswer(field.label, answer, "GENERAL", application.job.platform);
-      } else {
-        // 3) Claude AI
+      }
+    }
+
+    // 3) Claude AI — ONLY for open-ended free-text questions. A url/email/phone/
+    //    linkedin/github field must never get AI prose; with no real value we
+    //    leave it blank for the human instead of guessing.
+    if (!answer) {
+      if (kind === "text") {
         try {
           const aiResult = await claudeAnswerQuestion(field.label, resumeData, answeredQuestions);
-          answer = aiResult.answer?.trim() || "";
-          if (answer) {
+          const cand = aiResult.answer?.trim() || "";
+          if (cand) {
+            answer = cand;
+            confidence = 0.6; // AI guesses are lowest trust
+            source = "AI";
             await Logger.info("APPLY", `  🤖 AI: "${field.label}" → "${answer.slice(0, 60)}"`);
             await saveAnswer(field.label, answer, aiResult.category, application.job.platform);
           }
         } catch (e) {
           await Logger.warn("APPLY", `  ⚠ AI error for "${field.label}": ${e}`);
         }
+      } else {
+        await Logger.warn("APPLY", `  🔗 ${kind} field "${field.label}" — no saved value; leaving blank (won't guess a ${kind})`);
       }
     }
 
@@ -1254,8 +1853,60 @@ export class ApplyEngine {
       return false;
     }
 
-    await this.applyAnswer(field, answer);
+    // Final validation guard (defense in depth): never write a value that
+    // doesn't fit the field's kind — e.g. prose into a URL/email/phone box.
+    if (!valueValidForKind(kind, answer)) {
+      await Logger.warn("APPLY", `  ✗ rejecting "${answer.slice(0, 40)}…" — not a valid ${kind} for "${field.label}"`);
+      return false;
+    }
+
+    // ── Confidence-based automation (#20) ─────────────────────────────────────
+    // >95% auto-fill · 85-95% fill + verify · <85% leave blank & pause for review.
+    // Required fields get a small boost (they must be filled to proceed anyway).
+    const effConfidence = field.required ? Math.min(1, confidence + 0.05) : confidence;
+    if (effConfidence < 0.85) {
+      await Logger.warn(
+        "APPLY",
+        `  ⚠ low confidence (${Math.round(effConfidence * 100)}%, ${source}) for "${field.label}" — leaving blank for your review`
+      );
+      return false;
+    }
+
+    await this.applyAnswer(field, answer, resolution?.spec.kind);
+
+    // 85-95% → verify the value actually landed; if not, hand to human.
+    if (effConfidence < 0.95) {
+      const ok = await this.verifyFieldValue(field, answer);
+      if (!ok) {
+        await Logger.warn("APPLY", `  ⚠ verify failed for "${field.label}" (${source}) — pausing for review`);
+        return false;
+      }
+      await Logger.info("APPLY", `  ✓ verified "${field.label}" (${Math.round(effConfidence * 100)}%)`);
+    }
     return true;
+  }
+
+  // Read back a text/select field to confirm our value actually applied.
+  // Radios/checkboxes are trusted (toggleCheckable already self-verifies).
+  private async verifyFieldValue(field: DetectedField, expected: string): Promise<boolean> {
+    if (field.type === "radio" || field.type === "checkbox") return true;
+    try {
+      if (field.type === "select") {
+        const text = await this.page!.$eval(field.selector, (el) => {
+          const s = el as HTMLSelectElement;
+          return s.options[s.selectedIndex]?.text?.trim().toLowerCase() || "";
+        }).catch(() => "");
+        // A non-empty, non-placeholder selection counts as success.
+        return !!text && !/^(select|choose|--|please)/.test(text);
+      }
+      const cur = (await this.page!.inputValue(field.selector).catch(() => "")) || "";
+      if (!cur.trim()) return false;
+      // Field-shortening (truncation/formatting) is fine — check overlap.
+      const a = cur.toLowerCase().trim(), b = expected.toLowerCase().trim();
+      return a === b || a.includes(b.slice(0, 12)) || b.includes(a.slice(0, 12));
+    } catch {
+      return false;
+    }
   }
 
   // Quick resume shortcuts — saves AI calls for obvious questions
@@ -1278,19 +1929,26 @@ export class ApplyEngine {
     return null;
   }
 
-  private async applyAnswer(field: DetectedField, answer: string): Promise<void> {
+  private async applyAnswer(field: DetectedField, answer: string, kind?: string): Promise<void> {
     if (field.type === "select") {
       const options = await this.page!.$$eval(
         `${field.selector} option`,
         (opts) => opts.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent?.trim() || "" }))
       ).catch(() => []);
 
-      const a = answer.toLowerCase();
-      const best = options.find((o) =>
-        o.text.toLowerCase().includes(a) || a.includes(o.text.toLowerCase())
-      );
-      if (best) {
-        await this.page!.selectOption(field.selector, best.value).catch(() => {});
+      // Dropdown Intelligence: deterministic match (state/country/degree/yesno
+      // aware), no AI. Falls back to plain contains if no smart match.
+      let chosen = matchDropdownOption(answer, options, kind);
+      if (!chosen) {
+        const a = answer.toLowerCase();
+        chosen = options.find((o) =>
+          o.text.toLowerCase().includes(a) || a.includes(o.text.toLowerCase())
+        )?.value ?? null;
+      }
+      if (chosen) {
+        await this.page!.selectOption(field.selector, chosen).catch(() => {});
+      } else {
+        await Logger.warn("APPLY", `  ⚠ no dropdown option matched "${answer}" for "${field.label}"`);
       }
     } else if (field.type === "radio") {
       const radios = await this.page!.$$(field.selector);
@@ -1486,6 +2144,17 @@ export class ApplyEngine {
         if (!value) continue;
         // Skip placeholder/non-answers.
         if (/^(select|choose|--|please select)/i.test(value)) continue;
+        // Skip obvious TEST junk (e.g. "USA_1", "test", "asdf", "123") so a
+        // throwaway value typed while debugging never poisons memory.
+        if (/^(usa_?\d+|test\d*|asdf+|qwerty|xxx+|n\/?a)$/i.test(value)) continue;
+
+        // Don't capture fields the structured Profile owns (name/email/phone/
+        // country/etc.) — those come from the locked profile, and capturing a
+        // form's echo of them is how junk like "USA_1 → First Name" spread.
+        const owned = resolveField(f.label, this.profile);
+        if (owned && (owned.spec.category === "identity" || owned.spec.category === "contact")) {
+          continue;
+        }
 
         // Human-entered = authoritative: overwrites any prior bad memory,
         // including a differently-worded near-duplicate.
@@ -1511,18 +2180,22 @@ export class ApplyEngine {
     maxWaitMs = 8 * 60 * 1000
   ): Promise<boolean> {
     scraperStatus.waitingForUser = true;
+    scraperStatus.userConfirmedSubmit = false;
     scraperStatus.reason = reason;
 
     await Logger.warn("APPLY", "═════════════════════════════════════════");
     await Logger.warn("APPLY", "⏸  WAITING FOR HUMAN TAKEOVER");
     await Logger.warn("APPLY", reason);
-    await Logger.warn("APPLY", "Finish in the browser, then click RESUME on the dashboard");
+    await Logger.warn("APPLY", 'Finish in the browser, then click "I submitted it" (or Resume) on the dashboard');
     await Logger.warn("APPLY", "═════════════════════════════════════════");
 
+    let userSaidDone = false;
     const start = Date.now();
     while (Date.now() - start < maxWaitMs) {
       await new Promise((r) => setTimeout(r, 2000));
-      // User clicked Resume?
+      // User explicitly confirmed they submitted it → trust them.
+      if (scraperStatus.userConfirmedSubmit) { userSaidDone = true; break; }
+      // User clicked Resume/Skip?
       if (!scraperStatus.waitingForUser) break;
       // Or the page reached a confirmation on its own while they worked.
       if (await this.detectSuccessPage().catch(() => false)) {
@@ -1531,15 +2204,26 @@ export class ApplyEngine {
       }
     }
     scraperStatus.waitingForUser = false;
+    const confirmedByUser = scraperStatus.userConfirmedSubmit;
+    scraperStatus.userConfirmedSubmit = false;
 
     await this.takeStepScreenshot(application.folderPath, "after-human-takeover");
 
     // Capture whatever the user entered so future applications reuse it.
     await this.captureFilledFields(application, this.currentScope).catch(() => {});
 
-    const confirmed = await this.detectSuccessPage().catch(() => false);
-    if (confirmed) {
+    // A takeover implies the human may have submitted — allow generic success
+    // detection (which is otherwise gated on our own submit click).
+    this.submitClicked = true;
+
+    // 1) Page shows a real confirmation → success.
+    if (await this.detectSuccessPage().catch(() => false)) {
       await Logger.success("APPLY", "Application confirmed after human takeover");
+      return true;
+    }
+    // 2) User explicitly asserted they submitted it → trust the human.
+    if (userSaidDone || confirmedByUser) {
+      await Logger.success("APPLY", "Marked submitted — you confirmed you completed it");
       return true;
     }
 

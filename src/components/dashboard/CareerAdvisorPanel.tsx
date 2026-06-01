@@ -46,7 +46,7 @@ export function CareerAdvisorPanel() {
 
   if (!data && !loading) {
     return (
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-10 text-center">
+      <div className="card-glass p-10 text-center">
         <Compass className="w-8 h-8 text-blue-400 mx-auto mb-3" />
         <h3 className="text-white font-semibold mb-1">AI Career Advisor</h3>
         <p className="text-sm text-gray-500 max-w-md mx-auto mb-5">
@@ -89,7 +89,7 @@ export function CareerAdvisorPanel() {
       </div>
 
       {/* Summary */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div className="card-glass p-4">
         <p className="text-sm text-gray-200">{advice.summary}</p>
         {advice.targetRoles?.length > 0 && (
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -105,7 +105,7 @@ export function CareerAdvisorPanel() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Skill gaps with demand bars */}
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div className="card-glass p-4">
           <h4 className="text-sm font-semibold text-gray-300 mb-3">Top skill gaps (by demand)</h4>
           {gaps.length === 0 ? (
             <p className="text-sm text-gray-600">No gaps detected — scrape more jobs for sharper signal.</p>
@@ -127,7 +127,7 @@ export function CareerAdvisorPanel() {
         </div>
 
         {/* In-demand strengths */}
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div className="card-glass p-4">
           <h4 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-1.5">
             <TrendingUp className="w-4 h-4 text-emerald-400" /> Your in-demand strengths
           </h4>
@@ -152,7 +152,7 @@ export function CareerAdvisorPanel() {
       </div>
 
       {/* Prioritized gaps from AI */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div className="card-glass p-4">
         <h4 className="text-sm font-semibold text-gray-300 mb-3">Gaps that matter most</h4>
         <div className="space-y-2">
           {advice.skillGaps.map((g, i) => (
@@ -170,7 +170,7 @@ export function CareerAdvisorPanel() {
       </div>
 
       {/* Roadmap */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div className="card-glass p-4">
         <h4 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-1.5">
           <MapIcon className="w-4 h-4 text-blue-400" /> Learning roadmap
         </h4>
@@ -191,7 +191,7 @@ export function CareerAdvisorPanel() {
 
       {/* Salary insight */}
       {advice.salaryInsight && (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-start gap-2">
+        <div className="card-glass p-4 flex items-start gap-2">
           <DollarSign className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
           <p className="text-sm text-gray-300">{advice.salaryInsight}</p>
         </div>

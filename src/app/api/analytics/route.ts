@@ -100,6 +100,9 @@ export async function GET(req: NextRequest) {
     ["INTERVIEW_SCHEDULED", "OFFER_RECEIVED"].includes(a.status)
   ).length;
   const offers = apps.filter((a) => a.status === "OFFER_RECEIVED").length;
+  const rejected = apps.filter((a) => a.status === "REJECTED").length;
+  // A "response" = any reply after submitting (interview, offer, or rejection).
+  const responses = interviews + offers + rejected;
   const atsScores = jobs.map((j) => j.atsScore).filter((x): x is number => x != null);
   const avgAts = atsScores.length
     ? +(atsScores.reduce((a, b) => a + b, 0) / atsScores.length).toFixed(1)
@@ -117,6 +120,8 @@ export async function GET(req: NextRequest) {
       offers,
       avgAts,
       interviewRate: submitted ? Math.round((interviews / submitted) * 100) : 0,
+      responseRate: submitted ? Math.round((responses / submitted) * 100) : 0,
+      offerRate: submitted ? Math.round((offers / submitted) * 100) : 0,
     },
   });
 }

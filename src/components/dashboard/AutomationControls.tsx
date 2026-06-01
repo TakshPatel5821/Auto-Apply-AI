@@ -86,6 +86,15 @@ export function AutomationControls({
     onRefresh();
   }
 
+  async function sendAction(action: string) {
+    await fetch("/api/automation/status", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    onRefresh();
+  }
+
   async function startScrapeOnly() {
     setLoading(true);
     const activeResume = resumes.find((r) => r.isActive);
@@ -103,7 +112,7 @@ export function AutomationControls({
   }
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
+    <div className="card-glass p-6">
       <div className="flex items-center gap-2 mb-6">
         <div className={`w-2.5 h-2.5 rounded-full ${
           state.isRunning
@@ -178,14 +187,25 @@ export function AutomationControls({
                     type="button"
                     onClick={() => togglePlatform(p.id)}
                     aria-pressed={on}
-                    className={`flex items-center justify-between py-2 px-3 rounded-lg text-sm font-medium border transition-colors ${
+                    className={`group flex items-center justify-between py-2.5 px-3.5 rounded-xl text-sm font-medium border transition-all duration-200 ${
                       on
-                        ? "bg-blue-600 border-blue-600 text-white"
-                        : "bg-gray-800 border-gray-700 text-gray-500 hover:border-gray-600"
+                        ? "bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/25"
+                        : "bg-white/5 border-white/10 text-gray-400 hover:border-white/20 hover:text-gray-300"
                     }`}
                   >
                     <span>{p.label}</span>
-                    <span className={`w-2 h-2 rounded-full ${on ? "bg-white" : "bg-gray-600"}`} />
+                    {/* iOS-style switch knob */}
+                    <span
+                      className={`relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors duration-200 ${
+                        on ? "bg-white/30" : "bg-gray-700"
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform duration-200 ${
+                          on ? "translate-x-[1.125rem]" : "translate-x-1"
+                        }`}
+                      />
+                    </span>
                   </button>
                 );
               })}
@@ -245,14 +265,25 @@ export function AutomationControls({
           <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 space-y-2">
             <div className="text-xs text-yellow-400 font-semibold uppercase">⏸ Waiting for Your Input</div>
             <div className="text-sm text-yellow-300">{state.waitingReason || "Complete the action in the browser"}</div>
-            <button
-              onClick={pauseResume}
-              disabled={loading}
-              className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium text-sm transition-colors"
-            >
-              <Play className="w-4 h-4" />
-              Resume Automation
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => sendAction("confirmSubmitted")}
+                disabled={loading}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium text-sm transition-colors"
+                title="I finished and submitted this application in the browser"
+              >
+                ✓ I submitted it
+              </button>
+              <button
+                onClick={pauseResume}
+                disabled={loading}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium text-sm transition-colors"
+                title="Skip this one / continue without confirming a submission"
+              >
+                <Play className="w-4 h-4" />
+                Resume / Skip
+              </button>
+            </div>
           </div>
         )}
 
@@ -314,6 +345,7 @@ export function AutomationControls({
 const PLATFORMS = [
   { id: "linkedin", label: "LinkedIn" },
   { id: "indeed", label: "Indeed" },
+  { id: "greenhouse", label: "Greenhouse" },
 ];
 
 const PHASES = [

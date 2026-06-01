@@ -508,6 +508,7 @@ Return JSON: {"latexContent":"\\\\documentclass[10pt]{article}...FULL LATEX...\\
 export interface InterviewPrep {
   technicalQuestions: { question: string; guidance: string }[];
   behavioralQuestions: { question: string; star: string }[];
+  systemDesignQuestions: { question: string; guidance: string }[];
   companyTalkingPoints: string[];
   questionsToAsk: string[];
   prepTips: string[];
@@ -542,11 +543,12 @@ Return ONLY this JSON:
 {
   "technicalQuestions": [{"question": "a likely technical question for this role", "guidance": "how to approach it, and which of the candidate's actual skills/projects to reference"}],
   "behavioralQuestions": [{"question": "a behavioral question", "star": "a concise STAR-format answer drafted from the candidate's real experience"}],
+  "systemDesignQuestions": [{"question": "a system-design / architecture question appropriate to this role's level", "guidance": "the key components, trade-offs, and approach to discuss"}],
   "companyTalkingPoints": ["specific reason this candidate fits this role/company"],
   "questionsToAsk": ["a smart, specific question for the candidate to ask the interviewer"],
   "prepTips": ["a concrete prep action tailored to this role"]
 }
-Provide 5-6 technical questions, 4-5 behavioral questions, and 3-4 items in each list.`,
+Provide 5-6 technical questions, 4-5 behavioral questions, 2-3 system-design questions (scale them to the role's seniority; for junior roles keep them light), and 3-4 items in each list.`,
     "You are an expert technical interview coach. Never fabricate the candidate's experience. Return JSON only.",
     4096,
     "high"
@@ -599,5 +601,71 @@ Give 4-6 prioritized skillGaps and a 4-6 step roadmap.`,
     "You are a candid, practical career advisor for software and tech job seekers. Return JSON only.",
     3000,
     "high"
+  );
+}
+
+// ─── Recruiter Outreach ───────────────────────────────────────────────────────
+export interface RecruiterOutreach {
+  connectionNote: string; // <300 chars, for a LinkedIn connection request
+  message: string;        // longer follow-up / InMail
+  followUp: string;       // short nudge if no reply after ~1 week
+}
+
+export async function claudeRecruiterMessage(
+  profile: { name: string; years: number; skills: string[] },
+  job: { jobTitle: string; companyName: string; description?: string },
+  recruiterName?: string
+): Promise<RecruiterOutreach> {
+  return aiLong<RecruiterOutreach>(
+    `Write recruiter-outreach messages for this candidate about a specific role. Warm, specific, and concise — never generic or desperate. Reference 1-2 real strengths. Do NOT fabricate experience.
+
+CANDIDATE: ${profile.name} | ${profile.years} yrs | strengths: ${profile.skills.slice(0, 8).join(", ")}
+ROLE: ${job.jobTitle} @ ${job.companyName}
+RECRUITER: ${recruiterName || "the recruiter/hiring manager"}
+${job.description ? `JOB (first 800 chars): ${job.description.slice(0, 800)}` : ""}
+
+Return ONLY this JSON:
+{
+  "connectionNote": "a LinkedIn connection request note UNDER 300 characters, friendly and specific",
+  "message": "a 90-130 word message expressing genuine interest, citing 1-2 relevant strengths, and a clear soft ask (a quick chat)",
+  "followUp": "a 2-3 sentence polite follow-up to send if there's no reply after a week"
+}`,
+    "You are an expert at warm, effective professional outreach. Return JSON only.",
+    1200,
+    "low"
+  );
+}
+
+// ─── Email / Application-status classification ────────────────────────────────
+export interface EmailClassification {
+  category: "INTERVIEW" | "ASSESSMENT" | "OFFER" | "REJECTION" | "RECRUITER" | "OTHER";
+  company: string | null;     // best guess at the company the email is about
+  newStatus:
+    | "INTERVIEW_SCHEDULED"
+    | "OFFER_RECEIVED"
+    | "REJECTED"
+    | "CONFIRMED"
+    | null;                    // suggested application status, or null if N/A
+  summary: string;            // one-line summary
+  suggestedReply: string;     // a short, appropriate reply the user can send
+}
+
+export async function claudeClassifyEmail(emailText: string): Promise<EmailClassification> {
+  return ai<EmailClassification>(
+    `Classify this job-related email and extract what matters. Be conservative — if unsure, use OTHER and null status.
+
+EMAIL (first 2500 chars):
+${emailText.slice(0, 2500)}
+
+Return ONLY this JSON:
+{
+  "category": "INTERVIEW|ASSESSMENT|OFFER|REJECTION|RECRUITER|OTHER",
+  "company": "the company name if identifiable, else null",
+  "newStatus": "INTERVIEW_SCHEDULED|OFFER_RECEIVED|REJECTED|CONFIRMED, or null if not applicable",
+  "summary": "one concise sentence describing the email",
+  "suggestedReply": "a short, professional reply the candidate could send (2-4 sentences)"
+}`,
+    "You classify job-application emails accurately and conservatively. Return JSON only.",
+    700
   );
 }
