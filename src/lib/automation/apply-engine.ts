@@ -24,7 +24,7 @@ function resolveResumePath(p?: string | null): string | null {
 // (Phase 1). The engine consumes classifyField/validateValue/decideFill below.
 import { Logger } from "@/lib/logging/logger";
 import { scraperStatus } from "./scraper-status";
-import { detectAts, AtsAdapter } from "./ats-adapters";
+import { detectAts, AtsAdapter, GENERIC_VALIDATION_ERROR_SELECTORS } from "./ats-adapters";
 import {
   classifyField,
   validateValue,
@@ -668,6 +668,9 @@ export class ApplyEngine {
     const ats = detectAts(url);
     if (ats) {
       await Logger.info("APPLY", `Detected ATS: ${ats.label}${ats.notes ? ` — ${ats.notes}` : ""}`);
+      for (const q of ats.quirks || []) {
+        await Logger.info("APPLY", `  ⚙ ${ats.label} quirk: ${q}`);
+      }
     } else {
       await Logger.info("APPLY", "Unknown ATS template — using generic handler");
     }
@@ -755,12 +758,19 @@ export class ApplyEngine {
       // error on a field we couldn't fill). Pause for the human, then resume.
       const sigAfter = await this.pageSignature();
       if (sigAfter === sigBefore) {
-        await Logger.warn("APPLY", `Form did not advance after ${action} — probably a required field I missed.`);
+        // Phase 4: surface the platform's validation errors so the pause is
+        // specific ("Email is invalid") rather than a generic stall message.
+        const errors = await this.detectValidationErrors(ats);
+        if (errors.length) {
+          await Logger.warn("APPLY", `Form did not advance after ${action} — ${ats?.label || "the site"} is showing: ${errors.slice(0, 4).join(" · ")}`);
+        } else {
+          await Logger.warn("APPLY", `Form did not advance after ${action} — probably a required field I missed.`);
+        }
         await this.takeStepScreenshot(application.folderPath, `step-${step}-stuck`);
-        const progressed = await this.pauseForHumanThenCapture(
-          application, scope,
-          "Form didn't advance — please fix/fill the highlighted fields in the browser and I'll continue"
-        );
+        const msg = errors.length
+          ? `The form is showing validation errors — fix these in the browser and I'll continue: ${errors.slice(0, 4).join("; ")}`
+          : "Form didn't advance — please fix/fill the highlighted fields in the browser and I'll continue";
+        const progressed = await this.pauseForHumanThenCapture(application, scope, msg);
         if (!progressed) break;
         continue;
       }
@@ -1030,10 +1040,15 @@ export class ApplyEngine {
       }
       const sigAfter = await this.pageSignature();
       if (sigAfter === sigBefore) {
-        const progressed = await this.pauseForHumanThenCapture(
-          application, scope,
-          "Workday didn't advance — fix the highlighted fields and I'll continue"
-        );
+        const wdAdapter = detectAts(this.page!.url());
+        const errors = await this.detectValidationErrors(wdAdapter);
+        if (errors.length) {
+          await Logger.warn("APPLY", `Workday didn't advance — showing: ${errors.slice(0, 4).join(" · ")}`);
+        }
+        const msg = errors.length
+          ? `Workday is showing validation errors — fix these in the browser and I'll continue: ${errors.slice(0, 4).join("; ")}`
+          : "Workday didn't advance — fix the highlighted fields and I'll continue";
+        const progressed = await this.pauseForHumanThenCapture(application, scope, msg);
         if (!progressed) break;
       }
     }
@@ -1242,6 +1257,39 @@ export class ApplyEngine {
       return `${url}|${info}`;
     } catch {
       return Math.random().toString(); // force "changed" on error
+    }
+  }
+
+  // Phase 4: read any visible validation-error messages so a stuck step can
+  // explain WHY (which field the ATS rejected) instead of a generic message.
+  // Uses the adapter's selectors first, then generic ARIA/class conventions.
+  private async detectValidationErrors(ats?: AtsAdapter | null): Promise<string[]> {
+    const selectors = [...(ats?.validationErrorSelectors || []), ...GENERIC_VALIDATION_ERROR_SELECTORS];
+    try {
+      return await this.page!.evaluate((sels: string[]) => {
+        const out = new Set<string>();
+        for (const sel of sels) {
+          let nodes: Element[];
+          try { nodes = Array.from(document.querySelectorAll(sel)); } catch { continue; }
+          for (const n of nodes) {
+            const el = n as HTMLElement;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) continue;
+            let text = (el.innerText || "").replace(/\s+/g, " ").trim();
+            // aria-invalid inputs carry no text — identify by label/name instead.
+            if (!text) {
+              const inp = el as HTMLInputElement;
+              const lblFor = inp.id ? document.querySelector(`label[for="${CSS.escape(inp.id)}"]`) : null;
+              text = (lblFor?.textContent || inp.name || "").replace(/\s+/g, " ").trim();
+              if (text) text = `“${text}” needs attention`;
+            }
+            if (text && text.length <= 160) out.add(text);
+          }
+        }
+        return [...out].slice(0, 8);
+      }, selectors);
+    } catch {
+      return [];
     }
   }
 
