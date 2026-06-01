@@ -190,6 +190,15 @@ function optionsAreYesNo(options?: string[]): boolean {
   return real.every((o) => /^(yes|no|y|n|true|false)\b/.test(o) || /\b(yes|no)\b/.test(o));
 }
 
+// First category whose pattern hits the given text, or "unknown".
+function matchCategory(text: string): FieldCategory {
+  if (!text) return "unknown";
+  for (const { cat, rx } of CATEGORY_PATTERNS) {
+    if (rx.test(text)) return cat;
+  }
+  return "unknown";
+}
+
 // Classify a field from all the context we have.
 export function classifyField(ctx: FieldContext): Classification {
   const domKind = domKindOf(ctx.type);
@@ -201,15 +210,18 @@ export function classifyField(ctx: FieldContext): Classification {
     return { category: cat, domKind, isYesNo: false };
   }
 
-  // Build the haystack from every text signal available.
-  const signals = [ctx.label, ctx.name, ctx.placeholder, ctx.ariaLabel, ctx.sectionHeading]
+  // Pass 1: the field's OWN text (label + name + placeholder + aria-label).
+  // A clear label must win, so the section heading is NOT mixed in here.
+  const primary = [ctx.label, ctx.name, ctx.placeholder, ctx.ariaLabel]
     .map(norm)
     .filter(Boolean)
     .join(" • ");
+  let category = matchCategory(primary);
 
-  let category: FieldCategory = "unknown";
-  for (const { cat, rx } of CATEGORY_PATTERNS) {
-    if (rx.test(signals)) { category = cat; break; }
+  // Pass 2: only when the field's own text was inconclusive, let the nearest
+  // section heading disambiguate (e.g. a bare "Status" under an "EEO" heading).
+  if (category === "unknown" && ctx.sectionHeading) {
+    category = matchCategory(norm(ctx.sectionHeading));
   }
 
   // A textarea with no specific category is almost always an essay.
