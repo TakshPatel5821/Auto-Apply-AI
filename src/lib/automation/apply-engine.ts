@@ -733,9 +733,27 @@ export class ApplyEngine {
 
       // Prefer a real final-submit button; otherwise advance to the next step.
       let action: "submit" | "advance" | null = null;
-      if (await this.clickFinalSubmit(ats)) {
-        action = "submit";
-      } else if (await this.clickAdvance(ats)) {
+
+      // Phase 8: if a final-submit button is present, REVIEW before sending.
+      // A blocking issue pauses for the human instead of submitting; we only
+      // fall through to "advance" when there's no submit button at all.
+      if (await this.isFinalSubmitPresent(ats)) {
+        const issues = await this.preSubmitReview(application, scope, ats);
+        if (issues.length > 0) {
+          await Logger.warn("APPLY", `⛔ Pre-submit review held back submission — ${issues.length} issue(s): ${issues.slice(0, 5).join(" · ")}`);
+          await this.takeStepScreenshot(application.folderPath, `step-${step}-presubmit-blocked`);
+          const progressed = await this.pauseForHumanThenCapture(
+            application, scope,
+            `Before submitting I found issues — fix these in the browser and I'll continue: ${issues.slice(0, 5).join("; ")}`
+          );
+          if (!progressed) break;
+          continue; // re-scan after the human fixes them
+        }
+        await Logger.success("APPLY", "✓ Pre-submit review passed — submitting");
+        if (await this.clickFinalSubmit(ats)) action = "submit";
+      }
+
+      if (!action && await this.clickAdvance(ats)) {
         action = "advance";
       }
 
@@ -1027,8 +1045,22 @@ export class ApplyEngine {
 
       const sigBefore = await this.pageSignature();
       let action: "submit" | "advance" | null = null;
-      if (await this.clickFinalSubmit()) action = "submit";
-      else if (await this.clickAdvance()) action = "advance";
+      const wdAts = detectAts(this.page!.url());
+      // Phase 8: review before any Workday final submit.
+      if (await this.isFinalSubmitPresent(wdAts)) {
+        const issues = await this.preSubmitReview(application, scope, wdAts);
+        if (issues.length > 0) {
+          await Logger.warn("APPLY", `⛔ Pre-submit review held back Workday submission — ${issues.length} issue(s): ${issues.slice(0, 5).join(" · ")}`);
+          const progressed = await this.pauseForHumanThenCapture(
+            application, scope,
+            `Before submitting I found issues — fix these in the browser and I'll continue: ${issues.slice(0, 5).join("; ")}`
+          );
+          if (!progressed) break;
+          continue;
+        }
+        if (await this.clickFinalSubmit()) action = "submit";
+      }
+      if (!action && await this.clickAdvance()) action = "advance";
 
       if (!action) {
         const progressed = await this.pauseForHumanThenCapture(
@@ -1071,8 +1103,10 @@ export class ApplyEngine {
   // Click a genuine FINAL submit button (the one that completes the whole
   // application). Kept deliberately narrow so we don't mistake a step's "Next"
   // for the real submit. Returns true only if such a button was found+clicked.
-  private async clickFinalSubmit(ats?: AtsAdapter | null): Promise<boolean> {
-    const candidates = [
+  // The selectors that identify a genuine FINAL submit button (shared by the
+  // clicker and the pre-submit probe).
+  private finalSubmitCandidates(ats?: AtsAdapter | null): string[] {
+    return [
       ...(ats?.submitButtons || []),
       'button[aria-label="Submit application"]',
       'button:has-text("Submit application")',
@@ -1090,7 +1124,20 @@ export class ApplyEngine {
       'button:has-text("Send")',
       'input[type="submit"][value*="submit" i]',
     ];
-    const clicked = await this.clickFirstVisible(candidates, "Submit");
+  }
+
+  // Is a final-submit button visible right now (without clicking it)? Used to
+  // decide whether to run the Phase 8 pre-submit review this step.
+  private async isFinalSubmitPresent(ats?: AtsAdapter | null): Promise<boolean> {
+    for (const sel of this.finalSubmitCandidates(ats)) {
+      const el = await this.page!.$(sel).catch(() => null);
+      if (el && await el.isVisible().catch(() => false)) return true;
+    }
+    return false;
+  }
+
+  private async clickFinalSubmit(ats?: AtsAdapter | null): Promise<boolean> {
+    const clicked = await this.clickFirstVisible(this.finalSubmitCandidates(ats), "Submit");
     // Mark that a real final-submit happened — gates success detection so we
     // never declare success on a job page we merely navigated to.
     if (clicked) this.submitClicked = true;
@@ -1297,6 +1344,100 @@ export class ApplyEngine {
     } catch {
       return [];
     }
+  }
+
+  // Phase 8: pre-submit verification. Scans every filled field one last time and
+  // returns a list of human-readable issues. A non-empty list MUST block the
+  // final submit — we pause for the human instead of sending a bad application.
+  private async preSubmitReview(
+    application: NonNullable<ApplicationWithRelations>,
+    scope: string,
+    ats?: AtsAdapter | null
+  ): Promise<string[]> {
+    const issues: string[] = [];
+
+    // 1) Validation errors already visible on the page.
+    for (const e of (await this.detectValidationErrors(ats)).slice(0, 4)) {
+      issues.push(`form error: ${e}`);
+    }
+
+    // 2) Per-field scan.
+    const fields = await this.detectFields(scope);
+    const valueToLabels = new Map<string, string[]>();
+    for (const f of fields) {
+      if (/^field_\d+$/i.test(f.label)) continue;
+      let value = "";
+      try {
+        if (f.type === "checkbox" || f.type === "radio") {
+          // Required single checkbox unchecked is caught below; skip value read.
+          value = "";
+        } else if (f.type === "select") {
+          value = await this.page!.$eval(f.selector, (el) => {
+            const s = el as HTMLSelectElement;
+            return s.options[s.selectedIndex]?.text?.trim() || "";
+          }).catch(() => "");
+        } else {
+          value = (await this.page!.inputValue(f.selector).catch(() => "")) || "";
+        }
+      } catch { /* ignore unreadable field */ }
+      value = value.trim();
+
+      const cls = classifyField({
+        label: f.label, type: f.type, name: f.name,
+        placeholder: f.placeholder, ariaLabel: f.ariaLabel,
+        sectionHeading: f.sectionHeading, options: f.options, required: f.required,
+      });
+
+      // Required but empty (text/select only — checkboxes handled separately).
+      if (f.required && !value && f.type !== "checkbox" && f.type !== "radio") {
+        issues.push(`required field empty: "${f.label.slice(0, 40)}"`);
+        continue;
+      }
+      // Dropdown left on its placeholder.
+      if (f.type === "select" && value && /^(select|choose|--|please|none)\b/i.test(value.toLowerCase())) {
+        issues.push(`dropdown not chosen: "${f.label.slice(0, 40)}"`);
+      }
+      // A value that doesn't fit the field (email in name box, prose in yes/no…).
+      if (value && f.type !== "checkbox" && f.type !== "radio") {
+        const v = validateValue(cls, value, f.options);
+        if (!v.ok) issues.push(`"${f.label.slice(0, 40)}": ${v.reason}`);
+      }
+      // Sensitive/legal field that somehow got a value with no profile backing.
+      if (value && isSensitive(cls.category)) {
+        const res = resolveField(f.label, this.profile);
+        if (!res?.field?.value?.trim()) {
+          issues.push(`sensitive field filled without a profile value: "${f.label.slice(0, 40)}"`);
+        }
+      }
+      // Collect non-trivial values to detect the same answer repeated everywhere.
+      if (value && value.length > 3 && f.type !== "checkbox" && f.type !== "radio") {
+        const k = value.toLowerCase();
+        (valueToLabels.get(k) ?? valueToLabels.set(k, []).get(k)!).push(f.label);
+      }
+    }
+
+    // 3) Same value pasted into many unrelated fields (classic contamination).
+    for (const [, labels] of valueToLabels) {
+      if (labels.length >= 3) {
+        issues.push(`same value in ${labels.length} fields (${labels.slice(0, 3).map((l) => l.slice(0, 20)).join(", ")})`);
+        break;
+      }
+    }
+
+    // 4) Résumé expected but no file attached to any native file input.
+    if (resolveResumePath(application.tailoredResume?.pdfPath)) {
+      const fileMissing = await this.page!.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll('input[type="file"]')) as HTMLInputElement[];
+        const resumeInputs = inputs.filter((i) =>
+          /resume|cv|curriculum/i.test((i.name || "") + (i.id || "") + (i.getAttribute("aria-label") || ""))
+        );
+        if (resumeInputs.length === 0) return false; // no obvious resume input → can't tell, don't flag
+        return resumeInputs.every((i) => !i.files || i.files.length === 0);
+      }).catch(() => false);
+      if (fileMissing) issues.push("résumé file doesn't appear to be attached");
+    }
+
+    return issues;
   }
 
   // Strict success detection. Declaring success wrongly is worse than missing it
