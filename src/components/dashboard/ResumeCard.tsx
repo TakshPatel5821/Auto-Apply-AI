@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Pencil, Save, X, Loader2 } from "lucide-react";
+import { Pencil, Save, X, Loader2, Trash2 } from "lucide-react";
 
 interface ResumeCardData {
   id: string;
@@ -16,6 +16,7 @@ interface ResumeCardData {
 export function ResumeCard({ resume, onSaved }: { resume: ResumeCardData; onSaved: () => void }) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
 
   const [summary, setSummary] = useState(resume.summary || "");
@@ -54,6 +55,26 @@ export function ResumeCard({ resume, onSaved }: { resume: ResumeCardData; onSave
     }
   }
 
+  async function remove() {
+    if (!confirm(`Delete "${resume.fileName}"? This removes the resume and its tailored versions. This cannot be undone.`)) {
+      return;
+    }
+    setDeleting(true);
+    setError("");
+    const res = await fetch("/api/resume/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: resume.id }),
+    });
+    setDeleting(false);
+    if (res.ok) {
+      onSaved();
+    } else {
+      const d = await res.json().catch(() => ({}));
+      setError(d.error || "Delete failed");
+    }
+  }
+
   return (
     <div className="card-glass p-5">
       <div className="flex items-start justify-between mb-4">
@@ -69,13 +90,23 @@ export function ResumeCard({ resume, onSaved }: { resume: ResumeCardData; onSave
             {resume._count?.tailoredVersions || 0} tailored versions
           </div>
           {!editing ? (
-            <button
-              onClick={() => setEditing(true)}
-              className="flex items-center gap-1 px-2 py-1 text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 rounded-lg transition-colors"
-              title="Edit summary, skills, and experience"
-            >
-              <Pencil className="w-3.5 h-3.5" /> Edit
-            </button>
+            <>
+              <button
+                onClick={() => setEditing(true)}
+                className="flex items-center gap-1 px-2 py-1 text-xs bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 rounded-lg transition-colors"
+                title="Edit summary, skills, and experience"
+              >
+                <Pencil className="w-3.5 h-3.5" /> Edit
+              </button>
+              <button
+                onClick={remove}
+                disabled={deleting}
+                className="flex items-center gap-1 px-2 py-1 text-xs bg-red-600/80 hover:bg-red-600 disabled:opacity-50 text-white rounded-lg transition-colors"
+                title="Delete this resume"
+              >
+                {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />} Delete
+              </button>
+            </>
           ) : (
             <div className="flex items-center gap-1">
               <button

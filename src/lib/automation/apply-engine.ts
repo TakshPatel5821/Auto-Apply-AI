@@ -2249,6 +2249,16 @@ export class ApplyEngine {
   private shortcutFromResume(label: string, resumeData: Record<string, unknown>): string | null {
     const l = label.toLowerCase();
     const contact = (resumeData.contactInfo as Record<string, string>) || {};
+    const experience = Array.isArray(resumeData.experience)
+      ? (resumeData.experience as Record<string, unknown>[])
+      : [];
+    const latestExperience =
+      experience.find((e) => e?.current === true || /present|current/i.test(String(e?.endDate || ""))) ||
+      experience[0];
+    const expValue = (key: string): string | null => {
+      const v = latestExperience?.[key];
+      return typeof v === "string" && v.trim() ? v.trim() : null;
+    };
 
     if (l.match(/first.?name/)) return (contact.name || "").split(" ")[0] || null;
     if (l.match(/last.?name|surname|family.?name/)) {
@@ -2261,6 +2271,10 @@ export class ApplyEngine {
     if (l.includes("linkedin")) return contact.linkedin || null;
     if (l.includes("github")) return contact.github || null;
     if (l.includes("portfolio") || l.includes("website")) return contact.portfolio || null;
+    if (l.match(/^(job\s*)?title\b|position\b|role\b/)) return expValue("title");
+    if (l.match(/\b(company|employer|organization)\b/)) return expValue("company");
+    if (l.match(/\b(from|start)\s*date\b/)) return expValue("startDate");
+    if (l.match(/\b(to|end)\s*date\b/)) return expValue("endDate") || "Present";
     if (l.includes("city") || l.includes("location") || l.includes("address")) return contact.location || null;
     return null;
   }
