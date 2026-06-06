@@ -35,10 +35,10 @@ export function buildResumeLatex(summary: string): string {
 \\usepackage[T1]{fontenc}
 \\pagestyle{empty}
 \\setlength{\\parindent}{0pt}
-\\setlength{\\parskip}{0pt}
+\\setlength{\\parskip}{0.9pt}
 \\titleformat{\\section}{\\normalsize\\bfseries\\raggedright}{}{0em}{}[\\vspace{0.5pt}\\hrule\\vspace{2.5pt}]
-\\titlespacing*{\\section}{0pt}{6pt}{3pt}
-\\setlist[itemize]{leftmargin=1.3em,topsep=0.5pt,itemsep=0.5pt,parsep=0pt,partopsep=0pt}
+\\titlespacing*{\\section}{0pt}{5.5pt}{2.5pt}
+\\setlist[itemize]{leftmargin=1.3em,topsep=1.2pt,itemsep=1pt,parsep=0pt,partopsep=0pt}
 \\begin{document}
 
 % HEADER
@@ -46,7 +46,7 @@ export function buildResumeLatex(summary: string): string {
 {\\Large\\bfseries Patel Takshkumar Girishbhai}\\\\[2pt]
 {\\small +1~(214)-883-2966 ~|~ \\href{mailto:takshpatel051102@gmail.com}{takshpatel051102@gmail.com} ~|~ Arlington, TX ~|~ \\href{https://github.com/TakshPatel5821}{github.com/TakshPatel5821}}\\\\
 \\par}
-\\vspace{3pt}
+\\vspace{4pt}
 
 % SUMMARY
 \\section*{Professional Summary}
@@ -68,7 +68,7 @@ ${safeSummary}
   \\item Developed Python/SQL backend pipelines and Tableau/Excel dashboards for live sensor data visualization and remote monitoring.
   \\item Applied TCP/IP networking, Wireshark traffic analysis, and secure communication protocols on Linux/UNIX for reliable system operation.
 \\end{itemize}
-\\vspace{2pt}
+\\vspace{2.5pt}
 \\textbf{Shubhkey Infotech}, Ahmedabad, India \\hfill Jan 2024 -- Apr 2024\\\\
 \\textit{Website Developer Intern}
 \\begin{itemize}
@@ -83,17 +83,17 @@ ${safeSummary}
 \\begin{itemize}
   \\item Built a real-time face detection and recognition system using Python and computer vision for security and attendance applications; implemented image processing pipelines for feature extraction and identity matching.
 \\end{itemize}
-\\vspace{2pt}
+\\vspace{2.5pt}
 \\textbf{Advanced Voice Assistant} $|$ \\textit{Python, NLP, Speech APIs}
 \\begin{itemize}
   \\item Developed an AI-powered voice assistant with speech recognition and text-to-speech APIs supporting natural language commands with low-latency real-time response.
 \\end{itemize}
-\\vspace{2pt}
+\\vspace{2.5pt}
 \\textbf{OurHappyTrip} $|$ \\textit{PHP, MySQL (Independently Built)}
 \\begin{itemize}
   \\item Independently designed and launched a full-stack car booking platform with role-based authentication, owning the full lifecycle from database schema design to deployment.
 \\end{itemize}
-\\vspace{2pt}
+\\vspace{2.5pt}
 \\textbf{Live Weather App} $|$ \\textit{HTML, JavaScript -- github.com/TakshPatel5821}
 \\begin{itemize}
   \\item Responsive weather app fetching real-time API data to display temperature, humidity, and forecasts based on user location.
