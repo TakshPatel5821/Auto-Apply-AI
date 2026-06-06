@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { writeFileSync, existsSync } from "fs";
+import { writeFileSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { Logger } from "@/lib/logging/logger";
@@ -58,6 +58,18 @@ export async function compileLatexToPDF(
     // The tail of stderr carries the actual LaTeX error — surface it for debugging.
     const detail = (err.stderr || err.message || String(e)).toString().trim().slice(-600);
     await Logger.error("PDF", `LaTeX compile failed: ${detail}`);
+    return null;
+  }
+}
+
+// Read the page count from Tectonic's kept log (the XeTeX line
+// "Output written on <file>.xdv (N page(s), …)"). Returns null if unknown.
+export function pdfPageCount(outputDir: string, baseName = "tailored_resume"): number | null {
+  try {
+    const log = readFileSync(join(outputDir, `${baseName}.log`), "utf-8");
+    const m = log.match(/Output written on [^\n(]*\((\d+)\s+pages?/i);
+    return m ? parseInt(m[1], 10) : null;
+  } catch {
     return null;
   }
 }

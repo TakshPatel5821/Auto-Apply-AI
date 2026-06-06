@@ -1,9 +1,9 @@
 import { prisma } from "@/lib/db/prisma";
-import { claudeFullTailor, checkTailorAlignment, detectHallucinations } from "@/lib/ai/claude";
+import { claudeFullTailor, checkTailorAlignment, detectHallucinations, claudeTailorResumeContent, type ResumeContentTailor } from "@/lib/ai/claude";
 import { getApplicationFolder, saveApplicationFiles } from "@/lib/storage/file-manager";
 import { Logger } from "@/lib/logging/logger";
-import { compileLatexToPDF } from "./latex-compiler";
-import { buildResumeLatex, BASE_SUMMARY } from "./resume-template";
+import { compileLatexToPDF, pdfPageCount } from "./latex-compiler";
+import { buildResumeLatex, BASE_SUMMARY, RESUME_EXPERIENCE, RESUME_PROJECTS, RESUME_SKILLS, type ResumeEntry, type ResumeOverrides } from "./resume-template";
 import { loadProfile } from "@/lib/profile/profile-store";
 
 // Save .tex only and skip the local PDF compile (e.g. on a machine without the
@@ -82,6 +82,26 @@ export async function tailorResumeForJob(
     await Logger.warn("TAILOR", `Quality gate skipped (non-fatal): ${e}`);
   }
 
+  // Step 2c: reorder skills + reword bullets to mirror the JD — validated
+  // (skills must be a permutation; bullets truth-checked) so nothing is invented.
+  // The 1-page guarantee is enforced after compiling (Step 4).
+  let overrides: ResumeOverrides = {};
+  try {
+    const content = await claudeTailorResumeContent(job.description, job.jobTitle, job.companyName);
+    overrides = buildSafeOverrides(content, parsed, job.description, job.companyName);
+    const parts = [
+      overrides.skills ? "skills reordered" : null,
+      overrides.experienceBullets ? "experience reworded" : null,
+      overrides.projectBullets ? "projects reworded" : null,
+    ].filter(Boolean);
+    await Logger.info("TAILOR", parts.length ? `Résumé content tailored: ${parts.join(", ")}` : "Résumé content kept canonical (overrides failed validation)");
+  } catch (e) {
+    await Logger.warn("TAILOR", `Résumé content tailoring skipped (non-fatal): ${e}`);
+  }
+  // The résumé LaTeX actually used everywhere (tex file, PDF, DB). Built from the
+  // tailored summary + validated overrides; may revert to canonical in Step 4.
+  let finalLatex = buildResumeLatex(tailored.tailoredSummary, overrides);
+
   const aiSeconds = ((Date.now() - aiStart) / 1000).toFixed(1);
   await Logger.info("TAILOR", `AI step done in ${aiSeconds}s (ATS score: ${tailored.atsScore}/10)`);
 
@@ -93,7 +113,7 @@ export async function tailorResumeForJob(
   const resumeContact = (resume.parsedData as { contactInfo?: CoverContact })?.contactInfo || {};
   const contactInfo = await mergeProfileContact(resumeContact);
   const paths = saveApplicationFiles(folderPath, {
-    resumeTex: tailored.tailoredLatex,
+    resumeTex: finalLatex,
     coverLetterTex: generateCoverLetterTex(
       tailored.coverLetter,
       job.companyName,
@@ -122,10 +142,20 @@ export async function tailorResumeForJob(
   if (SKIP_PDF) {
     await Logger.info("TAILOR", "SKIP_PDF=true — saved .tex only, no PDF compiled");
   } else {
-    pdfPath = await compileLatexToPDF(tailored.tailoredLatex, folderPath, "resume").catch((e) => {
+    pdfPath = await compileLatexToPDF(finalLatex, folderPath, "resume").catch((e) => {
       Logger.warn("TAILOR", `PDF compilation error: ${e}`);
       return null;
     });
+    // 1-page guarantee: if the reworded bullets pushed it to 2 pages, revert to
+    // the canonical résumé content (summary still tailored) and recompile.
+    if (pdfPath) {
+      const pages = pdfPageCount(folderPath, "resume");
+      if (pages && pages > 1) {
+        await Logger.warn("TAILOR", `Tailored résumé spilled to ${pages} pages — reverting to canonical one-page content`);
+        finalLatex = buildResumeLatex(tailored.tailoredSummary);
+        pdfPath = await compileLatexToPDF(finalLatex, folderPath, "resume").catch(() => null);
+      }
+    }
     // Compile the cover letter too, so apply can upload it when a job requires
     // a cover-letter file (not just a paste-in text box). Named cover_letter.pdf.
     if (paths.coverLetterTex) {
@@ -150,7 +180,7 @@ export async function tailorResumeForJob(
     data: {
       resumeId,
       jobId,
-      latexContent: tailored.tailoredLatex,
+      latexContent: finalLatex,
       texPath: paths.resumeTex || null,
       pdfPath,
       atsScore: tailored.atsScore,
@@ -288,6 +318,67 @@ export function validateCoverLetter(
   }
 
   return { valid: issues.length === 0, issues };
+}
+
+// True if `cand` is a reordering of `orig` (same multiset of items) — used to
+// guarantee skill reordering never ADDS or DROPS a skill.
+export function isPermutation(cand: string[], orig: string[]): boolean {
+  if (!Array.isArray(cand) || cand.length !== orig.length) return false;
+  const norm = (s: string) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  const a = cand.map(norm).sort();
+  const b = orig.map(norm).sort();
+  return a.every((x, i) => x === b[i]);
+}
+
+// Turn the AI's reorder/reword output into SAFE résumé overrides:
+//   • skills: accepted per-group only if it's a true permutation (no invented skills)
+//   • bullets: accepted only if same count AND no fabricated metric/tech vs the
+//     candidate's real résumé corpus (reuses the hallucination guard); otherwise
+//     that section keeps its canonical bullets.
+export function buildSafeOverrides(
+  content: ResumeContentTailor,
+  parsed: Record<string, unknown>,
+  jobDescription: string,
+  company: string
+): ResumeOverrides {
+  const out: ResumeOverrides = {};
+
+  // Allowed corpus = real parsed résumé + the canonical template content.
+  const canonText = [
+    RESUME_EXPERIENCE.flatMap((e) => e.bullets).join(" \n "),
+    RESUME_PROJECTS.flatMap((p) => p.bullets).join(" \n "),
+    RESUME_SKILLS.flatMap((g) => g.items).join(", "),
+  ].join(" \n ");
+  const canonSkills = RESUME_SKILLS.flatMap((g) => g.items);
+  const parsedSkills = Array.isArray(parsed.skills) ? (parsed.skills as unknown[]).map(String) : [];
+  const mergedForCheck: Record<string, unknown> = {
+    rawText: `${typeof parsed.rawText === "string" ? parsed.rawText : ""} \n ${canonText}`,
+    skills: [...parsedSkills, ...canonSkills],
+    technologies: parsed.technologies,
+  };
+
+  if (content.reorderedSkills?.length === RESUME_SKILLS.length) {
+    out.skills = RESUME_SKILLS.map((g, i) =>
+      isPermutation(content.reorderedSkills[i] || [], g.items) ? content.reorderedSkills[i] : g.items
+    );
+  }
+
+  const checkBullets = (cand: string[][], canon: ResumeEntry[]): string[][] | null => {
+    if (!Array.isArray(cand) || cand.length !== canon.length) return null;
+    for (let i = 0; i < canon.length; i++) {
+      const c = cand[i];
+      if (!Array.isArray(c) || c.length !== canon[i].bullets.length || c.some((b) => !b || !b.trim())) return null;
+      if (detectHallucinations(c.join("\n"), mergedForCheck, jobDescription, company).length) return null;
+    }
+    return cand;
+  };
+
+  const exp = checkBullets(content.experienceBullets || [], RESUME_EXPERIENCE);
+  if (exp) out.experienceBullets = exp;
+  const proj = checkBullets(content.projectBullets || [], RESUME_PROJECTS);
+  if (proj) out.projectBullets = proj;
+
+  return out;
 }
 
 // Escape text for LaTeX. Backslash first, then the special characters.
