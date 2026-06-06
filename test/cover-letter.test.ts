@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { stripGreetingClosing, validateCoverLetter } from "@/lib/automation/resume-tailor";
+import { detectHallucinations, buildAllowlist } from "@/lib/ai/claude";
 
 describe("stripGreetingClosing", () => {
   it("removes a leading 'Dear ...' greeting", () => {
@@ -66,5 +67,67 @@ describe("validateCoverLetter", () => {
     const noKw = good.replace(/Python|APIs|infrastructure|debugging|Debugging/g, "things");
     const r = validateCoverLetter(noKw, company, role, keywords);
     expect(r.issues.join(" ")).toMatch(/key terms/i);
+  });
+});
+
+describe("detectHallucinations", () => {
+  // A realistic parsed résumé for the candidate.
+  const resume = {
+    rawText: "Patel Takshkumar. Python, PHP, MySQL, IoT, Azure AZ-900, Linux.",
+    summary: "Software engineer with Python data pipelines and full-stack web experience.",
+    skills: ["Python", "PHP", "JavaScript", "SQL"],
+    technologies: ["MySQL", "Azure", "Linux", "Wireshark"],
+    experience: [
+      { company: "Brainy Bean Info Tech", title: "Software Developer Intern", bullets: ["Built Python IoT pipelines"] },
+      { company: "Shubhkey Infotech", title: "Website Developer Intern", bullets: ["PHP/MySQL backend"] },
+    ],
+    projects: [{ name: "Face Recognition Bot", bullets: ["OpenCV"] }],
+    education: [{ institution: "UT Arlington", degree: "M.S.", field: "Software Engineering" }],
+  };
+  const jd = "Senior Software Engineer at CVS Health. Work with Python, REST APIs, and cloud.";
+
+  it("allowlist captures real employers + skills", () => {
+    const a = buildAllowlist(resume);
+    expect(a.companies).toContain("Brainy Bean Info Tech");
+    expect(a.skills.map((s) => s.toLowerCase())).toContain("python");
+  });
+
+  it("flags a fabricated employer (XYZ Corp)", () => {
+    const issues = detectHallucinations("In my current role at XYZ Corp, I built systems.", resume, jd, "CVS Health");
+    expect(issues.join(" ")).toMatch(/XYZ Corp/i);
+  });
+
+  it("does NOT flag the target company or a real employer", () => {
+    const issues = detectHallucinations(
+      "During my time at Brainy Bean Info Tech I built pipelines, and I want to bring that to CVS Health.",
+      resume, jd, "CVS Health"
+    );
+    expect(issues.filter((i) => /employer/i.test(i))).toEqual([]);
+  });
+
+  it("flags fabricated metrics (percentages not in résumé)", () => {
+    const issues = detectHallucinations("I improved efficiency by 30% and reduced MTTR by 25%.", resume, jd, "CVS Health");
+    expect(issues.join(" ")).toMatch(/30%/);
+    expect(issues.join(" ")).toMatch(/25%/);
+  });
+
+  it("flags invented technologies not in résumé or JD (RPG, Angular)", () => {
+    const issues = detectHallucinations("Experienced in RPG, IBM i, and Angular development.", resume, jd, "CVS Health");
+    const j = issues.join(" ");
+    expect(j).toMatch(/rpg/i);
+    expect(j).toMatch(/angular/i);
+  });
+
+  it("does NOT flag technologies that ARE in the résumé or JD", () => {
+    const issues = detectHallucinations("I use Python and MySQL, and I'm keen on REST APIs.", resume, jd, "CVS Health");
+    expect(issues.filter((i) => /technology/i.test(i))).toEqual([]);
+  });
+
+  it("clean, accurate letter yields no issues", () => {
+    const issues = detectHallucinations(
+      "At Brainy Bean Info Tech I built Python data pipelines and PHP/MySQL backends, and I'd love to bring that to CVS Health.",
+      resume, jd, "CVS Health"
+    );
+    expect(issues).toEqual([]);
   });
 });
