@@ -1,6 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { ollamaCompleteJSON, ollamaComplete } from "./ollama";
-import { buildResumeLatex } from "@/lib/automation/resume-template";
+import { buildResumeLatex, RESUME_EXPERIENCE, RESUME_PROJECTS, RESUME_SKILLS } from "@/lib/automation/resume-template";
 
 // Provider selection. AI_PROVIDER ∈ "ollama" | "bedrock" | "anthropic".
 // Falls back to ollama when no usable API key is present (local dev default).
@@ -733,6 +733,72 @@ export function detectHallucinations(
   }
 
   return [...new Set(issues)];
+}
+
+// ─── Résumé content tailoring: reorder skills + REWORD bullets ────────────────
+// Operates on the canonical template content (the real, hand-tuned résumé). The
+// model may only REORDER skills (same items) and REWORD bullets to mirror the
+// posting — never add facts/metrics/tools/employers. Output is validated +
+// truth-checked + 1-page-enforced by the caller before it's used.
+export interface ResumeContentTailor {
+  reorderedSkills: string[][];   // per skill group, same items reordered
+  experienceBullets: string[][]; // per experience entry, same count, reworded
+  projectBullets: string[][];    // per project entry, reworded
+}
+
+export async function claudeTailorResumeContent(
+  jobDescription: string,
+  jobTitle: string,
+  companyName: string
+): Promise<ResumeContentTailor> {
+  const expBlock = RESUME_EXPERIENCE
+    .map((e, i) => `[${i}]\n${e.bullets.map((b) => `- ${b}`).join("\n")}`)
+    .join("\n");
+  const projBlock = RESUME_PROJECTS
+    .map((p, i) => `[${i}] ${p.heading.replace(/\\textbf\{|\}|\\textit\{|\$\|\$/g, "").trim()}\n${p.bullets.map((b) => `- ${b}`).join("\n")}`)
+    .join("\n");
+  const skillBlock = RESUME_SKILLS
+    .map((g, i) => `[${i}] ${g.label}: ${g.items.join(", ")}`)
+    .join("\n");
+
+  const system =
+    "You REWORD and REORDER an existing résumé to mirror a job posting. You MUST NOT add, remove, or invent any fact, metric, number, employer, technology, or skill. " +
+    "Every reworded bullet must remain fully supported by the original bullet — only the wording changes to echo the posting's terminology. " +
+    "For each experience/project entry return the SAME number of bullets (reworded). For each skill group return the SAME items, only reordered so the posting's most relevant come first (never add or drop an item). Return ONLY JSON.";
+
+  const prompt = `TARGET ROLE: ${jobTitle} @ ${companyName}
+JOB POSTING (excerpt):
+${(jobDescription || "").slice(0, 2000)}
+
+EXPERIENCE BULLETS (reword each; same count; no new facts/metrics/tools):
+${expBlock}
+
+PROJECT BULLETS (reword each; same count; no new facts/metrics/tools):
+${projBlock}
+
+SKILL GROUPS (reorder items within each group; SAME items, none added/removed):
+${skillBlock}
+
+Return ONLY this JSON (arrays in the same order/length as above):
+{
+  "experienceBullets": [["reworded bullet", "..."], ["..."]],
+  "projectBullets": [["..."], ["..."], ["..."], ["..."]],
+  "reorderedSkills": [["..."], ["..."], ["..."], ["..."], ["..."]]
+}`;
+
+  try {
+    const raw = (await ai(prompt, system, 2000, "low")) as Record<string, unknown>;
+    const mat = (v: unknown): string[][] =>
+      Array.isArray(v) ? v.map((row) => asStringArray(row)) : [];
+    return {
+      reorderedSkills: mat(raw.reorderedSkills),
+      experienceBullets: mat(raw.experienceBullets),
+      projectBullets: mat(raw.projectBullets),
+    };
+  } catch {
+    // Any failure → no overrides; the caller keeps the canonical résumé.
+    return { reorderedSkills: [], experienceBullets: [], projectBullets: [] };
+  }
 }
 
 // ─── Generate LaTeX from scratch ──────────────────────────────────────────────
