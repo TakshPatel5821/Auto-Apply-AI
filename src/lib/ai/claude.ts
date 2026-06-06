@@ -467,11 +467,21 @@ STRICT RULES:
 - NEVER fabricate experience, education, skills, or accomplishments. Only emphasize what the candidate already has.
 - The summary and the cover letter MUST be consistent with EACH OTHER and with the candidate's real background.
 - PROFESSIONAL SUMMARY: plain text (no markdown/LaTeX), 2-3 sentences (~55 words), weaving in the job's most relevant keywords truthfully.
-- COVER LETTER — make it genuinely good, not filler:
-  • Write ONLY the body paragraphs. Do NOT include "Dear ..." or a "Sincerely"/sign-off — those are added automatically. Including them is an error.
-  • 3 paragraphs, ~160-200 words total: (1) a specific hook tied to THIS company/role; (2) 1-2 CONCRETE skills/projects/technologies the candidate actually has that directly match the job's top requirements; (3) a confident close on the value they'd add.
-  • Be specific and truthful — reference the actual role and real candidate strengths. No clichés ("I am writing to apply"), no generic boilerplate, no invented metrics.
-  • coverLetter MUST be a single string (paragraphs separated by \\n\\n).
+- COVER LETTER — specific to THIS job, never generic boilerplate. Write ONLY the
+  body paragraphs (NO "Dear ..." and NO "Sincerely"/sign-off — those are added
+  automatically; including them is an error). 250-450 words, EXACTLY four short
+  paragraphs in this order:
+    1) OPENING — why THIS company and role specifically: reference the company's
+       product / mission / domain and what the role focuses on (from the posting).
+    2) MATCH — 2-3 CONCRETE achievements or projects from the candidate's real
+       background that map directly to the posting's top requirements; weave in
+       the posting's actual key skills/terminology. Include real metrics ONLY if
+       present in the profile — never invent numbers.
+    3) VALUE — what the candidate will concretely deliver in THIS role.
+    4) CLOSING — brief thank-you + interest in an interview.
+  Mention the company name and the role title explicitly. No clichés ("I am
+  writing to apply", "I am a hard worker"), no filler, no placeholders, no
+  fabrication. coverLetter MUST be a single string (paragraphs separated by \\n\\n).
 - Return ONLY a single JSON object — no markdown fences, no prose, no preamble`;
 
   const candidateProfile = `CANDIDATE PROFILE (same for every job this session):
@@ -492,14 +502,17 @@ ${feedbackBlock}
 Do all of the following for this candidate:
 1. Analyze the job → ATS keywords, required skills, technologies, experience level (entry|mid|senior).
 2. Write a tailored PROFESSIONAL SUMMARY (plain text, 2-3 sentences, ~55 words) for THIS role using only the candidate's real skills.
-3. Write the cover letter BODY (paragraphs only — no greeting, no sign-off) for this exact role and company, following the cover-letter rules above.
+3. Write the cover letter BODY (paragraphs only — no greeting, no sign-off),
+   250-450 words in the four-paragraph OPENING/MATCH/VALUE/CLOSING structure from
+   the rules above, grounded in the posting's requirements + the candidate's real
+   achievements, and naturally including the posting's key skills/terminology.
 4. Score the resume's ATS match for this job (1 = perfect, 10 = poor).
 
 Return ONLY this JSON object (no markdown fences):
 {
   "jobAnalysis": {"atsKeywords":["..."],"requiredSkills":["..."],"technologies":["..."],"experienceLevel":"entry|mid|senior"},
   "tailoredSummary": "2-3 sentence plain-text summary",
-  "coverLetter": "[paragraph 1]\\n\\n[paragraph 2]\\n\\n[paragraph 3]",
+  "coverLetter": "[OPENING]\\n\\n[MATCH]\\n\\n[VALUE]\\n\\n[CLOSING]",
   "atsScore": 5,
   "keywordsAdded": ["..."],
   "tailoringNotes": "what you emphasised"
@@ -521,7 +534,7 @@ Return ONLY this JSON object (no markdown fences):
   const client = await getClient();
   const stream = client.messages.stream({
     model: MODEL,
-    max_tokens: 1600,
+    max_tokens: 2200,
     ...(MODEL_SUPPORTS_EFFORT ? { thinking: { type: "adaptive" as const } } : {}),
     ...effortConfig(TAILOR_EFFORT),
     system: [
