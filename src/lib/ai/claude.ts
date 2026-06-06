@@ -463,6 +463,12 @@ export async function claudeFullTailor(
 
   const systemRules = `You are an expert ATS resume tailor and cover letter writer.
 
+VERIFICATION PROTOCOL — do this BEFORE writing anything:
+1. From the CANDIDATE PROFILE below, extract the exact set of skills, technologies, employers, and experiences the candidate actually has.
+2. Write every sentence using ONLY items from that set.
+3. Self-check each sentence: if it requires a skill, tool, employer, project, or metric NOT in that set, DELETE the whole sentence — do not rephrase or approximate it. (e.g. if "RPG", "IBM i", "team of 5", or "model training" are not in the profile, never write them.)
+4. If the job requires skills the candidate does NOT have, do not invent them — instead acknowledge the candidate's strengths in adjacent / transferable areas and eagerness to learn.
+
 STRICT RULES:
 - NEVER fabricate experience, education, skills, or accomplishments. Only emphasize what the candidate already has.
 - The summary and the cover letter MUST be consistent with EACH OTHER and with the candidate's real background.
