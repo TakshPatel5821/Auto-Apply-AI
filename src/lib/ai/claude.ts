@@ -484,12 +484,21 @@ STRICT RULES:
   fabrication. coverLetter MUST be a single string (paragraphs separated by \\n\\n).
 - Return ONLY a single JSON object — no markdown fences, no prose, no preamble`;
 
+  const allow = buildAllowlist(resumeData);
+  const allowedEmployers = allow.companies.length ? allow.companies.join("; ") : "(none parsed — do NOT name any employer)";
+
   const candidateProfile = `CANDIDATE PROFILE (same for every job this session):
 Name: ${candidateName}
 Skills: ${skills}
 Technologies: ${tech}
 Years of experience: ${yrs}
-Background: M.S. Software Engineering (UT Arlington, May 2026); Python data pipelines & IoT systems; PHP/MySQL & full-stack web development; Azure AZ-900; Linux/UNIX, TCP/IP, Wireshark, security. Only claim skills/experience consistent with this profile.`;
+Background: M.S. Software Engineering (UT Arlington, May 2026); Python data pipelines & IoT systems; PHP/MySQL & full-stack web development; Azure AZ-900; Linux/UNIX, TCP/IP, Wireshark, security.
+
+HARD FACTUAL CONSTRAINTS (anti-hallucination — violating these makes the letter unusable):
+- ONLY these employers may be named: ${allowedEmployers}. Never invent a company, e.g. "XYZ Corp".
+- ONLY claim skills/technologies the candidate actually has (the Skills/Technologies above). Do NOT name other technologies to stuff keywords (e.g. RPG, IBM i, Angular, GCP) unless they are listed.
+- NEVER state a numeric metric or percentage (e.g. "improved efficiency by 30%", "reduced MTTR by 25%") — the candidate's résumé has no such numbers. Describe impact qualitatively instead.
+- Never invent degrees, certifications, job titles, or projects. The ONLY new name allowed is the target company being applied to.`;
 
   const feedbackBlock = feedback && feedback.length
     ? `\n\nThe previous attempt was rejected for these problems — FIX them this time:\n- ${feedback.slice(0, 6).join("\n- ")}\n`
@@ -619,6 +628,111 @@ Return ONLY this JSON: {"score": 0-10, "issues": ["short, concrete problems to f
     // If the check itself fails, don't block the pipeline — treat as aligned.
     return { score: 10, aligned: true, issues: [] };
   }
+}
+
+// ─── Hallucination guard ──────────────────────────────────────────────────────
+// The #1 risk in a generated cover letter is FABRICATION — inventing employers,
+// metrics, technologies, degrees. Recruiters reject for that. We build an
+// allow-list from the candidate's real parsed résumé and then (a) feed it to the
+// model as a hard constraint and (b) verify the output against it, rejecting +
+// regenerating anything that names something off-list.
+
+export interface Allowlist {
+  corpus: string;       // lowercased résumé text — the source of truth
+  companies: string[];  // real employers
+  skills: string[];     // real skills + technologies
+}
+
+export function buildAllowlist(resumeData: Record<string, unknown>): Allowlist {
+  const arr = (k: string): Record<string, unknown>[] =>
+    Array.isArray(resumeData[k]) ? (resumeData[k] as Record<string, unknown>[]) : [];
+  const strArr = (k: string): string[] =>
+    Array.isArray(resumeData[k]) ? (resumeData[k] as unknown[]).map(String).filter(Boolean) : [];
+
+  const exp = arr("experience");
+  const proj = arr("projects");
+  const edu = arr("education");
+  const companies = exp.map((e) => String(e.company || "")).filter(Boolean);
+  const skills = [...strArr("skills"), ...strArr("technologies")].filter(Boolean);
+
+  const parts: string[] = [];
+  if (typeof resumeData.rawText === "string") parts.push(resumeData.rawText);
+  if (typeof resumeData.summary === "string") parts.push(resumeData.summary);
+  for (const e of exp) {
+    parts.push(String(e.company || ""), String(e.title || ""), String(e.description || ""));
+    if (Array.isArray(e.bullets)) parts.push(...(e.bullets as unknown[]).map(String));
+  }
+  for (const p of proj) {
+    parts.push(String(p.name || ""), String(p.description || ""));
+    if (Array.isArray(p.bullets)) parts.push(...(p.bullets as unknown[]).map(String));
+  }
+  for (const e of edu) parts.push(String(e.institution || ""), String(e.degree || ""), String(e.field || ""));
+  parts.push(...skills, ...companies);
+
+  return { corpus: parts.join(" \n ").toLowerCase(), companies, skills };
+}
+
+// Curated technology tokens — only these are checked, to avoid false positives
+// on ordinary words.
+const TECH_TOKENS = [
+  "java", "python", "php", "javascript", "typescript", "c++", "c#", ".net", "golang", "ruby", "rust",
+  "kotlin", "swift", "scala", "perl", "react", "angular", "vue", "svelte", "node", "express", "django",
+  "flask", "spring", "laravel", "rails", "mysql", "postgres", "postgresql", "mongodb", "redis", "oracle",
+  "aws", "azure", "gcp", "google cloud", "kubernetes", "docker", "terraform", "jenkins", "kafka", "spark",
+  "hadoop", "graphql", "grpc", "rpg", "cobol", "ibm i", "as/400", "mainframe", "sas", "tableau", "power bi",
+  "salesforce", "snowflake", "elasticsearch", "rabbitmq",
+];
+
+function tokenRegex(tok: string): RegExp {
+  const esc = tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![a-z0-9#+])${esc}(?![a-z0-9#+])`, "i");
+}
+
+// Returns concrete "remove X" issues for anything the letter states that is not
+// supported by the résumé (or, for technologies, also not in the job posting).
+export function detectHallucinations(
+  letter: string,
+  resumeData: Record<string, unknown>,
+  jobDescription: string,
+  targetCompany: string
+): string[] {
+  const issues: string[] = [];
+  const { corpus, companies } = buildAllowlist(resumeData);
+  const text = letter || "";
+  const lower = text.toLowerCase();
+  const jd = (jobDescription || "").toLowerCase();
+  const corpusNoSpace = corpus.replace(/\s+/g, "");
+
+  // 1) Fabricated metrics: any percentage or N× multiplier not in the résumé.
+  const metrics = text.match(/\b\d{1,3}(?:\.\d+)?\s?%|\b\d+(?:\.\d+)?x\b/gi) || [];
+  for (const m of metrics) {
+    if (!corpusNoSpace.includes(m.replace(/\s+/g, "").toLowerCase())) {
+      issues.push(`remove the fabricated metric "${m.trim()}" — it is not in your résumé`);
+    }
+  }
+
+  // 2) Fabricated employer: an employment phrase naming a company not in the résumé.
+  const allowedCompanies = [...companies.map((c) => c.toLowerCase()), (targetCompany || "").toLowerCase()].filter(Boolean);
+  const empRe =
+    /(?:my (?:current|previous|recent|former)?\s*(?:role|position|job|tenure|time|work)\s+(?:at|with)|currently (?:working )?(?:at|with)|while (?:at|with)|during my time at|in my role at)\s+([A-Z][\w&.\-]*(?:\s+[A-Z][\w&.\-]*){0,3})/g;
+  let m: RegExpExecArray | null;
+  while ((m = empRe.exec(text))) {
+    const org = m[1].trim();
+    const ol = org.toLowerCase();
+    const ok = allowedCompanies.some((c) => c && (ol.includes(c) || c.includes(ol))) || corpus.includes(ol);
+    if (!ok) issues.push(`remove the fabricated employer "${org}" — it is not in your résumé`);
+  }
+
+  // 3) Invented / overstuffed technologies: named in the letter but in NEITHER
+  //    the résumé NOR the job posting.
+  for (const tok of TECH_TOKENS) {
+    const re = tokenRegex(tok);
+    if (re.test(lower) && !re.test(corpus) && !re.test(jd)) {
+      issues.push(`remove the technology "${tok}" — it is not in your résumé or the job posting`);
+    }
+  }
+
+  return [...new Set(issues)];
 }
 
 // ─── Generate LaTeX from scratch ──────────────────────────────────────────────

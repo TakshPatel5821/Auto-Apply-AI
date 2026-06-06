@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/prisma";
-import { claudeFullTailor, checkTailorAlignment } from "@/lib/ai/claude";
+import { claudeFullTailor, checkTailorAlignment, detectHallucinations } from "@/lib/ai/claude";
 import { getApplicationFolder, saveApplicationFiles } from "@/lib/storage/file-manager";
 import { Logger } from "@/lib/logging/logger";
 import { compileLatexToPDF } from "./latex-compiler";
@@ -46,31 +46,37 @@ export async function tailorResumeForJob(
   // either fails, regenerate BOTH once with the issues as feedback, keep the best.
   try {
     const kws1 = tailored.jobAnalysis?.atsKeywords || [];
+    // Three gates: hallucination (highest priority — factual accuracy),
+    // deterministic structure/validation, and AI alignment.
+    const h1 = detectHallucinations(tailored.coverLetter, parsed, job.description, job.companyName);
     const v1 = validateCoverLetter(tailored.coverLetter, job.companyName, job.jobTitle, kws1);
     const a1 = await checkTailorAlignment(
       tailored.tailoredSummary, tailored.coverLetter,
       job.jobTitle, job.companyName, job.description, parsed
     );
-    if (!v1.valid || !a1.aligned) {
-      const feedback = [...v1.issues, ...a1.issues];
-      await Logger.warn("TAILOR", `Quality gate failed (align ${a1.score}/10) — regenerating: ${feedback.slice(0, 5).join("; ")}`);
+    if (h1.length || !v1.valid || !a1.aligned) {
+      const feedback = [...h1, ...v1.issues, ...a1.issues];
+      await Logger.warn("TAILOR", `Quality gate failed (halluc ${h1.length}, align ${a1.score}/10) — regenerating: ${feedback.slice(0, 5).join("; ")}`);
       const retry = await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName, feedback);
+      const h2 = detectHallucinations(retry.coverLetter, parsed, job.description, job.companyName);
       const v2 = validateCoverLetter(retry.coverLetter, job.companyName, job.jobTitle, retry.jobAnalysis?.atsKeywords || []);
       const a2 = await checkTailorAlignment(
         retry.tailoredSummary, retry.coverLetter,
         job.jobTitle, job.companyName, job.description, parsed
       );
-      // Prefer the attempt with a VALID cover letter; tie-break on alignment.
-      const score1 = (v1.valid ? 100 : 0) + a1.score;
-      const score2 = (v2.valid ? 100 : 0) + a2.score;
-      if (score2 >= score1) {
+      // Score: hallucinations dominate (factual accuracy first), then valid cover,
+      // then alignment. Higher = better.
+      const score = (h: number, valid: boolean, align: number) => -1000 * h + (valid ? 100 : 0) + align;
+      const s1 = score(h1.length, v1.valid, a1.score);
+      const s2 = score(h2.length, v2.valid, a2.score);
+      if (s2 >= s1) {
         tailored = retry;
-        await Logger.info("TAILOR", `Regenerated — cover ${v2.valid ? "valid" : v2.issues.length + " issue(s)"}, align ${a2.score}/10`);
+        await Logger.info("TAILOR", `Regenerated — halluc ${h2.length}, cover ${v2.valid ? "valid" : v2.issues.length + " issue(s)"}, align ${a2.score}/10`);
       } else {
-        await Logger.info("TAILOR", `Kept first attempt (cover ${v1.valid ? "valid" : "invalid"}, align ${a1.score}/10)`);
+        await Logger.info("TAILOR", `Kept first attempt (halluc ${h1.length}, align ${a1.score}/10)`);
       }
     } else {
-      await Logger.info("TAILOR", `Cover letter valid + aligned (${a1.score}/10)`);
+      await Logger.info("TAILOR", `Cover letter clean + valid + aligned (${a1.score}/10)`);
     }
   } catch (e) {
     await Logger.warn("TAILOR", `Quality gate skipped (non-fatal): ${e}`);
