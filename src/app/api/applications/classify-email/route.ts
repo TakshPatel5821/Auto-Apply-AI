@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
-import { prisma } from "@/lib/db/prisma";
 import { claudeClassifyEmail } from "@/lib/ai/claude";
+import { applyClassificationToApplication } from "@/lib/gmail/sync";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -28,27 +28,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `Classification failed: ${String(e)}` }, { status: 500 });
   }
 
-  let updated: { id: string; company: string; status: string } | null = null;
-
-  // Try to apply the detected status to a matching application.
-  if (apply && result.newStatus && result.company) {
-    const company = result.company.trim();
-    const app = await prisma.application.findFirst({
-      where: {
-        userId: "local",
-        job: { companyName: { contains: company, mode: "insensitive" } },
-      },
-      orderBy: { createdAt: "desc" },
-      include: { job: { select: { companyName: true } } },
-    });
-    if (app) {
-      await prisma.application.update({
-        where: { id: app.id },
-        data: { status: result.newStatus },
-      });
-      updated = { id: app.id, company: app.job.companyName, status: result.newStatus };
-    }
-  }
+  // Try to apply the detected status to a matching application (shared with the
+  // live Gmail sync so paste + auto-scan behave identically).
+  const updated = apply ? await applyClassificationToApplication(result) : null;
 
   return NextResponse.json({ result, updated });
 }

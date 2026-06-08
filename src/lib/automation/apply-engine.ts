@@ -1,4 +1,4 @@
-import { chromium, BrowserContext, Page } from "playwright";
+import { chromium, BrowserContext, Page, ElementHandle } from "playwright";
 import { mkdirSync, existsSync } from "fs";
 import { join, isAbsolute } from "path";
 import { homedir } from "os";
@@ -11,6 +11,8 @@ import { getCredentials, Credentials } from "@/lib/security/credentials";
 import { rememberedSelector, learnSelector, forgetSelector } from "./selector-memory";
 import { claudeAnswerQuestion } from "@/lib/ai/claude";
 import { saveScreenshot, saveFile } from "@/lib/storage/file-manager";
+import { fetchLatestOtp } from "@/lib/gmail/otp";
+import { gmailStatus } from "@/lib/gmail/client";
 
 // Résumé PDF paths are stored relative to the project root ("applications/..").
 // existsSync on a relative path is cwd-dependent, so resolve to absolute first.
@@ -32,6 +34,9 @@ import {
   isSensitive,
   aiMayAnswer,
 } from "./field-classifier";
+
+// Element handle type as returned by page.$$ — used for OTP input detection.
+type OtpHandle = ElementHandle<SVGElement | HTMLElement>;
 
 type ApplicationWithRelations = Awaited<ReturnType<typeof getApplicationWithRelations>>;
 
@@ -122,6 +127,9 @@ export class ApplyEngine {
   private profile: Profile = {};
   // Decrypted credentials for this run (from the encrypted store, .env fallback).
   private creds: Credentials = { linkedinEmail: "", linkedinPassword: "", atsEmail: "", atsPassword: "" };
+  // OTP codes already filled this run — guards the form loop from re-fetching /
+  // re-entering the same email verification code over and over.
+  private otpFilledCodes = new Set<string>();
   // Failure-recovery (#19): current application + in-memory action log for this run.
   private currentApplicationId: string | null = null;
   private actionLog: { t: string; action: string; target?: string; detail?: string }[] = [];
@@ -310,6 +318,7 @@ export class ApplyEngine {
     this.currentApplicationId = applicationId;
     this.submitClicked = false;
     this.appliedValues.clear();
+    this.otpFilledCodes.clear();
     this.fieldDecisions = [];
     this.currentStep = 0;
     this.actionLog = Array.isArray(application.actionLog)
@@ -542,6 +551,9 @@ export class ApplyEngine {
         return true;
       }
 
+      // Email verification step inside the modal? Auto-enter the Gmail code.
+      if (await this.handleEmailVerificationIfPresent(".jobs-easy-apply-modal, .artdeco-modal")) continue;
+
       // Handle LinkedIn email field — ensure it's set to the correct email
       await this.setLinkedInEmailField(this.creds.linkedinEmail || this.creds.atsEmail);
 
@@ -751,6 +763,9 @@ export class ApplyEngine {
         await Logger.success("APPLY", "Submission confirmed!");
         return true;
       }
+
+      // Email verification gate? Auto-enter the code from Gmail if connected.
+      if (await this.handleEmailVerificationIfPresent(scope)) continue;
 
       await Logger.info("APPLY", `Form step ${step}: filling fields...`);
       this.logAction("form_step", `step ${step}`);
@@ -967,6 +982,15 @@ export class ApplyEngine {
     );
     await this.delay(3500, 5000);
 
+    if (await this.workdayIsAuthed()) return true;
+
+    // Workday usually emails a verification code on account creation — if Gmail
+    // is connected, fetch + enter it automatically, then re-check auth.
+    if (await this.handleEmailVerificationIfPresent()) {
+      await this.delay(1500, 2500);
+      if (await this.workdayIsAuthed()) return true;
+    }
+
     return this.workdayIsAuthed();
   }
 
@@ -1058,6 +1082,196 @@ export class ApplyEngine {
     return true;
   }
 
+  // ─── Email OTP / verification-code gate (Gmail) ─────────────────────────────
+  // Many ATS account flows email a one-time code ("we sent a code to your
+  // email"). When Gmail is connected, fetch the freshly-emailed code and enter
+  // it automatically; otherwise return false so the existing human-takeover path
+  // handles it. Returns true only when a code was filled + submitted.
+  private OTP_LABEL_RE =
+    /(?:verification|one[\s-]?time|security|confirmation|passcode|otp|auth(?:entication)?)\s*code|^\s*(?:otp|passcode)\s*$|enter\s+(?:the\s+)?(?:code|otp)|code\s+we\s+(?:sent|emailed)/i;
+  private OTP_EXCLUDE_RE =
+    /(?:zip|postal|post|area|country|dial|promo|coupon|discount|gift|referral|invite|sort)\s*code|postcode/i;
+
+  private async handleEmailVerificationIfPresent(scope: string = "body"): Promise<boolean> {
+    // Cheap pre-check: any code-ish input or one-time-code field on the page?
+    const quick = await this.page!
+      .$(
+        'input[autocomplete="one-time-code"], input[name*="otp" i], input[id*="otp" i], input[name*="code" i], input[id*="code" i], input[placeholder*="code" i], input[aria-label*="code" i]'
+      )
+      .catch(() => null);
+
+    const verifyContext = await this.page!
+      .evaluate(() => {
+        const t = (document.body.innerText || "").toLowerCase();
+        return /(verify your email|check your (?:email|inbox)|we (?:sent|emailed)|enter the code|one[\s-]?time (?:code|password|pin)|verification code|security code|confirmation code|passcode)/.test(
+          t
+        );
+      })
+      .catch(() => false);
+
+    if (!quick && !verifyContext) return false; // not an OTP gate
+
+    // Gmail must be connected to auto-fetch the code.
+    const status = await gmailStatus().catch(() => null);
+    if (!status?.connected) {
+      if (verifyContext) {
+        await Logger.warn(
+          "APPLY",
+          "Email verification needed but Gmail isn't connected — connect it in the dashboard, or enter the code manually."
+        );
+      }
+      return false;
+    }
+
+    const gate = await this.findOtpInputs(verifyContext);
+    if (!gate) return false;
+
+    await Logger.info("APPLY", "📧 Email verification detected — fetching the code from Gmail…");
+    this.logAction("otp_gate", scope);
+
+    const since = Date.now() - 60_000; // accept a code emailed up to 60s before we noticed
+    const otp = await fetchLatestOtp({ since, timeoutMs: 90_000, pollMs: 5_000 }).catch(() => null);
+    if (!otp) {
+      await Logger.warn("APPLY", "No verification code arrived in Gmail within 90s — leaving it for human takeover.");
+      return false;
+    }
+    if (this.otpFilledCodes.has(otp.code)) return false; // already tried this code; don't loop
+
+    await Logger.success(
+      "APPLY",
+      `📧 Got verification code from ${otp.message.fromEmail || "email"} — entering it`
+    );
+    const filled = await this.fillOtp(gate, otp.code);
+    if (!filled) return false;
+    this.otpFilledCodes.add(otp.code);
+
+    // Record the OTP retrieval for the inbox / audit trail.
+    await prisma.emailEvent
+      .upsert({
+        where: { gmailId: otp.message.id },
+        create: {
+          gmailId: otp.message.id,
+          threadId: otp.message.threadId || null,
+          fromEmail: otp.message.fromEmail || null,
+          fromName: otp.message.fromName || null,
+          subject: otp.message.subject || null,
+          snippet: otp.message.snippet || null,
+          receivedAt: otp.message.date,
+          isOtp: true,
+          otpCode: otp.code,
+          applicationId: this.currentApplicationId,
+        },
+        update: { isOtp: true, otpCode: otp.code, applicationId: this.currentApplicationId },
+      })
+      .catch(() => {});
+
+    // Submit the code (Verify / Confirm / Continue / Submit).
+    await this.delay(400, 800);
+    const clicked = await this.clickFirstVisible(
+      [
+        'button:has-text("Verify")',
+        'button:has-text("Confirm")',
+        'button:has-text("Continue")',
+        'button:has-text("Submit")',
+        'button:has-text("Next")',
+        'button[type="submit"]',
+      ],
+      "Verify code"
+    );
+    if (!clicked) await this.page!.keyboard.press("Enter").catch(() => {});
+    await this.page!.waitForLoadState("networkidle").catch(() => null);
+    await this.delay(2000, 3500);
+    return true;
+  }
+
+  // Locate the verification-code input(s): a single field or a row of
+  // single-character "segmented" boxes. verifyContext loosens the match so a
+  // generic code field counts when the page clearly asks for an email code.
+  private async findOtpInputs(
+    verifyContext: boolean
+  ): Promise<
+    | { mode: "single"; handle: OtpHandle }
+    | { mode: "segmented"; handles: OtpHandle[] }
+    | null
+  > {
+    const candidates = await this.page!
+      .$$('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="password"])')
+      .catch(() => [] as OtpHandle[]);
+
+    type Meta = {
+      name: string; id: string; placeholder: string; aria: string;
+      autocomplete: string; maxLength: number; label: string; value: string;
+    };
+    const visible: { h: OtpHandle; meta: Meta }[] = [];
+    for (const h of candidates) {
+      if (!(await h.isVisible().catch(() => false))) continue;
+      const meta = await h
+        .evaluate((el) => {
+          const i = el as HTMLInputElement;
+          let label = "";
+          if (i.id) {
+            const l = document.querySelector(`label[for="${CSS.escape(i.id)}"]`);
+            if (l) label = l.textContent || "";
+          }
+          if (!label) { const p = i.closest("label"); if (p) label = p.textContent || ""; }
+          return {
+            name: i.name || "", id: i.id || "", placeholder: i.placeholder || "",
+            aria: i.getAttribute("aria-label") || "", autocomplete: i.autocomplete || "",
+            maxLength: i.maxLength, label: (label || "").trim(), value: i.value || "",
+          };
+        })
+        .catch(() => null);
+      if (meta) visible.push({ h, meta });
+    }
+    if (!visible.length) return null;
+
+    // Segmented: ≥4 single-char inputs (maxLength 1) — common for 6-digit codes.
+    const segmented = visible.filter((v) => v.meta.maxLength === 1);
+    if (
+      segmented.length >= 4 &&
+      (verifyContext || segmented.some((v) => /otp|code|pin/i.test(`${v.meta.name}${v.meta.id}${v.meta.aria}`)))
+    ) {
+      return { mode: "segmented", handles: segmented.map((v) => v.h) };
+    }
+
+    // Single field whose label/attrs look like a verification code.
+    const score = (v: { meta: Meta }): number => {
+      const hay = `${v.meta.label} ${v.meta.name} ${v.meta.id} ${v.meta.placeholder} ${v.meta.aria}`;
+      if (this.OTP_EXCLUDE_RE.test(hay)) return -1;
+      if (v.meta.autocomplete === "one-time-code") return 3;
+      if (this.OTP_LABEL_RE.test(hay)) return 2;
+      if (verifyContext && /\bcode\b|otp|pin/i.test(hay)) return 1;
+      return 0;
+    };
+    const best = visible
+      .map((v) => ({ v, s: score(v) }))
+      .filter((x) => x.s > 0 && !x.v.meta.value)
+      .sort((a, b) => b.s - a.s)[0];
+    return best ? { mode: "single", handle: best.v.h } : null;
+  }
+
+  // Type the code into either a single field or the segmented boxes.
+  private async fillOtp(
+    gate: { mode: "single"; handle: OtpHandle } | { mode: "segmented"; handles: OtpHandle[] },
+    code: string
+  ): Promise<boolean> {
+    try {
+      if (gate.mode === "single") {
+        await gate.handle.fill("").catch(() => {});
+        await gate.handle.type(code, { delay: 60 });
+        return true;
+      }
+      const chars = code.split("");
+      for (let i = 0; i < gate.handles.length && i < chars.length; i++) {
+        await gate.handles[i].fill("").catch(() => {});
+        await gate.handles[i].type(chars[i], { delay: 60 }).catch(() => {});
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // The shared multi-step form walk, reused for Workday after auth.
   private async runWorkdayFormLoop(application: NonNullable<ApplicationWithRelations>): Promise<boolean> {
     const scope = "body";
@@ -1068,6 +1282,9 @@ export class ApplyEngine {
         await Logger.success("APPLY", "Workday submission confirmed!");
         return true;
       }
+
+      // Email verification gate? Auto-enter the code from Gmail if connected.
+      if (await this.handleEmailVerificationIfPresent(scope)) continue;
 
       await Logger.info("APPLY", `Workday step ${step}: filling…`);
       this.logAction("workday_step", `step ${step}`);
