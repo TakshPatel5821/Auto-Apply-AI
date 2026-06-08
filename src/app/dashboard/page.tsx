@@ -15,6 +15,7 @@ import { ProfilePanel } from "@/components/dashboard/ProfilePanel";
 import { ResumeCard } from "@/components/dashboard/ResumeCard";
 import { LogsConsole } from "@/components/dashboard/LogsConsole";
 import { QuickSetupPanel } from "@/components/dashboard/QuickSetupPanel";
+import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
 import {
   Briefcase,
   Send,
@@ -31,13 +32,14 @@ import {
   Trash2,
   Sparkles,
   UserCircle,
+  LayoutDashboard,
 } from "lucide-react";
 
-type Tab = "jobs" | "applications" | "analytics" | "career" | "profile" | "resume" | "memory" | "settings";
+type Tab = "dashboard" | "jobs" | "applications" | "analytics" | "career" | "profile" | "resume" | "memory" | "settings";
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<Tab>("jobs");
+  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [loading, setLoading] = useState(true);
 
   const [resumes, setResumes] = useState<any[]>([]);
@@ -162,6 +164,7 @@ export default function DashboardPage() {
   }
 
   const tabs: { id: Tab; label: string; icon: any; count?: number }[] = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "jobs", label: "Jobs", icon: Briefcase, count: stats.totalJobs },
     { id: "applications", label: "Applications", icon: Send, count: stats.totalApplications },
     { id: "analytics", label: "Analytics", icon: BarChart3 },
@@ -293,6 +296,16 @@ export default function DashboardPage() {
 
             {/* Tab Content */}
             <div className="animate-fade-in">
+              {activeTab === "dashboard" && (
+                <DashboardOverview
+                  stats={stats}
+                  jobs={jobs}
+                  applications={applications}
+                  automationState={automationState}
+                  onRefresh={fetchAll}
+                />
+              )}
+
               {activeTab === "jobs" && (
                 <JobsTable jobs={jobs} onRefresh={fetchAll} />
               )}
