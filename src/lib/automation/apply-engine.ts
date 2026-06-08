@@ -2709,6 +2709,9 @@ export class ApplyEngine {
       for (const f of fields) {
         if (/^field_\d+$/i.test(f.label)) continue; // unlabeled — can't reuse meaningfully
         if (f.type === "checkbox" || f.type === "radio") continue;
+        // Never memorize one-time / email verification codes — they're single-use,
+        // so a captured "Security code" → "B" would only poison future applies.
+        if (this.OTP_LABEL_RE.test(f.label) && !this.OTP_EXCLUDE_RE.test(f.label)) continue;
 
         let value = "";
         if (f.type === "select") {
