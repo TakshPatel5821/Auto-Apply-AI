@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/prisma";
-import { claudeFullTailor, checkTailorAlignment, detectHallucinations, claudeTailorResumeContent, type ResumeContentTailor } from "@/lib/ai/claude";
+import { claudeFullTailor, detectHallucinations, llmFindHallucinations, claudeTailorResumeContent, type ResumeContentTailor } from "@/lib/ai/claude";
 import { getApplicationFolder, saveApplicationFiles } from "@/lib/storage/file-manager";
 import { Logger } from "@/lib/logging/logger";
 import { compileLatexToPDF, pdfPageCount } from "./latex-compiler";
@@ -40,43 +40,38 @@ export async function tailorResumeForJob(
   const parsed = resume.parsedData as Record<string, unknown>;
   let tailored = await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName);
 
-  // Step 2b: quality gates. (1) deterministic cover-letter validation (length,
-  // company/role mention, no greeting/closing/placeholder/dupes, JD keywords) and
-  // (2) AI alignment (summary + letter consistent, on-role, no fabrication). If
-  // either fails, regenerate BOTH once with the issues as feedback, keep the best.
+  // Step 2b: quality gate (fact-accuracy first). For each attempt we run, in
+  // order: (1) regex hallucination guard (free), (2) the LLM fact-checker that
+  // LISTS unsupported claims the regex can't catch (team sizes, invented scope),
+  // (3) deterministic structure validation (length, company/role, no
+  // placeholder/dupes, JD keywords). If anything fails we regenerate ONCE with
+  // the issues as feedback and keep the attempt with fewer hallucinations.
+  const findHallucinations = async (letter: string): Promise<string[]> => [
+    ...detectHallucinations(letter, parsed, job.description, job.companyName),
+    ...(await llmFindHallucinations(letter, parsed, job.companyName)),
+  ];
   try {
-    const kws1 = tailored.jobAnalysis?.atsKeywords || [];
-    // Three gates: hallucination (highest priority — factual accuracy),
-    // deterministic structure/validation, and AI alignment.
-    const h1 = detectHallucinations(tailored.coverLetter, parsed, job.description, job.companyName);
-    const v1 = validateCoverLetter(tailored.coverLetter, job.companyName, job.jobTitle, kws1);
-    const a1 = await checkTailorAlignment(
-      tailored.tailoredSummary, tailored.coverLetter,
-      job.jobTitle, job.companyName, job.description, parsed
-    );
-    if (h1.length || !v1.valid || !a1.aligned) {
-      const feedback = [...h1, ...v1.issues, ...a1.issues];
-      await Logger.warn("TAILOR", `Quality gate failed (halluc ${h1.length}, align ${a1.score}/10) — regenerating: ${feedback.slice(0, 5).join("; ")}`);
+    const h1 = await findHallucinations(tailored.coverLetter);
+    const v1 = validateCoverLetter(tailored.coverLetter, job.companyName, job.jobTitle, tailored.jobAnalysis?.atsKeywords || []);
+    if (h1.length || !v1.valid) {
+      const feedback = [
+        ...h1.map((c) => `unsupported claim: "${c}" — remove it or restate it as a verified fact`),
+        ...v1.issues,
+      ];
+      await Logger.warn("TAILOR", `Quality gate failed (${h1.length} hallucination(s), ${v1.issues.length} structure) — regenerating: ${feedback.slice(0, 5).join("; ")}`);
       const retry = await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName, feedback);
-      const h2 = detectHallucinations(retry.coverLetter, parsed, job.description, job.companyName);
+      const h2 = await findHallucinations(retry.coverLetter);
       const v2 = validateCoverLetter(retry.coverLetter, job.companyName, job.jobTitle, retry.jobAnalysis?.atsKeywords || []);
-      const a2 = await checkTailorAlignment(
-        retry.tailoredSummary, retry.coverLetter,
-        job.jobTitle, job.companyName, job.description, parsed
-      );
-      // Score: hallucinations dominate (factual accuracy first), then valid cover,
-      // then alignment. Higher = better.
-      const score = (h: number, valid: boolean, align: number) => -1000 * h + (valid ? 100 : 0) + align;
-      const s1 = score(h1.length, v1.valid, a1.score);
-      const s2 = score(h2.length, v2.valid, a2.score);
-      if (s2 >= s1) {
+      // Hallucinations dominate; structure validity breaks ties.
+      const score = (h: number, valid: boolean) => -1000 * h + (valid ? 100 : 0);
+      if (score(h2.length, v2.valid) >= score(h1.length, v1.valid)) {
         tailored = retry;
-        await Logger.info("TAILOR", `Regenerated — halluc ${h2.length}, cover ${v2.valid ? "valid" : v2.issues.length + " issue(s)"}, align ${a2.score}/10`);
+        await Logger.info("TAILOR", `Regenerated — ${h2.length} hallucination(s), cover ${v2.valid ? "valid" : v2.issues.length + " issue(s)"}`);
       } else {
-        await Logger.info("TAILOR", `Kept first attempt (halluc ${h1.length}, align ${a1.score}/10)`);
+        await Logger.info("TAILOR", `Kept first attempt (${h1.length} hallucination(s))`);
       }
     } else {
-      await Logger.info("TAILOR", `Cover letter clean + valid + aligned (${a1.score}/10)`);
+      await Logger.info("TAILOR", "Cover letter verified — no hallucinations, structure valid");
     }
   } catch (e) {
     await Logger.warn("TAILOR", `Quality gate skipped (non-fatal): ${e}`);
@@ -299,8 +294,8 @@ export function validateCoverLetter(
     issues.push(`reference the role (${role})`);
   }
 
-  if (/\[[^\]]{1,30}\]|\bx{2,}\s*%|\bTODO\b|\binsert (your|the|company|role)\b|lorem ipsum|\byour name\b/i.test(raw)) {
-    issues.push("contains placeholder text");
+  if (/\[[^\]]{1,30}\]|\{\{|\}\}|\bx{2,}\s*%|\bTODO\b|\binsert (your|the|company|role)\b|lorem ipsum|\byour name\b|\b(OPENING|MATCH|VALUE|CLOSING)\b\s*:/i.test(raw)) {
+    issues.push("contains placeholder / template-section text");
   }
 
   const paras = body.split(/\n\s*\n/).map((p) => p.replace(/\s+/g, " ").trim().toLowerCase()).filter(Boolean);

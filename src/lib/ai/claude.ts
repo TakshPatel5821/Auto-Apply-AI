@@ -741,6 +741,77 @@ export function detectHallucinations(
   return [...new Set(issues)];
 }
 
+// ─── Structured candidate facts (Step 1) ─────────────────────────────────────
+// A compact, structured "source of truth" extracted deterministically from the
+// already-parsed résumé + the canonical template content. Used as ground truth
+// for the LLM fact-checker so it isn't fed the raw résumé blob.
+export interface CandidateFacts {
+  fullName: string;
+  skills: string[];
+  certifications: string[];
+  education: string[];
+  companies: string[];
+  projects: string[];
+  achievements: string[];
+}
+
+export function extractCandidateFacts(resumeData: Record<string, unknown>): CandidateFacts {
+  const arr = (k: string): Record<string, unknown>[] =>
+    Array.isArray(resumeData[k]) ? (resumeData[k] as Record<string, unknown>[]) : [];
+  const strArr = (k: string): string[] =>
+    Array.isArray(resumeData[k]) ? (resumeData[k] as unknown[]).map(String).filter(Boolean) : [];
+  const uniq = (xs: string[]) => [...new Set(xs.map((s) => s.trim()).filter(Boolean))];
+  const firstBrace = (s: string) => s.match(/\\textbf\{([^}]+)\}/)?.[1] || "";
+
+  const contact = (resumeData.contactInfo as Record<string, string>) || {};
+  const exp = arr("experience");
+  const proj = arr("projects");
+  const edu = arr("education");
+
+  return {
+    fullName: contact.name || "",
+    skills: uniq([...strArr("skills"), ...strArr("technologies"), ...RESUME_SKILLS.flatMap((g) => g.items)]),
+    certifications: uniq(strArr("certifications")),
+    education: uniq(edu.map((e) => [e.degree, e.field, e.institution].filter(Boolean).map(String).join(" "))),
+    companies: uniq([...exp.map((e) => String(e.company || "")), ...RESUME_EXPERIENCE.map((e) => firstBrace(e.heading))]),
+    projects: uniq([...proj.map((p) => String(p.name || "")), ...RESUME_PROJECTS.map((p) => firstBrace(p.heading))]),
+    achievements: uniq(strArr("achievements")),
+  };
+}
+
+// ─── Step 5: LLM hallucination validator ──────────────────────────────────────
+// The semantic backstop the regex guard can't be: it READS the letter against
+// the structured facts + résumé text and lists every unsupported claim
+// (invented employers/projects/certs/skills, fake metrics, team sizes, etc.).
+// Empty list ⇒ clean. Degrades to [] if the model is unavailable.
+export async function llmFindHallucinations(
+  letter: string,
+  resumeData: Record<string, unknown>,
+  targetCompany: string
+): Promise<string[]> {
+  const facts = extractCandidateFacts(resumeData);
+  const { corpus } = buildAllowlist(resumeData);
+  const system =
+    "You are a strict fact-checker for job-application cover letters. Using ONLY the candidate's facts and résumé text as ground truth, list EVERY statement in the letter that is not supported: invented employers, projects, certifications, degrees, skills/technologies, numeric metrics or percentages, team sizes, or achievements. " +
+    `Do NOT flag: general enthusiasm, transferable-skill or eagerness-to-learn phrasing, or mentions of the target company "${targetCompany}" / the role being applied to. Return ONLY JSON.`;
+  const prompt = `CANDIDATE FACTS (ground truth):
+${JSON.stringify(facts)}
+
+RÉSUMÉ TEXT (also ground truth):
+${corpus.slice(0, 2500)}
+
+COVER LETTER:
+${letter}
+
+Return ONLY: {"hallucinations": ["exact unsupported claim", "..."]}  (use an empty array if every claim is supported)`;
+  try {
+    const raw = (await ai(prompt, system, 500, "low")) as { hallucinations?: unknown };
+    return asStringArray(raw.hallucinations);
+  } catch {
+    return [];
+  }
+}
+
 // ─── Résumé content tailoring: reorder skills + REWORD bullets ────────────────
 // Operates on the canonical template content (the real, hand-tuned résumé). The
 // model may only REORDER skills (same items) and REWORD bullets to mirror the
