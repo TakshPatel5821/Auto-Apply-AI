@@ -45,6 +45,12 @@ model UserSettings {
   encAtsEmail         String?
   encAtsPassword      String?
 
+  // Gmail integration (OAuth2, gmail.readonly). Refresh token encrypted like creds.
+  encGmailRefreshToken String?
+  gmailAddress         String?
+  gmailConnectedAt     DateTime?
+  gmailLastSyncAt      DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -325,6 +331,40 @@ enum LogLevel {
   WARN
   ERROR
   SUCCESS
+}
+
+// Gmail-derived email events: the live inbox, processing dedupe (one row per
+// Gmail message id), and an audit trail for OTP fetches + auto status updates.
+model EmailEvent {
+  id            String   @id @default(cuid())
+  gmailId       String   @unique // Gmail message id — dedupes processing
+  threadId      String?
+
+  fromEmail     String?
+  fromName      String?
+  subject       String?
+  snippet       String?  @db.Text
+  receivedAt    DateTime
+
+  // Classification (from claudeClassifyEmail), null for pure OTP / unclassified.
+  category      String?
+  company       String?
+  detectedStatus String?
+  summary       String?  @db.Text
+  suggestedReply String? @db.Text
+
+  // OTP / verification-code retrieval.
+  isOtp         Boolean  @default(false)
+  otpCode       String?
+
+  // Matched application + whether we auto-applied the detected status.
+  applicationId String?
+  statusApplied Boolean  @default(false)
+
+  createdAt     DateTime @default(now())
+
+  @@index([receivedAt])
+  @@index([applicationId])
 }
 
 model ScrapingSession {

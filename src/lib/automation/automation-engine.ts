@@ -12,6 +12,7 @@ import { AutomationState, SearchConfig } from "@/types";
 import { getApplicationFolder, ensureDir } from "@/lib/storage/file-manager";
 import { scraperStatus } from "./scraper-status";
 import { generateJobsExcel } from "@/lib/export/excel";
+import { syncInbox } from "@/lib/gmail/sync";
 
 const EXCEL_PATH = join(process.cwd(), "applications", "jobs_tracker.xlsx");
 
@@ -116,6 +117,15 @@ class AutomationEngine {
         this.state.currentAction = "Pre-warming ATS logins…";
         await this.applyEngine.prewarmLogins().catch(() => {});
       }
+
+      // Scan Gmail for status-changing mail (interview/offer/rejection) at the
+      // start of each batch — auto-updates matching applications. No-op if Gmail
+      // isn't connected. Non-fatal.
+      syncInbox()
+        .then((r) => {
+          if (r.scanned) Logger.info("ENGINE", `Gmail sync: ${r.scanned} new mail, ${r.updated.length} status update(s)`);
+        })
+        .catch(() => {});
 
       // Streaming pipeline: scraping uses the cheap local filter; each fit job is
       // handed off to the Claude pipeline (analyze → tailor → Overleaf CV → apply)
