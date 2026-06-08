@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/prisma";
-import { claudeFullTailor, detectHallucinations, llmFindHallucinations, claudeTailorResumeContent, type ResumeContentTailor } from "@/lib/ai/claude";
+import { claudeFullTailor, detectHallucinations, llmFindHallucinations, extractCandidateFacts, claudeTailorResumeContent, type ResumeContentTailor } from "@/lib/ai/claude";
+import { matchAchievements, validateATS, scoreLetter, isAcceptable } from "@/lib/cover-letter/quality";
 import { getApplicationFolder, saveApplicationFiles } from "@/lib/storage/file-manager";
 import { Logger } from "@/lib/logging/logger";
 import { compileLatexToPDF, pdfPageCount } from "./latex-compiler";
@@ -34,45 +35,65 @@ export async function tailorResumeForJob(
       .catch(() => {});
   }
 
-  // Step 2: one model call — tailored summary + cover letter + ATS analysis.
-  // The résumé LaTeX is built locally from the template + tailored summary.
+  // Step 2: generate the tailored summary + cover letter + ATS analysis.
   const aiStart = Date.now();
   const parsed = resume.parsedData as Record<string, unknown>;
+  const facts = extractCandidateFacts(parsed);
   let tailored = await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName);
 
-  // Step 2b: quality gate (fact-accuracy first). For each attempt we run, in
-  // order: (1) regex hallucination guard (free), (2) the LLM fact-checker that
-  // LISTS unsupported claims the regex can't catch (team sizes, invented scope),
-  // (3) deterministic structure validation (length, company/role, no
-  // placeholder/dupes, JD keywords). If anything fails we regenerate ONCE with
-  // the issues as feedback and keep the attempt with fewer hallucinations.
+  // Step 2b: production quality gate + retry loop. For each attempt:
+  //   • regex hallucination guard (free) + LLM fact-checker (lists unsupported
+  //     claims the regex can't catch) → factual accuracy
+  //   • deterministic structure validation (length, company/role, no
+  //     placeholder/section/dupes)
+  //   • ATS coverage of the job's required skills
+  //   • a single quality score (hallucinations heavily penalized)
+  // A letter is ACCEPTED only when it's clean + structurally valid + ATS ≥ 70% +
+  // quality passes. Otherwise we regenerate (with the issues AND deterministically
+  // matched real achievements as guidance) up to MAX_ATTEMPTS, keeping the best.
   const findHallucinations = async (letter: string): Promise<string[]> => [
     ...detectHallucinations(letter, parsed, job.description, job.companyName),
     ...(await llmFindHallucinations(letter, parsed, job.companyName)),
   ];
+  const MAX_ATTEMPTS = Math.max(1, Math.min(3, Number(process.env.COVER_LETTER_MAX_ATTEMPTS) || 3));
   try {
-    const h1 = await findHallucinations(tailored.coverLetter);
-    const v1 = validateCoverLetter(tailored.coverLetter, job.companyName, job.jobTitle, tailored.jobAnalysis?.atsKeywords || []);
-    if (h1.length || !v1.valid) {
-      const feedback = [
-        ...h1.map((c) => `unsupported claim: "${c}" — remove it or restate it as a verified fact`),
-        ...v1.issues,
+    let best = tailored;
+    let bestComposite = -Infinity;
+    let feedback: string[] = [];
+    let matched: string[] = [];
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const cand = attempt === 1
+        ? tailored
+        : await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName, feedback, matched);
+
+      const reqSkills = cand.jobAnalysis?.requiredSkills?.length
+        ? cand.jobAnalysis.requiredSkills
+        : (cand.jobAnalysis?.atsKeywords || []);
+      const structure = validateCoverLetter(cand.coverLetter, job.companyName, job.jobTitle, cand.jobAnalysis?.atsKeywords || []);
+      const halluc = await findHallucinations(cand.coverLetter);
+      const ats = validateATS(cand.coverLetter, reqSkills);
+      const quality = scoreLetter(halluc.length, ats.score);
+      const accepted = isAcceptable(structure.valid, halluc.length, ats, quality);
+
+      const composite = -1000 * halluc.length + (structure.valid ? 100 : 0) + quality.score + ats.score * 10;
+      if (composite > bestComposite) { bestComposite = composite; best = cand; }
+
+      await Logger.info("TAILOR", `Cover letter attempt ${attempt}/${MAX_ATTEMPTS}: ${halluc.length} hallucination(s), ATS ${Math.round(ats.score * 100)}%, quality ${Math.round(quality.score)}${accepted ? " ✓ accepted" : ""}`);
+      if (accepted) { best = cand; break; }
+
+      // Prepare guidance for the next attempt: real matched achievements + the
+      // specific issues + required skills the candidate GENUINELY has but omitted.
+      matched = matchAchievements(facts, reqSkills);
+      const missingHave = ats.missing.filter((s) =>
+        facts.skills.some((fs) => fs.toLowerCase().includes(s.toLowerCase()) || s.toLowerCase().includes(fs.toLowerCase()))
+      );
+      feedback = [
+        ...halluc.map((c) => `unsupported claim: "${c}" — remove it or restate as a verified fact`),
+        ...structure.issues,
+        ...(missingHave.length ? [`naturally include these required skills you genuinely have: ${missingHave.join(", ")}`] : []),
       ];
-      await Logger.warn("TAILOR", `Quality gate failed (${h1.length} hallucination(s), ${v1.issues.length} structure) — regenerating: ${feedback.slice(0, 5).join("; ")}`);
-      const retry = await claudeFullTailor(parsed, job.description, job.jobTitle, job.companyName, feedback);
-      const h2 = await findHallucinations(retry.coverLetter);
-      const v2 = validateCoverLetter(retry.coverLetter, job.companyName, job.jobTitle, retry.jobAnalysis?.atsKeywords || []);
-      // Hallucinations dominate; structure validity breaks ties.
-      const score = (h: number, valid: boolean) => -1000 * h + (valid ? 100 : 0);
-      if (score(h2.length, v2.valid) >= score(h1.length, v1.valid)) {
-        tailored = retry;
-        await Logger.info("TAILOR", `Regenerated — ${h2.length} hallucination(s), cover ${v2.valid ? "valid" : v2.issues.length + " issue(s)"}`);
-      } else {
-        await Logger.info("TAILOR", `Kept first attempt (${h1.length} hallucination(s))`);
-      }
-    } else {
-      await Logger.info("TAILOR", "Cover letter verified — no hallucinations, structure valid");
     }
+    tailored = best;
   } catch (e) {
     await Logger.warn("TAILOR", `Quality gate skipped (non-fatal): ${e}`);
   }

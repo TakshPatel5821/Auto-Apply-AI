@@ -453,7 +453,8 @@ export async function claudeFullTailor(
   jobDescription: string,
   jobTitle: string,
   companyName: string,
-  feedback?: string[]
+  feedback?: string[],
+  matchedAchievements?: string[]
 ): Promise<FullTailorResult> {
   const contactInfo = (resumeData.contactInfo as Record<string, string>) || {};
   const skills = (resumeData.skills as string[] || []).slice(0, 20).join(", ");
@@ -510,10 +511,14 @@ HARD FACTUAL CONSTRAINTS (anti-hallucination — violating these makes the lette
     ? `\n\nThe previous attempt was rejected for these problems — FIX them this time:\n- ${feedback.slice(0, 6).join("\n- ")}\n`
     : "";
 
+  const matchedBlock = matchedAchievements && matchedAchievements.length
+    ? `\nMATCHED ACHIEVEMENTS — build the cover letter's MATCH paragraph from THESE verified achievements (reword to fit the role; do NOT introduce others):\n- ${matchedAchievements.join("\n- ")}\n`
+    : "";
+
   const userPrompt = `JOB POSTING — ${jobTitle} @ ${companyName}:
 
 ${jobDescription.slice(0, 3000)}
-${feedbackBlock}
+${feedbackBlock}${matchedBlock}
 Do all of the following for this candidate:
 1. Analyze the job → ATS keywords, required skills, technologies, experience level (entry|mid|senior).
 2. Write a tailored PROFESSIONAL SUMMARY (plain text, 2-3 sentences, ~55 words) for THIS role using only the candidate's real skills.
@@ -753,6 +758,10 @@ export interface CandidateFacts {
   companies: string[];
   projects: string[];
   achievements: string[];
+  verifiedClaims: string[];   // concrete, résumé-backed statements (the matcher ranks these)
+  metrics: string[];          // real numbers present in the résumé (rarely any)
+  technologies: string[];
+  experienceYears?: number;
 }
 
 export function extractCandidateFacts(resumeData: Record<string, unknown>): CandidateFacts {
@@ -768,6 +777,18 @@ export function extractCandidateFacts(resumeData: Record<string, unknown>): Cand
   const proj = arr("projects");
   const edu = arr("education");
 
+  // Verified claims = the actual bullet points (canonical template + parsed) +
+  // achievements. These are the only things the achievement-matcher may surface.
+  const canonClaims = [
+    ...RESUME_EXPERIENCE.flatMap((e) => e.bullets),
+    ...RESUME_PROJECTS.flatMap((p) => p.bullets),
+  ];
+  const parsedClaims = exp.flatMap((e) => (Array.isArray(e.bullets) ? (e.bullets as unknown[]).map(String) : []));
+
+  const technologies = uniq([...strArr("technologies"), ...RESUME_SKILLS.flatMap((g) => g.items)]);
+  const corpusForMetrics = `${typeof resumeData.rawText === "string" ? resumeData.rawText : ""} ${canonClaims.join(" ")} ${parsedClaims.join(" ")}`;
+  const metrics = uniq((corpusForMetrics.match(/\b\d{1,3}(?:\.\d+)?\s?%|\b\d+(?:\.\d+)?x\b|\$\s?\d[\d,]*/gi) || []));
+
   return {
     fullName: contact.name || "",
     skills: uniq([...strArr("skills"), ...strArr("technologies"), ...RESUME_SKILLS.flatMap((g) => g.items)]),
@@ -776,6 +797,10 @@ export function extractCandidateFacts(resumeData: Record<string, unknown>): Cand
     companies: uniq([...exp.map((e) => String(e.company || "")), ...RESUME_EXPERIENCE.map((e) => firstBrace(e.heading))]),
     projects: uniq([...proj.map((p) => String(p.name || "")), ...RESUME_PROJECTS.map((p) => firstBrace(p.heading))]),
     achievements: uniq(strArr("achievements")),
+    verifiedClaims: uniq([...canonClaims, ...parsedClaims, ...strArr("achievements")]),
+    metrics,
+    technologies,
+    experienceYears: typeof resumeData.yearsOfExperience === "number" ? (resumeData.yearsOfExperience as number) : undefined,
   };
 }
 
