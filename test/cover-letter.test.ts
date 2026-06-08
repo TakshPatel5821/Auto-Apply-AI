@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { stripGreetingClosing, validateCoverLetter } from "@/lib/automation/resume-tailor";
-import { detectHallucinations, buildAllowlist } from "@/lib/ai/claude";
+import { detectHallucinations, buildAllowlist, extractCandidateFacts } from "@/lib/ai/claude";
 
 describe("stripGreetingClosing", () => {
   it("removes a leading 'Dear ...' greeting", () => {
@@ -129,5 +129,40 @@ describe("detectHallucinations", () => {
       resume, jd, "CVS Health"
     );
     expect(issues).toEqual([]);
+  });
+
+  it("extractCandidateFacts pulls companies/skills/projects (parsed + canonical)", () => {
+    const f = extractCandidateFacts(resume);
+    expect(f.companies).toContain("Brainy Bean Info Tech");
+    expect(f.skills.map((s) => s.toLowerCase())).toContain("python");
+    // Canonical template projects are merged in.
+    expect(f.projects.length).toBeGreaterThan(0);
+  });
+});
+
+describe("validateCoverLetter — placeholder / template-section leakage", () => {
+  const company = "Stripe";
+  const role = "Backend Engineer";
+  const base =
+    "I am excited to apply for the Backend Engineer role at Stripe. " +
+    "My Python, APIs, and infrastructure work building scalable services maps directly to your needs. " +
+    "I debug distributed systems and ship reliable backends. " +
+    "I built data pipelines and web platforms end to end and care about developer experience. " +
+    "I would value the chance to contribute to Stripe's payments infrastructure and discuss further. " +
+    "Thank you for your time and consideration; I look forward to speaking with your team about this role.";
+
+  it("flags a leaked [OPENING] section marker", () => {
+    const r = validateCoverLetter("[OPENING] " + base, company, role, []);
+    expect(r.issues.join(" ")).toMatch(/placeholder|template/i);
+  });
+
+  it("flags leaked {{ }} mustache placeholders", () => {
+    const r = validateCoverLetter(base + " {{company}}", company, role, []);
+    expect(r.issues.join(" ")).toMatch(/placeholder|template/i);
+  });
+
+  it("passes a clean letter with no leaked markers", () => {
+    const r = validateCoverLetter(base, company, role, ["Python", "APIs", "infrastructure"]);
+    expect(r.issues.find((i) => /placeholder|template/i.test(i))).toBeUndefined();
   });
 });
