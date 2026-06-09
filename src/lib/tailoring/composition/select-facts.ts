@@ -1,20 +1,24 @@
 import { claudeCompleteJSON } from "@/lib/ai/claude";
+import { humanList } from "./text-utils";
 import {
   EligibilityError,
   ValidationError,
   type AchievementId,
+  type Employer,
   type EmployerId,
   type FactBook,
   type FactSelection,
   type JobAnalysis,
+  type ProjectId,
   type Skill,
   type SkillId,
 } from "../types";
 
 const SYSTEM =
   "You are a résumé strategist. You decide which of the candidate's REAL facts to " +
-  "feature for a specific job. You return only fact IDs and orderings. You never write " +
-  "prose. You never invent facts. Every ID you return must exist in the supplied FactBook.";
+  "feature for a specific job. You return only fact IDs and one short verbatim detail. " +
+  "You never write prose. You never invent facts. Every ID you return must exist in the " +
+  "supplied FactBook.";
 
 // ─── Deterministic skill ↔ JD matching ───────────────────────────────────────
 // Match a token against text with rough word boundaries (handles +, #, /, . as in
@@ -54,35 +58,77 @@ export function computeRequiredSkillMatch(
   return { present: [...present], absent };
 }
 
+// ─── Deterministic orderings (no LLM) ────────────────────────────────────────
+// These are permutations of known sets, not judgment calls — so we build them in
+// TypeScript. This removes the single most brittle ask (a 32-item permutation a
+// small model can't reproduce) and is valid by construction.
+function deterministicSkillOrder(facts: FactBook, present: SkillId[]): SkillId[] {
+  const seen = new Set<SkillId>();
+  const order: SkillId[] = [];
+  for (const id of present) if (facts.skills.has(id) && !seen.has(id)) { seen.add(id); order.push(id); }
+  for (const id of facts.skills.keys()) if (!seen.has(id)) { seen.add(id); order.push(id); }
+  return order;
+}
+
+function deterministicAchievementOrder(facts: FactBook, present: SkillId[]): Map<EmployerId, AchievementId[]> {
+  const presentSet = new Set(present);
+  const m = new Map<EmployerId, AchievementId[]>();
+  for (const [id, emp] of facts.employers) {
+    const relevant = (aid: AchievementId) =>
+      facts.achievements.get(aid)!.skillIds.some((s) => presentSet.has(s)) ? 0 : 1;
+    const sorted = emp.achievementIds
+      .map((aid, i) => ({ aid, i, r: relevant(aid) }))
+      .sort((a, b) => a.r - b.r || a.i - b.i)
+      .map((x) => x.aid);
+    m.set(id, sorted);
+  }
+  return m;
+}
+
+// ─── Deterministic fallbacks for the judgment picks ──────────────────────────
+function bestAchievementFor(emp: Employer, facts: FactBook, present: SkillId[]): AchievementId {
+  const presentSet = new Set(present);
+  let best = emp.achievementIds[0];
+  let bestScore = -1;
+  for (const aid of emp.achievementIds) {
+    const score = facts.achievements.get(aid)!.skillIds.filter((s) => presentSet.has(s)).length;
+    if (score > bestScore) { bestScore = score; best = aid; }
+  }
+  return best;
+}
+
+function deterministicEvidence(facts: FactBook, present: SkillId[]): [AchievementId, AchievementId] {
+  const emps = [...facts.employers.values()];
+  const a = bestAchievementFor(emps[0], facts, present);
+  const b = bestAchievementFor(emps[1] ?? emps[0], facts, present);
+  return [a, b];
+}
+
+// The verbatim JD pull can carry banned/second-person language ("Leverage a
+// robust tech stack…") or be a whole sentence. Sanitize it; fall back to a clean,
+// grounded phrase built from the candidate's present required skills.
+const BANNED_DETAIL = /\b(extensive experience|expert in|passionate about|team player|results-driven|leverage|synergy|wide range of)\b/gi;
+function cleanCompanyDetail(rawDetail: string, present: SkillId[], facts: FactBook): string {
+  let d = (rawDetail || "").replace(/\s*\n\s*/g, " ").replace(/^["'\s]+|["'\s]+$/g, "");
+  d = d.replace(BANNED_DETAIL, "").replace(/\s{2,}/g, " ").replace(/[.,;:]+$/g, "").trim();
+  const words = d ? d.split(/\s+/) : [];
+  const clean = d.length > 0 && words.length <= 12 && !/\b(you|your|we|us|our)\b/i.test(d);
+  if (clean) return d;
+  const skills = present.slice(0, 3).map((id) => facts.skills.get(id)?.canonical).filter((s): s is string => !!s);
+  return skills.length ? `building reliable software with ${humanList(skills)}` : "building reliable, well-tested software";
+}
+
 // ─── Prompt ──────────────────────────────────────────────────────────────────
 function serializeFactBook(facts: FactBook) {
   return {
-    skills: [...facts.skills.values()].map((s) => ({ id: s.id, canonical: s.canonical, synonyms: s.synonyms })),
+    skills: [...facts.skills.values()].map((s) => ({ id: s.id, canonical: s.canonical })),
     employers: [...facts.employers.values()].map((e) => ({
-      id: e.id, name: e.name, role: e.role, dates: e.dates,
-      achievementIds: e.achievementIds, technologyIds: e.technologyIds,
+      id: e.id, name: e.name, role: e.role, achievementIds: e.achievementIds,
     })),
-    projects: [...facts.projects.values()].map((p) => ({
-      id: p.id, name: p.name, stack: p.stack, description: p.description,
-    })),
+    projects: [...facts.projects.values()].map((p) => ({ id: p.id, name: p.name })),
     achievements: [...facts.achievements.values()].map((a) => ({
-      id: a.id, employerId: a.employerId, text: a.text, skillIds: a.skillIds,
+      id: a.id, employerId: a.employerId, text: a.text,
     })),
-  };
-}
-
-function serializeAnalysis(analysis: JobAnalysis) {
-  return {
-    companyName: analysis.companyName,
-    jobTitle: analysis.jobTitle,
-    requiredSkills: analysis.requiredSkills,
-    niceToHaveSkills: analysis.niceToHaveSkills,
-    atsKeywords: analysis.atsKeywords,
-    domainTags: analysis.domainTags,
-    experienceLevel: analysis.experienceLevel,
-    requiredYears: analysis.requiredYears,
-    // Excerpt only — used to pull a verbatim companyDetail for the letter close.
-    jobDescription: analysis.jobDescription.slice(0, 2500),
   };
 }
 
@@ -92,146 +138,140 @@ ${JSON.stringify(serializeFactBook(facts), null, 2)}
 </facts>
 
 <job>
-${JSON.stringify(serializeAnalysis(analysis), null, 2)}
+${JSON.stringify(
+    {
+      companyName: analysis.companyName,
+      jobTitle: analysis.jobTitle,
+      requiredSkills: analysis.requiredSkills,
+      atsKeywords: analysis.atsKeywords,
+      jobDescription: analysis.jobDescription.slice(0, 2500),
+    },
+    null,
+    2
+  )}
 </job>
 
-Decide:
-
-1. summarySkills: 2–3 SkillIds from facts.skills that best match jobAnalysis.requiredSkills. Order by relevance.
-2. summaryEmployerOrProject: optional. The single best EmployerId or ProjectId to anchor the summary in one real achievement.
-3. letterParagraphs.hook.skills: same 2–3 skills as summarySkills (or a close variant).
-4. letterParagraphs.evidence.achievements: exactly 2 AchievementIds from DIFFERENT employers. Pick the two that map most strongly to jobAnalysis.requiredSkills.
-5. letterParagraphs.close.companyDetail: ONE short string (≤ 12 words) pulled verbatim from the JD that names a real product, mission, or technology. No paraphrasing.
-6. presentRequiredSkills: SkillIds whose canonical or synonyms match a string in jobAnalysis.requiredSkills.
-7. absentRequiredSkills: jobAnalysis.requiredSkills strings that have NO matching skill in facts.skills.
-8. resumeSkillOrder: a permutation of ALL facts.skills IDs (every id exactly once). Put presentRequiredSkills first.
-9. resumeAchievementOrder: an object keyed by each EmployerId; the value is that employer's achievement IDs in the order they should appear (you may reorder but never drop or invent).
-
-Return ONE JSON object matching FactSelection:
+Decide and return ONE JSON object with EXACTLY these keys (ids must come from the FactBook):
 {
-  "summarySkills": ["skill:..."],
-  "summaryEmployerOrProject": "employer:... or project:...",
-  "letterParagraphs": {
-    "hook": { "skills": ["skill:..."] },
-    "evidence": { "achievements": ["achievement:...", "achievement:..."] },
-    "close": { "companyDetail": "..." }
-  },
-  "presentRequiredSkills": ["skill:..."],
-  "absentRequiredSkills": ["..."],
-  "resumeSkillOrder": ["skill:...", "... every skill id exactly once ..."],
-  "resumeAchievementOrder": { "employer:...": ["achievement:..."] }
+  "summarySkills": ["skill:..."],            // 2-3 SkillIds that best match the required skills, most relevant first
+  "summaryEmployerOrProject": "employer:... or project:...",  // the single best anchor
+  "evidenceAchievements": ["achievement:...", "achievement:..."],  // exactly 2, from DIFFERENT employers
+  "companyDetail": "..."                     // ONE short phrase (<= 12 words) pulled VERBATIM from the job description
 }
-No prose. No fences.`;
+No prose. No fences. No other keys.`;
 }
 
-// ─── Parsing ─────────────────────────────────────────────────────────────────
+// ─── Parsing + deterministic assembly ────────────────────────────────────────
 function asIdArray<T extends string>(v: unknown): T[] {
   if (!Array.isArray(v)) return [];
   return v.map((x) => String(x).trim()).filter(Boolean) as T[];
 }
 
-function toAchievementOrder(raw: unknown): Map<EmployerId, AchievementId[]> {
-  const m = new Map<EmployerId, AchievementId[]>();
-  if (Array.isArray(raw)) {
-    for (const item of raw) {
-      if (item && typeof item === "object") {
-        const o = item as Record<string, unknown>;
-        const emp = o.employerId ?? o.employer ?? o.id;
-        const list = o.achievementIds ?? o.achievements ?? o.order;
-        if (typeof emp === "string") m.set(emp as EmployerId, asIdArray<AchievementId>(list));
-      }
-    }
-  } else if (raw && typeof raw === "object") {
-    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-      m.set(k as EmployerId, asIdArray<AchievementId>(v));
-    }
-  }
-  return m;
-}
-
-function parseSelection(raw: Record<string, unknown>): FactSelection {
+function parseSelection(
+  raw: Record<string, unknown>,
+  facts: FactBook,
+  analysis: JobAnalysis,
+  present: SkillId[],
+  absent: string[],
+  skillOrder: SkillId[],
+  achOrder: Map<EmployerId, AchievementId[]>
+): FactSelection {
   const lp = (raw.letterParagraphs as Record<string, unknown>) || {};
-  const hook = (lp.hook as Record<string, unknown>) || {};
-  const evidence = (lp.evidence as Record<string, unknown>) || {};
-  const close = (lp.close as Record<string, unknown>) || {};
-  const evAch = asIdArray<AchievementId>(evidence.achievements);
+  const lpEvidence = (lp.evidence as Record<string, unknown>) || {};
+  const lpClose = (lp.close as Record<string, unknown>) || {};
+  const lpHook = (lp.hook as Record<string, unknown>) || {};
 
-  const anchor = typeof raw.summaryEmployerOrProject === "string" ? raw.summaryEmployerOrProject.trim() : "";
+  // Summary skills — LLM picks, topped up to 2-3 from present-required (or any)
+  // skills so the summary never features just one skill.
+  const llmSummary = asIdArray<SkillId>(raw.summarySkills ?? lpHook.skills).filter((id) => facts.skills.has(id));
+  let summarySkills = llmSummary.slice(0, 3);
+  if (summarySkills.length < 2) {
+    const pool = (present.length ? present : [...facts.skills.keys()]).filter((id) => !summarySkills.includes(id));
+    summarySkills = [...summarySkills, ...pool].slice(0, 3);
+  }
+
+  // Anchor — LLM employer/project if real, else the first employer.
+  const rawAnchor = typeof raw.summaryEmployerOrProject === "string" ? raw.summaryEmployerOrProject.trim() : "";
+  let anchor: EmployerId | ProjectId | undefined;
+  if (rawAnchor.startsWith("employer:") && facts.employers.has(rawAnchor as EmployerId)) anchor = rawAnchor as EmployerId;
+  else if (rawAnchor.startsWith("project:") && facts.projects.has(rawAnchor as ProjectId)) anchor = rawAnchor as ProjectId;
+  if (!anchor) anchor = [...facts.employers.keys()][0];
+
+  // Evidence — LLM pair if valid (both real, different employers), else derived.
+  const rawEvidence = asIdArray<AchievementId>(raw.evidenceAchievements ?? lpEvidence.achievements);
+  const validPair =
+    rawEvidence.length >= 2 &&
+    facts.achievements.has(rawEvidence[0]) &&
+    facts.achievements.has(rawEvidence[1]) &&
+    facts.achievements.get(rawEvidence[0])!.employerId !== facts.achievements.get(rawEvidence[1])!.employerId;
+  const evidence: [AchievementId, AchievementId] = validPair
+    ? [rawEvidence[0], rawEvidence[1]]
+    : deterministicEvidence(facts, present);
+
+  // Company detail — sanitized LLM verbatim phrase, else a clean grounded phrase.
+  const rawDetail = (typeof raw.companyDetail === "string" ? raw.companyDetail : (lpClose.companyDetail as string) || "").trim();
+  const detail = cleanCompanyDetail(rawDetail, present, facts);
 
   return {
-    summarySkills: asIdArray<SkillId>(raw.summarySkills),
-    summaryEmployerOrProject: anchor ? (anchor as EmployerId) : undefined,
+    summarySkills,
+    summaryEmployerOrProject: anchor,
     letterParagraphs: {
-      hook: { skills: asIdArray<SkillId>(hook.skills) },
-      evidence: { achievements: [evAch[0], evAch[1]] as [AchievementId, AchievementId] },
-      close: { companyDetail: typeof close.companyDetail === "string" ? close.companyDetail.trim() : "" },
+      hook: { skills: summarySkills },
+      evidence: { achievements: evidence },
+      close: { companyDetail: detail },
     },
-    presentRequiredSkills: asIdArray<SkillId>(raw.presentRequiredSkills),
-    absentRequiredSkills: asIdArray<string>(raw.absentRequiredSkills),
-    resumeSkillOrder: asIdArray<SkillId>(raw.resumeSkillOrder),
-    resumeAchievementOrder: toAchievementOrder(raw.resumeAchievementOrder),
+    presentRequiredSkills: present,
+    absentRequiredSkills: absent,
+    resumeSkillOrder: skillOrder,
+    resumeAchievementOrder: achOrder,
   };
 }
 
 // ─── Verification (deterministic, exported for tests) ────────────────────────
 export function verifySelection(sel: FactSelection, facts: FactBook): void {
-  // Every ID must exist in the FactBook
   for (const id of sel.summarySkills) if (!facts.skills.has(id)) throw new ValidationError("selection", `unknown skill ${id}`);
   for (const id of sel.letterParagraphs.evidence.achievements) {
     if (!facts.achievements.has(id)) throw new ValidationError("selection", `unknown achievement ${id}`);
   }
-  // Exactly 2 evidence achievements from DIFFERENT employers
   const [a, b] = sel.letterParagraphs.evidence.achievements;
   const empA = facts.achievements.get(a)!.employerId;
   const empB = facts.achievements.get(b)!.employerId;
   if (empA === empB) throw new ValidationError("selection", "evidence achievements share an employer");
-  // resumeSkillOrder must be a permutation
   if (sel.resumeSkillOrder.length !== facts.skills.size) throw new ValidationError("selection", "skill order is not a permutation");
   const skillSet = new Set(sel.resumeSkillOrder);
   for (const id of facts.skills.keys()) if (!skillSet.has(id)) throw new ValidationError("selection", `skill ${id} missing from order`);
-  // resumeAchievementOrder must be a permutation per employer
   for (const [empId, emp] of facts.employers) {
     const ordered = sel.resumeAchievementOrder.get(empId) ?? [];
     if (ordered.length !== emp.achievementIds.length) throw new ValidationError("selection", `employer ${empId} achievement order wrong length`);
     const set = new Set(ordered);
     for (const id of emp.achievementIds) if (!set.has(id)) throw new ValidationError("selection", `employer ${empId} missing achievement ${id}`);
   }
-  // Required-skill floor
   if (sel.presentRequiredSkills.length / Math.max(1, sel.presentRequiredSkills.length + sel.absentRequiredSkills.length) < 0.3) {
     throw new EligibilityError("less than 30% of required skills are present");
   }
 }
 
 // ─── Public entry point ──────────────────────────────────────────────────────
-// ONE Claude call → a FactSelection of IDs (never prose). presentRequiredSkills /
-// absentRequiredSkills are recomputed deterministically (exact intersection) so
-// the eligibility floor never depends on the LLM. Verification failures retry
-// ONCE with the reason fed back; a second failure throws (no silent accept).
+// ONE Claude call → judgment picks only (summary skills, anchor, two evidence
+// achievements, a verbatim company detail). Orderings, present/absent, and any
+// missing/invalid judgment pick are filled deterministically from REAL facts, so
+// the selection is always valid + fully grounded on any model (incl. local
+// Ollama). verifySelection is the final guard (it can only throw the eligibility
+// floor once the structure is built deterministically).
 export async function selectFacts(analysis: JobAnalysis, facts: FactBook): Promise<FactSelection> {
-  const base = buildUserPrompt(analysis, facts);
   const { present, absent } = computeRequiredSkillMatch(analysis, facts);
+  const skillOrder = deterministicSkillOrder(facts, present);
+  const achOrder = deterministicAchievementOrder(facts, present);
 
-  let lastErr: ValidationError | null = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const prompt =
-      attempt === 1
-        ? base
-        : `${base}\n\nYour previous answer was REJECTED: ${lastErr?.reason}. Return a corrected JSON object that fixes exactly that problem (keep every id real and every ordering a complete permutation).`;
-
-    const raw = await claudeCompleteJSON<Record<string, unknown>>(prompt, SYSTEM, 2000);
-    const sel = parseSelection(raw);
-    // Deterministic override — these are exact intersections, not judgment calls.
-    sel.presentRequiredSkills = present;
-    sel.absentRequiredSkills = absent;
-
-    try {
-      verifySelection(sel, facts);
-      return sel;
-    } catch (e) {
-      if (e instanceof EligibilityError) throw e; // disqualified — retrying won't help
-      if (e instanceof ValidationError) { lastErr = e; continue; }
-      throw e;
-    }
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = await claudeCompleteJSON<Record<string, unknown>>(buildUserPrompt(analysis, facts), SYSTEM, 700);
+  } catch {
+    // Malformed JSON from a weak model → full deterministic selection (still real).
+    raw = {};
   }
-  throw lastErr ?? new ValidationError("selection", "failed verification after retry");
+
+  const sel = parseSelection(raw, facts, analysis, present, absent, skillOrder, achOrder);
+  verifySelection(sel, facts); // structurally valid by construction; may throw the 30% floor
+  return sel;
 }
