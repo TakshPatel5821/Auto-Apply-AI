@@ -59,9 +59,24 @@ export function validateOutputs(
     if (!hit) throw new ValidationError("letter", `employer ${emp.name} mentioned without matching achievement keyword`);
   }
 
-  // ATS keyword floor
-  const kwHits = analysis.atsKeywords.filter((k) =>
-    new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(letter)
-  ).length;
-  if (kwHits < 3) throw new ValidationError("letter", `ATS keyword hits ${kwHits} < 3`);
+  // ATS keyword floor. Count the JD's atsKeywords AND the present required-skill
+  // canonicals (those ARE the job's key skills the candidate genuinely has, and
+  // composeLetter features them). The requirement is capped at what the candidate
+  // can TRUTHFULLY surface (atsTerms that appear in their real corpus) — a grounded
+  // letter must never be forced to add a phantom keyword just to clear a floor.
+  const esc = (k: string) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const inText = (k: string, text: string) => new RegExp(`\\b${esc(k)}\\b`, "i").test(text);
+  const presentCanon = sel.presentRequiredSkills
+    .map((id) => facts.skills.get(id)?.canonical)
+    .filter((s): s is string => !!s);
+  const atsTerms = [...new Set([...analysis.atsKeywords, ...presentCanon])];
+  const corpus = [
+    ...[...facts.skills.values()].flatMap((s) => [s.canonical, ...s.synonyms]),
+    ...[...facts.achievements.values()].map((a) => a.text),
+    ...[...facts.projects.values()].map((p) => `${p.name} ${p.description}`),
+  ].join(" ");
+  const grounded = atsTerms.filter((k) => inText(k, corpus)).length; // achievable ceiling
+  const kwHits = atsTerms.filter((k) => inText(k, letter)).length;
+  const need = Math.min(3, grounded);
+  if (kwHits < need) throw new ValidationError("letter", `ATS keyword hits ${kwHits} < ${need}`);
 }
