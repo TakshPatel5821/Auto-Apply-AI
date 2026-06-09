@@ -6,15 +6,18 @@
 
 This tool automates the entire job application workflow:
 
-1. **Scrape** job listings from LinkedIn, Indeed, Glassdoor, and custom sites
-2. **Analyze** each job against your resume using Claude AI — with an automatic **ATS keyword score**
-3. **Tailor** your resume and generate a job-specific cover letter (both compiled to PDF)
+1. **Scrape** job listings from LinkedIn, Indeed, Glassdoor, Greenhouse, and custom sites
+2. **Analyze** each job against your resume using Claude AI — with an automatic **ATS keyword score** and visa/sponsorship detection
+3. **Tailor** your resume and generate a **fact-checked, quality-gated** cover letter (both compiled to PDF)
 4. **Generate** a single-page PDF CV via local LaTeX compilation
 5. **Apply** intelligently on LinkedIn (Easy Apply + external forms) and 13+ ATS platforms
+6. **Track** the full funnel and get **AI career guidance** from the jobs you've analyzed
 
 **Key Innovations:**
 - Resume tailoring uses a **fixed, hand-tuned LaTeX template** with only the Professional Summary AI-generated per job — guarantees 1-page output and 100% compilable PDFs.
+- Cover letters pass a **deterministic quality gate** — achievement matching, ATS coverage, structure validation, and an **LLM fact-checker** — and regenerate until they're clean, so the letter never invents an experience you don't have.
 - The apply engine **never fakes success** — it only reports "submitted" on a real confirmation; otherwise it pauses for you and **resumes automatically** once you fill the gap (no button press needed).
+- It reads **email verification codes (OTP) straight from your Gmail** mid-apply, so login/verification walls don't stop the run.
 - Anything you type during a pause is **captured to memory** and reused on future jobs — even when the same question is **worded differently** (semantic matching).
 
 ---
@@ -25,9 +28,10 @@ This tool automates the entire job application workflow:
 
 - **Node.js** 18+
 - **PostgreSQL** (local or cloud)
-- **Ollama** (for local GPU-accelerated AI) OR **AWS Bedrock** (cloud)
+- **An AI provider** — Anthropic API (default), AWS Bedrock, or local **Ollama**
 - **Playwright browsers** (`npx playwright install`)
 - **Tectonic** (local LaTeX compiler) at `~/.job-agent-tools/`
+- **(Optional) Google Cloud OAuth client** — for live Gmail OTP + status sync
 - **Git**
 
 ### 1. Install & Setup
@@ -40,7 +44,7 @@ npm install
 # Install Playwright browsers (required for scraping + applying)
 npx playwright install
 
-# For Ollama (local AI)
+# OPTIONAL — only if using the local Ollama provider
 ollama pull qwen2.5:3b         # tailoring + Q&A model
 ollama pull nomic-embed-text   # semantic memory matching (recommended)
 
@@ -50,11 +54,19 @@ npx prisma db push
 
 ### 2. Configure `.env`
 
+Copy `.env.example` to `.env` and fill it in. The essentials:
+
 ```bash
-# AI Provider
-AI_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434/v1
-OLLAMA_MODEL=qwen2.5:3b
+# Auth (single password gate — JWT in an httpOnly cookie)
+AUTH_PASSWORD=your_secure_password
+AUTH_SECRET=your_64_char_random_secret
+
+# AI Provider — "anthropic" (default) | "bedrock" | "ollama"
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-sonnet-4-6
+# (Bedrock instead: AWS_REGION + AWS_BEARER_TOKEN_BEDROCK)
+# (Ollama instead: OLLAMA_BASE_URL + OLLAMA_MODEL)
 
 # Database
 DATABASE_URL=postgresql://user:password@localhost:5432/job_agent
@@ -69,12 +81,17 @@ LINKEDIN_PASSWORD=your-password
 ATS_EMAIL=you@example.com
 ATS_PASSWORD=your-password
 
+# Gmail (optional) — auto-fetch OTP/verification codes + live status sync
+GMAIL_CLIENT_ID=your_google_oauth_client_id
+GMAIL_CLIENT_SECRET=your_google_oauth_client_secret
+GMAIL_OAUTH_REDIRECT=http://localhost:3000/api/gmail/oauth/callback
+
 # Application limits
-AUTOMATION_MAX_JOBS=20
+AUTOMATION_MAX_APPLICATIONS_PER_DAY=30
 AUTOMATION_AUTO_APPLY=false
 ```
 
-> **Security:** `.env` holds plaintext credentials — keep it out of git (it's gitignored by default) and never share it. Fine for local single-user use.
+> **Security:** Prefer **Settings → Credentials** (AES-256-GCM encrypted at rest) over plaintext `.env`. If you do use `.env`, keep it out of git (it's gitignored by default) and never share it. Fine for local single-user use.
 
 ### 3. Run
 
@@ -90,12 +107,14 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ### Tech Stack
 
-- **Frontend**: Next.js 15, React 19, TailwindCSS (glass/aurora dark theme), Recharts
-- **Backend**: TypeScript, Next.js API routes
+- **Frontend**: Next.js 15 (App Router), React 19, TailwindCSS (glass/aurora dark theme), Recharts
+- **Backend**: TypeScript (strict), Next.js API routes
 - **Database**: PostgreSQL + Prisma
-- **AI**: Claude (Ollama local, or AWS Bedrock); `nomic-embed-text` for semantic memory
+- **AI**: Claude via Anthropic API (default), AWS Bedrock, or local Ollama; `nomic-embed-text` for semantic memory
+- **Email**: Gmail API (OAuth2, read-only) via `googleapis`
 - **Automation**: Playwright (persistent Edge/Chromium profile)
 - **PDF**: Tectonic (local LaTeX compiler)
+- **Tests**: Vitest
 
 ### Key Features
 
@@ -105,7 +124,8 @@ Open [http://localhost:3000](http://localhost:3000).
 ✅ **Compliance gating** (visa/EEO answers come only from your profile — never AI-guessed)  
 ✅ **Dropdown intelligence** (maps TX→Texas, MS→Master's, USA→United States, etc. with no AI)  
 ✅ **Encrypted credentials** (AES-256-GCM at rest — no plaintext passwords)  
-✅ **AI-powered tailoring** (summary + cover letter per job)  
+✅ **AI-powered tailoring** (JD-specific summary + reordered skills/bullets, truth-checked)  
+✅ **Fact-checked cover letters** (achievement matcher + ATS validator + structure check + **LLM fact-checker** + retry loop — regenerates until clean)  
 ✅ **ATS score analyzer** (keyword-match % + missing keywords + suggestions, auto-computed per job)  
 ✅ **Job fit scoring** (Technical / Experience / Education + overall match, in the ATS panel)  
 ✅ **H1B / CPT / OPT detection** (sponsorship + international-friendliness flagged per job)  
@@ -125,13 +145,16 @@ Open [http://localhost:3000](http://localhost:3000).
 ✅ **Semantic memory** (reuses your answers even when a question is worded differently)  
 ✅ **Self-correcting memory** (fixing a wrong answer overwrites the bad one, including near-duplicates)  
 ✅ **Memory lock + validation** (lock answers so AI can't change them; bad value↔field matches are rejected; one-click cleanup)  
+✅ **Live Gmail integration** (OAuth2 read-only: auto-fetches **OTP/verification codes** mid-apply + scans your inbox to auto-update application statuses)  
 ✅ **Recruiter outreach** (AI-drafted connection note + message + follow-up per job)  
 ✅ **Interview prep workspace** (technical / behavioral-STAR / **system-design** questions, talking points, prep tips)  
-✅ **Email status detection** (paste an interview/offer/rejection email → classifies it and updates the application status)  
+✅ **AI career advisor** (skill-gap analysis + learning roadmap + target roles + salary insight, mined from the jobs you've analyzed)  
+✅ **Email status detection** (paste — or auto-sync — an interview/offer/rejection email → classifies it and updates the application status)  
 ✅ **Manual status updates** (set interview/offer/rejected to keep funnel analytics accurate)  
 ✅ **Resume diff viewer** (see changes per job)  
 ✅ **Excel export** (job tracker)  
 ✅ **Manual review mode** (pause before applying)  
+✅ **Pipeline overview dashboard** (at-a-glance funnel, stats, charts, recent executions)  
 ✅ **Modern glass UI** (frosted cards, aurora background, gradient accents)  
 ✅ **Screenshots** (every apply step, debugging)  
 
@@ -151,7 +174,36 @@ To update: edit `resume-template.ts`. The **Professional Summary** is swapped pe
 
 ---
 
+## Cover Letter Quality Gate
+
+Cover letters aren't trusted on the first try — they pass a **deterministic gate** before any PDF is compiled (`src/lib/cover-letter/quality.ts`, driven from `resume-tailor.ts`). Per attempt:
+
+- **Achievement matching** — the most relevant *verified* claims for the job are selected deterministically (token overlap against required skills); the model must build the match paragraph from these, not invent its own.
+- **ATS coverage** — fraction of the job's required skills that actually appear in the letter.
+- **Structure validation** — length, company/role present, no placeholders / leftover section markers / duplicate paragraphs.
+- **Hallucination check** — a regex guard (free) **plus an LLM fact-checker** that lists unsupported claims the regex can't catch.
+- **Quality score** — one number from accuracy + ATS coverage; hallucinations are heavily penalized.
+
+A letter is **accepted** only when it's structurally valid, has **zero hallucinations**, ATS coverage ≥ 70%, and clears the quality bar. Otherwise it regenerates — with the specific issues *and* the matched real achievements as guidance — up to `COVER_LETTER_MAX_ATTEMPTS` (default 3), keeping the best attempt.
+
+---
+
 ## AI Provider Setup
+
+The provider is selected with `AI_PROVIDER` (`anthropic` | `bedrock` | `ollama`). All three speak the same Messages API under the hood via `src/lib/ai/claude.ts`.
+
+> **Model note:** `output_config.effort` and adaptive thinking are gated behind `MODEL_SUPPORTS_EFFORT` (`opus-4-[678]` / `sonnet-4-6`) — Haiku 4.5 / Sonnet 4.5 reject those params, so the code omits them automatically.
+
+### Cloud: Anthropic API (default)
+
+**Best for:** Simplest setup, best quality.
+
+```bash
+# In .env
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-sonnet-4-6
+```
 
 ### Local: Ollama + GPU
 
@@ -170,16 +222,16 @@ ollama ps  # Verify: 100% GPU
 
 ### Cloud: AWS Bedrock
 
-**Best for:** Speed (~5s/job), better quality, cheap (~$1 per 100 jobs).
+**Best for:** Speed (~5s/job), cheap (~$1 per 100 jobs).
 
 ```bash
-# AWS Console: Bedrock → Model access → Enable Claude Haiku 4.5
-
 # In .env
 AI_PROVIDER=bedrock
 AWS_REGION=us-east-1
 AWS_BEARER_TOKEN_BEDROCK=ABSK...your-key...
 ```
+
+> **First-time Anthropic-on-Bedrock setup:** the old "Model access" page is retired — serverless models auto-enable on first invoke, but first-time Anthropic use requires submitting a one-time use-case form (Bedrock console → Model catalog → the model → *Open in playground* triggers it). After submitting, access is instant.
 
 ---
 
@@ -290,10 +342,28 @@ The pipeline doesn't stop at "Applied." Each application row has tools for the r
 
 - **Recruiter outreach** (people icon) — AI drafts a LinkedIn connection note (<300 chars), a longer intro message, and a one-week follow-up, grounded in your real strengths. Optionally name the recruiter for personalization. One-click copy each.
 - **Interview prep** (grad-cap icon) — generates likely **technical**, **behavioral (STAR)**, and **system-design** questions scaled to the role's seniority, plus why-you-fit talking points, questions to ask, and a prep checklist — all grounded in your résumé.
-- **Email status detection** — on the Applications tab, paste an email you received (interview invite / assessment / offer / rejection). The classifier labels it, suggests a reply, and (with "Classify & update status") matches it to the application by company and updates its status automatically.
+- **Email status detection** — paste an email you received (interview invite / assessment / offer / rejection), or let the **live Gmail sync** pull it in. The classifier labels it, suggests a reply, matches it to the application by company, and updates its status automatically.
 - **Manual status dropdown** — set any application to interview/offer/rejected/etc. directly, keeping the funnel analytics honest.
 
-> **Note on email sync:** v1 is paste-an-email (no credentials needed). Live Gmail/Outlook polling needs OAuth setup (your Google Cloud / Azure app credentials) and is a future add-on.
+See **[Gmail Integration](#gmail-integration-live)** below for the OTP auto-fetch + live inbox sync.
+
+---
+
+## Gmail Integration (Live)
+
+Connect a Gmail account (OAuth2, **read-only** `gmail.readonly` scope) for two things:
+
+1. **OTP / verification codes mid-apply** — when an apply hits an email-verification gate (Workday account creation, Greenhouse/Bloomerang security codes, etc.), the engine fetches the emailed code from Gmail and enters it automatically. Human takeover stays as the fallback. *(One-time codes are never saved to memory — they're single-use.)*
+2. **Live inbox scan + auto-status** — periodically (and at the start of each automation batch) classifies incoming job mail and auto-updates the matching application's status. Manual "Scan now" and "Get latest code" buttons live on the **Gmail Inbox** panel (Applications tab).
+
+### One-time setup
+
+1. **Google Cloud Console** → create a project → enable the **Gmail API**.
+2. **OAuth consent screen** → *External* (Testing mode is fine for single-user); add your Gmail under **Audience → Test users** (the new console splits test users onto their own page — skipping it causes `403 access_denied`).
+3. **Credentials** → *Create OAuth client ID* → **Web application**, redirect URI `http://localhost:3000/api/gmail/oauth/callback`.
+4. Put `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_OAUTH_REDIRECT` in `.env`, then click **Connect Gmail** in the app.
+
+The refresh token is **encrypted at rest** (`UserSettings.encGmailRefreshToken`); only `gmail.readonly` is requested (a local sync cursor is kept instead of needing `modify`). Connect the *same inbox the apply engine fills into forms* so OTP and status mail land where the bot looks.
 
 ---
 
@@ -384,6 +454,10 @@ Standard consent checkboxes (terms/privacy/certify) are auto-ticked. Styled/hidd
 
 **Fix:** Ensure Tectonic is at `~/.job-agent-tools/tectonic.exe`. Check logs for LaTeX errors.
 
+### Gmail "403 access_denied" when connecting
+
+**Fix:** In the Google Cloud console, add your Gmail address under **OAuth consent screen → Audience → Test users**. The new console splits test users onto a separate page; if it's missing there, OAuth is denied even with a valid client ID.
+
 ### Database schema out of sync / column errors
 
 **Fix:**
@@ -396,11 +470,13 @@ npx prisma generate     # Regenerate the client
 
 ## Performance & Costs
 
-| Task | Ollama (Local) | Bedrock (AWS) |
+| Task | Cloud (Anthropic / Bedrock) | Ollama (Local) |
 |---|---|---|
-| Analyze + Tailor (1 job) | 25–30s | 5–10s |
-| Cost (10 jobs) | $0.10–$0.20 (power) | ~$0.10 |
-| **Total (10 jobs)** | ~4–5 min | ~2–3 min |
+| Analyze + Tailor (1 job) | 5–10s | 25–30s |
+| Cost (10 jobs) | ~$0.10 | $0.10–$0.20 (power) |
+| **Total (10 jobs)** | ~2–3 min | ~4–5 min |
+
+> The cover-letter quality gate may add 1–2 extra AI calls per job when a letter needs to regenerate.
 
 ---
 
@@ -410,33 +486,43 @@ npx prisma generate     # Regenerate the client
 src/
 ├── app/
 │   ├── globals.css           # Theme: aurora bg, .card-glass / .text-gradient utilities
-│   ├── dashboard/            # Dashboard UI (tabs, header, MemoryTab w/ lock+cleanup)
+│   ├── dashboard/            # Dashboard UI (tabs: Dashboard/Jobs/Applications/Analytics/
+│   │                         #   Career/Profile/Resume/Memory/Settings)
 │   └── api/                  # REST endpoints
 │       ├── jobs/             #   ats-score, interview-prep, recruiter-message, …
 │       ├── applications/     #   classify-email, status, apply, …
 │       ├── automation/       #   start/stop/status (pause, resume, confirmSubmitted)
+│       ├── gmail/            #   connect, oauth/callback, status, disconnect, sync, otp
+│       ├── career/           #   AI career advice from analyzed jobs
 │       └── memory/           #   CRUD + lock + cleanup
 ├── lib/
-│   ├── ai/                   # claude.ts, ollama.ts, ats-analyzer.ts (scoring + fit)
+│   ├── ai/                   # claude.ts (anthropic/bedrock/ollama), ollama.ts,
+│   │                         #   ats-analyzer.ts (scoring + fit)
 │   ├── automation/           # apply-engine, ats-adapters, resume-tailor,
 │   │                         #   resume-template, latex-compiler, automation-engine,
 │   │                         #   scraper-status (human-takeover signals)
+│   ├── cover-letter/         # quality.ts (achievement match + ATS + quality gate)
+│   ├── gmail/                # client (OAuth2), fetch, otp (extractOtp), sync (inbox scan)
 │   ├── matching/             # fast-filter, visa-detector (H1B/CPT/OPT)
 │   ├── scraping/             # Job scrapers + orchestrator
 │   ├── storage/              # memory.ts (semantic + lock + validation), file-manager
 │   └── db/                   # Prisma client
-├── components/dashboard/     # JobsTable (ATS+fit panel, visa badge), ApplicationsTable
-│                             #   (status dropdown, recruiter/interview), AnalyticsPanel,
-│                             #   EmailClassifierPanel, RecruiterOutreachModal,
-│                             #   InterviewPrepModal, AutomationControls, StatsCards
+├── components/dashboard/     # DashboardOverview (pipeline/stats/charts), JobsTable
+│                             #   (ATS+fit panel, visa badge), ApplicationsTable, AnalyticsPanel,
+│                             #   CareerAdvisorPanel, EmailClassifierPanel (Gmail inbox),
+│                             #   RecruiterOutreachModal, InterviewPrepModal, ProfilePanel,
+│                             #   AutomationControls, StatsCards
 └── prisma/
     └── schema.prisma         # Job.atsKeywordScore / sponsorshipStatus / intlFriendlyScore,
-                              #   CoverLetter.pdfPath, ApplicationMemory.locked
+                              #   CoverLetter.pdfPath, ApplicationMemory.locked,
+                              #   UserSettings.encGmailRefreshToken, EmailEvent (inbox + dedupe)
 ```
 
 **Key files:**
-- `lib/automation/apply-engine.ts` — multi-step apply loop, Workday auto-auth, auto-takeover, checkbox/cover-letter handling
+- `lib/automation/apply-engine.ts` — multi-step apply loop, Workday auto-auth, auto-takeover, OTP/email-verification handling, checkbox/cover-letter handling
 - `lib/automation/ats-adapters.ts` — per-platform selectors (add new ATSes here)
+- `lib/cover-letter/quality.ts` — achievement matcher, ATS validator, quality scorer, accept gate
+- `lib/gmail/` — OAuth2 client + inbox fetch/parse + OTP extraction + live status sync
 - `lib/ai/ats-analyzer.ts` — ATS keyword scoring + Technical/Experience/Education fit
 - `lib/matching/visa-detector.ts` — sponsorship / CPT / OPT detection
 - `lib/storage/memory.ts` — exact + semantic recall, self-correction, lock, value↔field validation
@@ -457,13 +543,13 @@ Trade-off: Less variety per job. Offset by cover letter + AI summary.
 
 Why: Fast (~2.5s), offline, no browser automation.
 
-Trade-off: Requires binary install. Simple: `ollama pull qwen2.5:3b`-style.
+Trade-off: Requires a one-time binary install (auto-downloaded to `~/.job-agent-tools/`).
 
-### 3. Ollama by Default
+### 3. Pluggable AI Provider
 
-Why: Privacy, no API costs, GPU-accelerated.
+Why: One code path (`src/lib/ai/claude.ts`) speaks the Messages API to Anthropic, Bedrock, or Ollama. Default is the Anthropic API for quality + zero local setup; switch to Ollama for fully-private, no-cost local inference.
 
-Trade-off: Requires local GPU. CPU-only is slow.
+Trade-off: Cloud providers cost a little per job; Ollama needs a local GPU (CPU-only is slow).
 
 ### 4. Manual Review by Default
 
@@ -492,6 +578,12 @@ A: It can't always auto-detect a confirmation page. When you finish a takeover, 
 
 **Q: Does it really log into Workday for me?**  
 A: Yes — it signs in, or creates an account on that company's tenant, using `ATS_EMAIL`/`ATS_PASSWORD`. If the tenant requires email verification or a captcha, it hands off to you, then you click "I submitted it".
+
+**Q: Does it handle email verification codes (OTP)?**  
+A: Yes, if you connect Gmail. When an apply emails a code (e.g. Workday account creation, Greenhouse/Bloomerang security codes), the engine reads it from your inbox and enters it automatically. Without Gmail connected, it pauses for human takeover instead. One-time codes are never saved to memory.
+
+**Q: Is the Gmail access safe?**  
+A: It's **read-only** (`gmail.readonly` scope) and the refresh token is encrypted at rest. The app stays in Google's "Testing" mode (single-user), and it only reads — it never sends or deletes mail.
 
 **Q: A saved answer is wrong / the same value got into every field. How do I fix it?**  
 A: Open the **Memory** tab → **"Clean up bad answers"** to purge mismatches, then click any answer to edit it and 🔒 **lock** your identity fields so they can't drift again. Typing a correction during an application also overwrites the bad entry (and similarly-worded duplicates).
