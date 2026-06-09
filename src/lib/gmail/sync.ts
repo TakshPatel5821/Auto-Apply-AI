@@ -52,72 +52,87 @@ export interface SyncResult {
   updated: AppliedStatus[];
 }
 
+// In-process guard so overlapping triggers (panel auto-poll, StrictMode double
+// effects, the batch-start sync) can't run two scans at once — concurrent runs
+// would both pass the dedupe check and race on the gmailId unique insert.
+let isSyncing = false;
+
 // Fetch + classify + auto-apply for all inbox mail since the last sync cursor.
 export async function syncInbox(opts: { maxResults?: number } = {}): Promise<SyncResult> {
-  const gmail = await getAuthedGmail();
-  if (!gmail) return { scanned: 0, classified: 0, updated: [] };
+  if (isSyncing) return { scanned: 0, classified: 0, updated: [] };
+  isSyncing = true;
+  try {
+    const gmail = await getAuthedGmail();
+    if (!gmail) return { scanned: 0, classified: 0, updated: [] };
 
-  const s = await prisma.userSettings.findUnique({ where: { userId: USER_ID } });
-  const lastSync = s?.gmailLastSyncAt ? s.gmailLastSyncAt.getTime() : Date.now() - FIRST_RUN_LOOKBACK_MS;
-  const afterSec = Math.floor((lastSync - OVERLAP_MS) / 1000);
+    const s = await prisma.userSettings.findUnique({ where: { userId: USER_ID } });
+    const lastSync = s?.gmailLastSyncAt ? s.gmailLastSyncAt.getTime() : Date.now() - FIRST_RUN_LOOKBACK_MS;
+    const afterSec = Math.floor((lastSync - OVERLAP_MS) / 1000);
 
-  const ids = await listRecentMessages(
-    { q: `in:inbox after:${afterSec}`, maxResults: opts.maxResults ?? 25 },
-    gmail
-  ).catch(() => []);
+    const ids = await listRecentMessages(
+      { q: `in:inbox after:${afterSec}`, maxResults: opts.maxResults ?? 25 },
+      gmail
+    ).catch(() => []);
 
-  let scanned = 0;
-  let classified = 0;
-  const updated: AppliedStatus[] = [];
+    let scanned = 0;
+    let classified = 0;
+    const updated: AppliedStatus[] = [];
 
-  for (const id of ids) {
-    // Dedupe: skip messages we've already recorded (no re-classify, no token burn).
-    const exists = await prisma.emailEvent.findUnique({ where: { gmailId: id } }).catch(() => null);
-    if (exists) continue;
+    for (const id of ids) {
+      // Dedupe: skip messages we've already recorded (no re-classify, no token burn).
+      const exists = await prisma.emailEvent.findUnique({ where: { gmailId: id } }).catch(() => null);
+      if (exists) continue;
 
-    const m = await getMessage(id, gmail).catch(() => null);
-    if (!m) continue;
-    scanned++;
+      const m = await getMessage(id, gmail).catch(() => null);
+      if (!m) continue;
+      scanned++;
 
-    let result: EmailClassification | null = null;
-    try {
-      result = await claudeClassifyEmail(m.bodyText || m.snippet);
-      classified++;
-    } catch {
-      /* classification failed — still record the event so we don't retry forever */
+      let result: EmailClassification | null = null;
+      try {
+        result = await claudeClassifyEmail(m.bodyText || m.snippet);
+        classified++;
+      } catch {
+        /* classification failed — still record the event so we don't retry forever */
+      }
+
+      const applied = result ? await applyClassificationToApplication(result) : null;
+
+      // upsert (not create) so a same-message race / overlap is a silent no-op
+      // instead of a unique-constraint error.
+      await prisma.emailEvent
+        .upsert({
+          where: { gmailId: m.id },
+          update: {},
+          create: {
+            gmailId: m.id,
+            threadId: m.threadId || null,
+            fromEmail: m.fromEmail || null,
+            fromName: m.fromName || null,
+            subject: m.subject || null,
+            snippet: m.snippet || null,
+            receivedAt: m.date,
+            category: result?.category || null,
+            company: result?.company || null,
+            detectedStatus: result?.newStatus || null,
+            summary: result?.summary || null,
+            suggestedReply: result?.suggestedReply || null,
+            applicationId: applied?.id || null,
+            statusApplied: !!applied,
+          },
+        })
+        .catch(() => {});
+
+      if (applied) updated.push(applied);
     }
 
-    const applied = result ? await applyClassificationToApplication(result) : null;
+    // Advance the cursor. The OVERLAP_MS re-query window + gmailId dedupe ensure
+    // no message slips through the boundary.
+    await prisma.userSettings
+      .update({ where: { userId: USER_ID }, data: { gmailLastSyncAt: new Date() } })
+      .catch(() => {});
 
-    await prisma.emailEvent
-      .create({
-        data: {
-          gmailId: m.id,
-          threadId: m.threadId || null,
-          fromEmail: m.fromEmail || null,
-          fromName: m.fromName || null,
-          subject: m.subject || null,
-          snippet: m.snippet || null,
-          receivedAt: m.date,
-          category: result?.category || null,
-          company: result?.company || null,
-          detectedStatus: result?.newStatus || null,
-          summary: result?.summary || null,
-          suggestedReply: result?.suggestedReply || null,
-          applicationId: applied?.id || null,
-          statusApplied: !!applied,
-        },
-      })
-      .catch(() => {}); // unique race on gmailId is fine to swallow
-
-    if (applied) updated.push(applied);
+    return { scanned, classified, updated };
+  } finally {
+    isSyncing = false;
   }
-
-  // Advance the cursor. The OVERLAP_MS re-query window + gmailId dedupe ensure no
-  // message slips through the boundary.
-  await prisma.userSettings
-    .update({ where: { userId: USER_ID }, data: { gmailLastSyncAt: new Date() } })
-    .catch(() => {});
-
-  return { scanned, classified, updated };
 }
