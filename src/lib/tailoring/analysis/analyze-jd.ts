@@ -11,10 +11,12 @@ const SYSTEM =
   "matching the schema. You do not write prose. You do not invent fields. If a field " +
   "is not in the JD, leave it empty or 0.";
 
-// Title tokens that flag a senior-level posting. Kept deterministic so the
-// senior-title gate (pre-filter) never depends solely on the LLM noticing it.
+// Title tokens that flag a senior-level posting. The senior gate is a senior-
+// *title* gate, so seniority is derived deterministically from the title only —
+// a small model happily dumps body words ("lead", or even "junior") into
+// seniorityFlags, which would falsely trip the gate.
 const SENIORITY_TOKENS = [
-  "senior", "sr.", "sr ", "lead", "staff", "principal", "director",
+  "senior", "sr", "lead", "staff", "principal", "director",
   "architect", "vp", "head of", "chief",
 ];
 
@@ -34,12 +36,14 @@ function asInt(val: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
-// Deterministic seniority detection from the title (union with the LLM's flags).
+// Deterministic seniority detection from the title (word-boundary, so "lead"
+// does not match "leadership" and "sr" does not match inside another word).
 function titleSeniorityFlags(jobTitle: string): string[] {
-  const t = ` ${jobTitle.toLowerCase()} `;
+  const t = jobTitle.toLowerCase();
   const flags = new Set<string>();
   for (const tok of SENIORITY_TOKENS) {
-    if (t.includes(tok)) flags.add(tok.trim().replace(/\.$/, ""));
+    const re = new RegExp(`\\b${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    if (re.test(t)) flags.add(tok);
   }
   return [...flags];
 }
@@ -81,9 +85,8 @@ export async function analyzeJob(jobId: string): Promise<JobAnalysis> {
     700
   )) as Record<string, unknown>;
 
-  const seniorityFlags = [
-    ...new Set([...asStringArray(raw.seniorityFlags), ...titleSeniorityFlags(job.jobTitle)]),
-  ];
+  // Seniority is title-derived only (the LLM's body-level guesses are noisy).
+  const seniorityFlags = titleSeniorityFlags(job.jobTitle);
 
   const analysis: JobAnalysis = {
     jobId,
