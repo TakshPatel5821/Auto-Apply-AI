@@ -8,14 +8,15 @@ This tool automates the entire job application workflow:
 
 1. **Scrape** job listings from LinkedIn, Indeed, Glassdoor, Greenhouse, and custom sites
 2. **Analyze** each job against your resume using Claude AI — with an automatic **ATS keyword score** and visa/sponsorship detection
-3. **Tailor** your resume and generate a **fact-checked, quality-gated** cover letter (both compiled to PDF)
+3. **Tailor** your resume and generate a cover letter with a **fact-selection engine** — the AI only picks *which of your real facts to feature*; deterministic templates write the text (both compiled to PDF)
 4. **Generate** a single-page PDF CV via local LaTeX compilation
 5. **Apply** intelligently on LinkedIn (Easy Apply + external forms) and 13+ ATS platforms
 6. **Track** the full funnel and get **AI career guidance** from the jobs you've analyzed
 
 **Key Innovations:**
-- Resume tailoring uses a **fixed, hand-tuned LaTeX template** with only the Professional Summary AI-generated per job — guarantees 1-page output and 100% compilable PDFs.
-- Cover letters pass a **deterministic quality gate** — achievement matching, ATS coverage, structure validation, and an **LLM fact-checker** — and regenerate until they're clean, so the letter never invents an experience you don't have.
+- The tailoring engine (`src/lib/tailoring/`) makes hallucination **structurally impossible**: the LLM never writes prose — it only selects *fact IDs* from a strict allow-list built from your real résumé, and deterministic TypeScript templates compose the summary + cover letter. A skill, employer, or metric you don't have has **no ID to select**.
+- Resume tailoring uses a **fixed, hand-tuned LaTeX template** — only the Professional Summary and a *validated reordering* of your real skills/bullets change per job — guaranteeing 1-page output and 100% compilable PDFs.
+- Jobs you clearly don't fit (a senior title with too little experience, a hard domain like aerospace/clinical with zero overlap, or < 30% of the required skills) are **skipped**, not force-tailored.
 - The apply engine **never fakes success** — it only reports "submitted" on a real confirmation; otherwise it pauses for you and **resumes automatically** once you fill the gap (no button press needed).
 - It reads **email verification codes (OTP) straight from your Gmail** mid-apply, so login/verification walls don't stop the run.
 - Anything you type during a pause is **captured to memory** and reused on future jobs — even when the same question is **worded differently** (semantic matching).
@@ -124,8 +125,8 @@ Open [http://localhost:3000](http://localhost:3000).
 ✅ **Compliance gating** (visa/EEO answers come only from your profile — never AI-guessed)  
 ✅ **Dropdown intelligence** (maps TX→Texas, MS→Master's, USA→United States, etc. with no AI)  
 ✅ **Encrypted credentials** (AES-256-GCM at rest — no plaintext passwords)  
-✅ **AI-powered tailoring** (JD-specific summary + reordered skills/bullets, truth-checked)  
-✅ **Fact-checked cover letters** (achievement matcher + ATS validator + structure check + **LLM fact-checker** + retry loop — regenerates until clean)  
+✅ **Fact-selection tailoring** (the LLM picks which of your *real* facts to feature; deterministic templates write the summary + reordered skills/bullets — nothing invented)  
+✅ **Hallucination-proof cover letters** (composed from selected fact IDs, then hard-gated: 3 paragraphs, first-person, **employer↔achievement binding**, ATS-keyword floor, banned-phrase/placeholder checks — no free-text path)  
 ✅ **ATS score analyzer** (keyword-match % + missing keywords + suggestions, auto-computed per job)  
 ✅ **Job fit scoring** (Technical / Experience / Education + overall match, in the ATS panel)  
 ✅ **H1B / CPT / OPT detection** (sponsorship + international-friendliness flagged per job)  
@@ -174,17 +175,25 @@ To update: edit `resume-template.ts`. The **Professional Summary** is swapped pe
 
 ---
 
-## Cover Letter Quality Gate
+## Tailoring Engine (fact-selection)
 
-Cover letters aren't trusted on the first try — they pass a **deterministic gate** before any PDF is compiled (`src/lib/cover-letter/quality.ts`, driven from `resume-tailor.ts`). Per attempt:
+Résumé + cover-letter generation lives in **`src/lib/tailoring/`** and exposes one function — `tailorJob(resumeId, jobId)`. Its design makes hallucination **structurally impossible** by inverting the usual contract: **the LLM never writes prose.** It only selects *fact IDs* from a strict allow-list (the `FactBook`) built from your canonical résumé; deterministic TypeScript templates compose the actual text. A skill, employer, project, or metric you don't have simply has no ID to select.
 
-- **Achievement matching** — the most relevant *verified* claims for the job are selected deterministically (token overlap against required skills); the model must build the match paragraph from these, not invent its own.
-- **ATS coverage** — fraction of the job's required skills that actually appear in the letter.
-- **Structure validation** — length, company/role present, no placeholders / leftover section markers / duplicate paragraphs.
-- **Hallucination check** — a regex guard (free) **plus an LLM fact-checker** that lists unsupported claims the regex can't catch.
-- **Quality score** — one number from accuracy + ATS coverage; hallucinations are heavily penalized.
+The pipeline:
 
-A letter is **accepted** only when it's structurally valid, has **zero hallucinations**, ATS coverage ≥ 70%, and clears the quality bar. Otherwise it regenerates — with the specific issues *and* the matched real achievements as guidance — up to `COVER_LETTER_MAX_ATTEMPTS` (default 3), keeping the best attempt.
+1. **loadFacts** — build an immutable `FactBook` (skills, employers, achievements, projects, contact) from `resume-template.ts` + your résumé row, with stable IDs (`skill:python`, `employer:brainy-bean-info-tech`, …).
+2. **analyzeJob** *(LLM call #1)* — parse the JD into **structured JSON only** (required skills, ATS keywords, domain tags, seniority, years). Never prose.
+3. **preFilter** — eligibility gates (no LLM): senior-title vs. your experience, required-years floor, hard-domain overlap, and a **30% required-skill floor**. A job you clearly don't fit is **skipped**, not tailored.
+4. **selectFacts** *(LLM call #2)* — the model returns only **fact IDs + one verbatim JD detail**: 2–3 skills to feature, two evidence achievements from *different* employers, and an anchor. The skill orderings and the JD↔skill match are derived deterministically; **every ID is verified to exist**, and anything missing/invalid falls back to real facts — so the selection is always valid and grounded, even on a small local model.
+5. **composeSummary / composeLetter** *(no LLM)* — deterministic templates turn the selection into the summary + a 3-paragraph cover letter. Every word comes from a real skill name, real achievement text, a real project, or a JD-derived term.
+6. **validate** — hard gates that **throw** (no retry): exactly 3 paragraphs, 160–300 words, first-person, ≤ 2 second-person, no company-voice / placeholder labels / banned phrases, **employer↔achievement binding**, and an ATS-keyword floor. Because composition is deterministic, a gate failure means a *template regression* — so it fails loudly instead of silently shipping.
+7. **render → compile → persist** — LaTeX for both docs, Tectonic PDFs (the résumé keeps its 1-page guarantee with a canonical fallback), saved to the application folder + DB.
+
+Exactly **two** LLM calls per job, both structured — no regeneration loop. Smoke-test the whole pipeline end-to-end against a real job:
+
+```bash
+npx tsx --env-file=.env scripts/smoke-tailor.ts [jobId]
+```
 
 ---
 
@@ -476,7 +485,7 @@ npx prisma generate     # Regenerate the client
 | Cost (10 jobs) | ~$0.10 | $0.10–$0.20 (power) |
 | **Total (10 jobs)** | ~2–3 min | ~4–5 min |
 
-> The cover-letter quality gate may add 1–2 extra AI calls per job when a letter needs to regenerate.
+> Tailoring makes exactly **two** LLM calls per job (analyze JD + select facts); the summary, cover letter, and validation gates are deterministic — no regeneration loop.
 
 ---
 
@@ -498,10 +507,13 @@ src/
 ├── lib/
 │   ├── ai/                   # claude.ts (anthropic/bedrock/ollama), ollama.ts,
 │   │                         #   ats-analyzer.ts (scoring + fit)
-│   ├── automation/           # apply-engine, ats-adapters, resume-tailor,
-│   │                         #   resume-template, latex-compiler, automation-engine,
+│   ├── tailoring/            # fact-selection engine — tailorJob(): facts/ (FactBook),
+│   │                         #   analysis/ (JD→JSON), routing/ (preFilter), composition/
+│   │                         #   (select-facts + deterministic summary/letter builders),
+│   │                         #   validation/ (gates), rendering/ (LaTeX+compile), persistence/
+│   ├── automation/           # apply-engine, ats-adapters, resume-template,
+│   │                         #   latex-compiler, automation-engine,
 │   │                         #   scraper-status (human-takeover signals)
-│   ├── cover-letter/         # quality.ts (achievement match + ATS + quality gate)
 │   ├── gmail/                # client (OAuth2), fetch, otp (extractOtp), sync (inbox scan)
 │   ├── matching/             # fast-filter, visa-detector (H1B/CPT/OPT)
 │   ├── scraping/             # Job scrapers + orchestrator
@@ -521,7 +533,7 @@ src/
 **Key files:**
 - `lib/automation/apply-engine.ts` — multi-step apply loop, Workday auto-auth, auto-takeover, OTP/email-verification handling, checkbox/cover-letter handling
 - `lib/automation/ats-adapters.ts` — per-platform selectors (add new ATSes here)
-- `lib/cover-letter/quality.ts` — achievement matcher, ATS validator, quality scorer, accept gate
+- `lib/tailoring/` — fact-selection tailoring (`tailorJob`): `FactBook` allow-list, LLM picks IDs only, deterministic compose, hard gates, render/compile/persist
 - `lib/gmail/` — OAuth2 client + inbox fetch/parse + OTP extraction + live status sync
 - `lib/ai/ats-analyzer.ts` — ATS keyword scoring + Technical/Experience/Education fit
 - `lib/matching/visa-detector.ts` — sponsorship / CPT / OPT detection
@@ -556,6 +568,12 @@ Trade-off: Cloud providers cost a little per job; Ollama needs a local GPU (CPU-
 Why: Auto-apply to 50+/day risks LinkedIn rate-limits and flags.
 
 Trade-off: Not fully hands-off. But integrated: dashboard shows tailored versions, you click "Apply" when happy.
+
+### 5. Fact-Selection over Free-Text Generation
+
+Why: Letting an LLM write résumé/cover-letter prose freely is the root cause of fabricated skills, leaked template labels, and wrong voice — no amount of post-hoc gating fully fixes it. So the LLM is demoted to a *selector*: it returns fact IDs from your real résumé, and deterministic templates write every word. Hallucination becomes impossible by construction, not by inspection.
+
+Trade-off: Slightly less linguistic variety per job, and the strict eligibility/skill gates will *skip* borderline-fit jobs rather than stretch the truth. Worth it for letters you can send without re-reading every line.
 
 ---
 
