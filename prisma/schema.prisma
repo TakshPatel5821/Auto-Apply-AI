@@ -183,6 +183,7 @@ model Job {
   tailoredResumes TailoredResume[]
   coverLetters    CoverLetter[]
   application     Application?
+  screenings      ScreeningResult[]
 
   scrapedAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -192,6 +193,28 @@ model Job {
   @@index([matchScore])
   @@index([status])
   @@index([scrapedAt])
+}
+
+// Employer-side ATS screening run for a job (one row per loop run; history kept).
+model ScreeningResult {
+  id          String   @id @default(cuid())
+  jobId       String
+  job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  resumeId    String?
+
+  accepted    Boolean
+  finalScore  Int
+  reason      String?
+  learnList   String[] @default([])
+  rounds      Json     @default("[]") // LoopRound[]: per-round score / decision / gaps / comments
+
+  tailoredResumeId String?
+  coverLetterId    String?
+
+  createdAt   DateTime @default(now())
+
+  @@index([jobId])
+  @@index([createdAt])
 }
 
 enum JobStatus {
