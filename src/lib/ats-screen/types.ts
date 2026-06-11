@@ -13,10 +13,14 @@ export interface Gap {
 
 export interface ScreenResult {
   decision: "accept" | "reject";
-  score: number; // 0–100 keyword-coverage score
-  matched: string[]; // required skills the candidate genuinely has
-  coverableGaps: Gap[]; // real skills the pitch under-featured (loop can fix)
+  score: number; // 0–100 weighted recruiter score
+  matched: string[]; // required skills the candidate genuinely has (and mentioned)
+  coverableGaps: Gap[]; // present required skills NOT mentioned in the pitch (loop fixes)
   absentGaps: Gap[]; // required skills the candidate truly lacks (honest gaps)
+  mentionedNotEvidenced: string[]; // present skills named but not shown with a real achievement/project
+  niceToHave: { present: string[]; missing: string[] }; // nice-to-have coverage
+  breakdown: { requiredCoverage: number; evidenceRate: number; niceToHaveCoverage: number }; // 0–1 each
+  experienceNote?: string; // years-of-experience fit note
   comments: string[]; // recruiter-style notes
 }
 
