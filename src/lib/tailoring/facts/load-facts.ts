@@ -146,6 +146,14 @@ function computeCanonicalYears(): number {
   return Math.round((months / 12) * 100) / 100;
 }
 
+// Has the graduation date passed? True once we're into the month after it, so a
+// "May 2026" grad reads "graduating" through May and "graduated" from June on.
+function isGraduated(gradMonth: string, gradYear: number): boolean {
+  const m = MONTHS[gradMonth.slice(0, 3).toLowerCase()];
+  if (m == null) return false;
+  return Date.now() >= new Date(gradYear, m + 1, 1).getTime();
+}
+
 // Map fractional years → coarse level. A graduating student with only internship
 // spans lands in "intern"; this is a deterministic, documented threshold.
 function levelFromYears(years: number): Candidate["experienceLevel"] {
@@ -169,6 +177,7 @@ export function defaultCandidate(): Candidate {
     degree: CANONICAL_EDUCATION.degree,
     gradMonth: CANONICAL_EDUCATION.gradMonth,
     gradYear: CANONICAL_EDUCATION.gradYear,
+    graduated: isGraduated(CANONICAL_EDUCATION.gradMonth, CANONICAL_EDUCATION.gradYear),
     yearsOfProfessionalExperience: years,
     experienceLevel: levelFromYears(years),
   };

@@ -54,9 +54,12 @@ export function composeLetter(sel: FactSelection, facts: FactBook, analysis: Job
   const present = sel.presentRequiredSkills;
   const needSkills = canonicals(present.length ? present : sel.letterParagraphs.hook.skills, facts);
 
+  const eduClause = c.graduated
+    ? `As ${LEVEL_PHRASE[c.experienceLevel].toLowerCase()} who graduated ${c.gradMonth} ${c.gradYear} with an ${c.degree}, `
+    : `As ${LEVEL_PHRASE[c.experienceLevel].toLowerCase()} graduating ${c.gradMonth} ${c.gradYear} from ${c.degree}, `;
   const hook =
     `I am applying for the ${analysis.jobTitle} role at ${analysis.companyName}, a role I am genuinely excited to grow into. ` +
-    `As ${LEVEL_PHRASE[c.experienceLevel].toLowerCase()} graduating ${c.gradMonth} ${c.gradYear} from ${c.degree}, ` +
+    eduClause +
     `I bring hands-on experience with ${humanList(skills)}.`;
 
   const projId = pickProject(facts, present);
@@ -79,9 +82,12 @@ export function composeLetter(sel: FactSelection, facts: FactBook, analysis: Job
     .filter(Boolean)
     .join(" ");
 
+  const eduSentence = c.graduated
+    ? `Having completed my ${c.degree} in ${c.gradMonth} ${c.gradYear}, I would bring that momentum to your team. `
+    : `I am completing my ${c.degree} this ${c.gradMonth} and would bring that momentum to your team. `;
   const close =
     `${analysis.companyName}'s focus on ${detail} is what draws me to this role. ` +
-    `I am completing my ${c.degree} this ${c.gradMonth} and would bring that momentum to your team. ` +
+    eduSentence +
     `I would welcome the chance to contribute from the start and to keep learning as an engineer.`;
 
   return [hook, evidence, close].join("\n\n");

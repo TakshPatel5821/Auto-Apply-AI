@@ -46,6 +46,7 @@ export interface Candidate {
   degree: string;
   gradMonth: string;
   gradYear: number;
+  graduated: boolean;                      // grad date has passed (past vs. future tense)
   yearsOfProfessionalExperience: number;   // internships count as fractional
   experienceLevel: "intern" | "entry" | "mid" | "senior";
 }
