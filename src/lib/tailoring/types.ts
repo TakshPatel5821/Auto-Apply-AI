@@ -88,6 +88,10 @@ export interface FactSelection {
 
 export interface TailorResult { tailoredResumeId: string; coverLetterId: string; }
 
+// Feedback from the employer-side screening loop: real skills the candidate has
+// but the materials under-featured, to surface more prominently next round.
+export interface TailorHints { featureSkillIds?: SkillId[]; }
+
 export class EligibilityError extends Error {
   constructor(public reason: string) { super(reason); }
 }
