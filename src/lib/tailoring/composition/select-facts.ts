@@ -36,15 +36,15 @@ function reqMatchesSkill(reqLower: string, skill: Skill): boolean {
   return phrases.some((p) => tokenMatches(p, reqLower) || tokenMatches(reqLower, p));
 }
 
-// Exact intersection of analysis.requiredSkills ↔ FactBook skills. Deterministic;
-// drives the 30% eligibility floor and composeLetter's "maps directly to …" line.
-export function computeRequiredSkillMatch(
-  analysis: JobAnalysis,
+// Split a list of JD skill strings into those the candidate genuinely has (present)
+// and those they lack (absent), synonym-aware. Deterministic.
+export function matchSkillStrings(
+  skillStrings: string[],
   facts: FactBook
 ): { present: SkillId[]; absent: string[] } {
   const present = new Set<SkillId>();
   const absent: string[] = [];
-  for (const req of analysis.requiredSkills) {
+  for (const req of skillStrings) {
     const reqLower = req.toLowerCase().trim();
     if (!reqLower) continue;
     let matched = false;
@@ -57,6 +57,15 @@ export function computeRequiredSkillMatch(
     if (!matched) absent.push(req);
   }
   return { present: [...present], absent };
+}
+
+// Exact intersection of analysis.requiredSkills ↔ FactBook skills. Drives the 30%
+// eligibility floor and composeLetter's "maps directly to …" line.
+export function computeRequiredSkillMatch(
+  analysis: JobAnalysis,
+  facts: FactBook
+): { present: SkillId[]; absent: string[] } {
+  return matchSkillStrings(analysis.requiredSkills, facts);
 }
 
 // ─── Deterministic orderings (no LLM) ────────────────────────────────────────
@@ -100,10 +109,16 @@ function bestAchievementFor(emp: Employer, facts: FactBook, present: SkillId[]):
   return best;
 }
 
-function deterministicEvidence(facts: FactBook, present: SkillId[]): [AchievementId, AchievementId] {
+function deterministicEvidence(
+  facts: FactBook,
+  present: SkillId[],
+  featured: SkillId[] = []
+): [AchievementId, AchievementId] {
+  // Bias toward achievements that demonstrate the featured skills, then present.
+  const priority = [...new Set([...featured, ...present])];
   const emps = [...facts.employers.values()];
-  const a = bestAchievementFor(emps[0], facts, present);
-  const b = bestAchievementFor(emps[1] ?? emps[0], facts, present);
+  const a = bestAchievementFor(emps[0], facts, priority);
+  const b = bestAchievementFor(emps[1] ?? emps[0], facts, priority);
   return [a, b];
 }
 
@@ -210,7 +225,7 @@ function parseSelection(
     facts.achievements.get(rawEvidence[0])!.employerId !== facts.achievements.get(rawEvidence[1])!.employerId;
   const evidence: [AchievementId, AchievementId] = validPair
     ? [rawEvidence[0], rawEvidence[1]]
-    : deterministicEvidence(facts, present);
+    : deterministicEvidence(facts, present, featured);
 
   // Company detail — sanitized LLM verbatim phrase, else a clean grounded phrase.
   const rawDetail = (typeof raw.companyDetail === "string" ? raw.companyDetail : (lpClose.companyDetail as string) || "").trim();
