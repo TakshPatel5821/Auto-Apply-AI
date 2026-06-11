@@ -12,6 +12,7 @@ import {
   type ProjectId,
   type Skill,
   type SkillId,
+  type TailorHints,
 } from "../types";
 
 const SYSTEM =
@@ -62,11 +63,13 @@ export function computeRequiredSkillMatch(
 // These are permutations of known sets, not judgment calls — so we build them in
 // TypeScript. This removes the single most brittle ask (a 32-item permutation a
 // small model can't reproduce) and is valid by construction.
-function deterministicSkillOrder(facts: FactBook, present: SkillId[]): SkillId[] {
+function deterministicSkillOrder(facts: FactBook, present: SkillId[], featured: SkillId[] = []): SkillId[] {
   const seen = new Set<SkillId>();
   const order: SkillId[] = [];
-  for (const id of present) if (facts.skills.has(id) && !seen.has(id)) { seen.add(id); order.push(id); }
-  for (const id of facts.skills.keys()) if (!seen.has(id)) { seen.add(id); order.push(id); }
+  const push = (id: SkillId) => { if (facts.skills.has(id) && !seen.has(id)) { seen.add(id); order.push(id); } };
+  for (const id of featured) push(id); // screening-loop emphasis first
+  for (const id of present) push(id);
+  for (const id of facts.skills.keys()) push(id);
   return order;
 }
 
@@ -174,17 +177,18 @@ function parseSelection(
   present: SkillId[],
   absent: string[],
   skillOrder: SkillId[],
-  achOrder: Map<EmployerId, AchievementId[]>
+  achOrder: Map<EmployerId, AchievementId[]>,
+  featured: SkillId[] = []
 ): FactSelection {
   const lp = (raw.letterParagraphs as Record<string, unknown>) || {};
   const lpEvidence = (lp.evidence as Record<string, unknown>) || {};
   const lpClose = (lp.close as Record<string, unknown>) || {};
   const lpHook = (lp.hook as Record<string, unknown>) || {};
 
-  // Summary skills — LLM picks, topped up to 2-3 from present-required (or any)
-  // skills so the summary never features just one skill.
+  // Summary skills — screening-loop "feature these" first, then the LLM's picks,
+  // topped up to 2-3 from present-required (or any) skills.
   const llmSummary = asIdArray<SkillId>(raw.summarySkills ?? lpHook.skills).filter((id) => facts.skills.has(id));
-  let summarySkills = llmSummary.slice(0, 3);
+  let summarySkills = [...new Set([...featured, ...llmSummary])].slice(0, 3);
   if (summarySkills.length < 2) {
     const pool = (present.length ? present : [...facts.skills.keys()]).filter((id) => !summarySkills.includes(id));
     summarySkills = [...summarySkills, ...pool].slice(0, 3);
@@ -258,9 +262,14 @@ export function verifySelection(sel: FactSelection, facts: FactBook): void {
 // the selection is always valid + fully grounded on any model (incl. local
 // Ollama). verifySelection is the final guard (it can only throw the eligibility
 // floor once the structure is built deterministically).
-export async function selectFacts(analysis: JobAnalysis, facts: FactBook): Promise<FactSelection> {
+export async function selectFacts(
+  analysis: JobAnalysis,
+  facts: FactBook,
+  hints?: TailorHints
+): Promise<FactSelection> {
   const { present, absent } = computeRequiredSkillMatch(analysis, facts);
-  const skillOrder = deterministicSkillOrder(facts, present);
+  const featured = (hints?.featureSkillIds ?? []).filter((id) => facts.skills.has(id));
+  const skillOrder = deterministicSkillOrder(facts, present, featured);
   const achOrder = deterministicAchievementOrder(facts, present);
 
   let raw: Record<string, unknown> = {};
@@ -271,7 +280,7 @@ export async function selectFacts(analysis: JobAnalysis, facts: FactBook): Promi
     raw = {};
   }
 
-  const sel = parseSelection(raw, facts, analysis, present, absent, skillOrder, achOrder);
+  const sel = parseSelection(raw, facts, analysis, present, absent, skillOrder, achOrder, featured);
   verifySelection(sel, facts); // structurally valid by construction; may throw the 30% floor
   return sel;
 }
