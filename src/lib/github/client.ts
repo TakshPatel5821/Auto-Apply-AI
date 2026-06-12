@@ -60,6 +60,21 @@ export async function fetchRepos(username: string, token?: string): Promise<GhRe
   return out;
 }
 
+// Verify a token + read its scopes (classic tokens expose them via the
+// X-OAuth-Scopes header; fine-grained tokens return an empty list). login === null
+// means the token is invalid/expired.
+export async function ghAuthInfo(token: string): Promise<{ login: string | null; scopes: string[] }> {
+  try {
+    const res = await fetch(`${GH}/user`, { headers: headers(token) });
+    if (!res.ok) return { login: null, scopes: [] };
+    const scopes = (res.headers.get("x-oauth-scopes") || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const data = (await res.json()) as { login?: string };
+    return { login: data.login || null, scopes };
+  } catch {
+    return { login: null, scopes: [] };
+  }
+}
+
 // The README endpoint returns the repo's README regardless of filename/branch.
 // Returns "" if there is none (or on any error — README is best-effort context).
 export async function fetchReadme(fullName: string, token?: string): Promise<string> {

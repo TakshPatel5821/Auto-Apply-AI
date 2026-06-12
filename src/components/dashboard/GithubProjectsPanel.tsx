@@ -22,6 +22,7 @@ export function GithubProjectsPanel() {
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const load = useCallback(async () => {
     const res = await fetch("/api/github/projects");
@@ -34,6 +35,7 @@ export function GithubProjectsPanel() {
   async function fetchGithub() {
     setLoading(true);
     setError("");
+    setNotice("");
     try {
       const res = await fetch("/api/github/fetch", {
         method: "POST",
@@ -41,8 +43,17 @@ export function GithubProjectsPanel() {
         body: JSON.stringify({ username, token: token.trim() || undefined }),
       });
       const data = await res.json();
-      if (data.projects) setProjects(data.projects);
-      else setError(data.error || "Fetch failed.");
+      if (data.projects) {
+        setProjects(data.projects);
+        setNotice(
+          data.warning ||
+            `Imported ${data.count} repo${data.count === 1 ? "" : "s"}${
+              data.authenticatedAs
+                ? ` as @${data.authenticatedAs} (incl. private)`
+                : " (public only — add a token for private repos)"
+            }.`
+        );
+      } else setError(data.error || "Fetch failed.");
     } catch {
       setError("Fetch failed — see logs.");
     } finally {
@@ -101,6 +112,9 @@ export function GithubProjectsPanel() {
       </p>
 
       {error && <div className="text-xs text-red-400">{error}</div>}
+      {notice && (
+        <div className={`text-xs ${/missing|invalid|public only/i.test(notice) ? "text-amber-400" : "text-emerald-400"}`}>{notice}</div>
+      )}
 
       {projects.length === 0 ? (
         <div className="text-xs text-gray-600 py-6 text-center">
