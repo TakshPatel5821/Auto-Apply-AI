@@ -1,7 +1,10 @@
 import {
   buildResumeLatex,
+  escapeTex,
   RESUME_EXPERIENCE,
+  RESUME_PROJECTS,
   RESUME_SKILLS,
+  type ResumeEntry,
   type ResumeOverrides,
 } from "@/lib/automation/resume-template";
 import type { FactBook, FactSelection, SkillId } from "../types";
@@ -39,6 +42,18 @@ export function renderResumeLatex(sel: FactSelection, facts: FactBook, summary: 
     return bullets.length === entry.bullets.length ? bullets : entry.bullets;
   });
 
-  const overrides: ResumeOverrides = { skills, experienceBullets };
+  // Selected GitHub projects (FactBook ids "project:gh-…") surface first, then the
+  // canonical projects, capped to keep the résumé one page (the compile step also
+  // falls back to canonical if it ever spills to a second page).
+  const ghEntries: ResumeEntry[] = [...facts.projects.values()]
+    .filter((p) => p.id.startsWith("project:gh-"))
+    .map((p) => {
+      const stackNames = p.stack.map((id) => facts.skills.get(id)?.canonical).filter((s): s is string => !!s);
+      const heading = `\\textbf{${escapeTex(p.name)}}${stackNames.length ? ` $|$ \\textit{${escapeTex(stackNames.join(", "))}}` : ""}`;
+      return { heading, bullets: [p.description] };
+    });
+  const projects = ghEntries.length ? [...ghEntries, ...RESUME_PROJECTS].slice(0, 4) : undefined;
+
+  const overrides: ResumeOverrides = { skills, experienceBullets, ...(projects ? { projects } : {}) };
   return buildResumeLatex(summary, overrides);
 }

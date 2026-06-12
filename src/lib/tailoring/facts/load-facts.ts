@@ -282,5 +282,38 @@ export function buildFactBook(candidate: Candidate): FactBook {
 export async function loadFacts(resumeId: string): Promise<FactBook> {
   const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
   const candidate = buildCandidate(resume?.parsedData, resume?.yearsOfExperience);
-  return buildFactBook(candidate);
+  const fb = buildFactBook(candidate);
+  await attachGithubProjects(fb);
+  return fb;
+}
+
+// Merge the user's SELECTED GitHub projects into the FactBook (deduped by name).
+// They then flow into the cover letter (pickProject) + the résumé automatically.
+// Degrades gracefully if the table/client isn't available.
+async function attachGithubProjects(fb: FactBook): Promise<void> {
+  let selected: { repo: string; name: string; bullet: string; stack: string[] }[];
+  try {
+    selected = await prisma.githubProject.findMany({
+      where: { selected: true },
+      orderBy: { pushedAt: "desc" },
+      select: { repo: true, name: true, bullet: true, stack: true },
+    });
+  } catch {
+    return; // table not migrated / DB error → skip
+  }
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const seen = new Set([...fb.projects.values()].map((p) => norm(p.name)));
+  for (const gp of selected) {
+    if (seen.has(norm(gp.name))) continue;
+    const id = `project:gh-${slugify(gp.repo)}` as ProjectId;
+    if (fb.projects.has(id)) continue;
+    fb.projects.set(id, {
+      id,
+      name: gp.name,
+      stack: matchSkillIds(`${gp.stack.join(" ")} ${gp.bullet}`, fb.skills),
+      description: gp.bullet,
+      keywords: extractKeywords(`${gp.name} ${gp.bullet}`),
+    });
+    seen.add(norm(gp.name));
+  }
 }
