@@ -15,6 +15,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const username = String(body.username || DEFAULT_USER).trim();
   const token = body.token ? String(body.token).trim() : undefined;
+  const includeForks = Boolean(body.includeForks);
 
   try {
     let authenticatedAs: string | null = null;
@@ -29,8 +30,8 @@ export async function POST(req: NextRequest) {
         warning = "Token is missing the 'repo' scope, so only public repos imported. Regenerate a classic token with the 'repo' box ticked.";
       }
     }
-    const projects = await importGithubProjects(username, token);
-    return NextResponse.json({ success: true, count: projects.length, authenticatedAs, warning, projects });
+    const { projects, stats } = await importGithubProjects(username, token, { includeForks });
+    return NextResponse.json({ success: true, count: projects.length, stats, authenticatedAs, warning, projects });
   } catch (e) {
     await Logger.error("GITHUB", `Fetch failed for ${username}: ${e}`);
     return NextResponse.json(
