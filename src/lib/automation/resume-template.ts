@@ -98,6 +98,7 @@ export interface ResumeOverrides {
   experienceBullets?: string[][]; // per experience entry, in order
   projectBullets?: string[][];    // per project entry, in order
   skills?: string[][];            // per skill group, reordered items
+  projects?: ResumeEntry[];       // full replacement of the Projects section (e.g. selected GitHub projects + canonical)
 }
 
 function renderBullets(bullets: string[]): string {
@@ -164,7 +165,7 @@ ${renderEntries(RESUME_EXPERIENCE, overrides?.experienceBullets)}
 
 % PROJECTS
 \\section*{Projects}
-${renderEntries(RESUME_PROJECTS, overrides?.projectBullets)}
+${renderEntries(overrides?.projects ?? RESUME_PROJECTS, overrides?.projectBullets)}
 
 % SKILLS
 \\section*{Technical Skills}
