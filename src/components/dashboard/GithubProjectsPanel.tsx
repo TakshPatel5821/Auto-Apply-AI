@@ -19,6 +19,7 @@ interface GhProject {
 export function GithubProjectsPanel() {
   const [projects, setProjects] = useState<GhProject[]>([]);
   const [username, setUsername] = useState("TakshPatel5821");
+  const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -37,7 +38,7 @@ export function GithubProjectsPanel() {
       const res = await fetch("/api/github/fetch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username }),
+        body: JSON.stringify({ username, token: token.trim() || undefined }),
       });
       const data = await res.json();
       if (data.projects) setProjects(data.projects);
@@ -73,7 +74,15 @@ export function GithubProjectsPanel() {
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="github username"
-            className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-white w-36 focus:outline-none focus:border-blue-500"
+            className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-white w-32 focus:outline-none focus:border-blue-500"
+          />
+          <input
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            type="password"
+            placeholder="token (for private repos)"
+            title="A GitHub personal access token with 'repo' scope. Optional — only needed to import PRIVATE repos. Not stored."
+            className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-white w-44 focus:outline-none focus:border-blue-500"
           />
           <button
             onClick={fetchGithub}
@@ -85,6 +94,11 @@ export function GithubProjectsPanel() {
           </button>
         </div>
       </div>
+
+      <p className="text-[11px] text-gray-600">
+        Public repos import without a token. To include <span className="text-gray-400">private</span> repos, paste a GitHub
+        token with <span className="text-gray-400">repo</span> scope (github.com → Settings → Developer settings → Tokens). It is used only for this fetch — never stored.
+      </p>
 
       {error && <div className="text-xs text-red-400">{error}</div>}
 

@@ -25,17 +25,8 @@ function headers(token?: string): Record<string, string> {
   return h;
 }
 
-export async function fetchRepos(username: string, token?: string): Promise<GhRepo[]> {
-  const res = await fetch(
-    `${GH}/users/${encodeURIComponent(username)}/repos?per_page=100&sort=pushed&type=owner`,
-    { headers: headers(token) }
-  );
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`GitHub repos ${res.status}: ${body.slice(0, 160)}`);
-  }
-  const arr = (await res.json()) as Record<string, unknown>[];
-  return arr.map((r) => ({
+function mapRepo(r: Record<string, unknown>): GhRepo {
+  return {
     name: String(r.name),
     fullName: String(r.full_name),
     description: (r.description as string | null) ?? null,
@@ -46,7 +37,27 @@ export async function fetchRepos(username: string, token?: string): Promise<GhRe
     topics: Array.isArray(r.topics) ? (r.topics as string[]) : [],
     stars: Number(r.stargazers_count) || 0,
     pushedAt: (r.pushed_at as string | null) ?? null,
-  }));
+  };
+}
+
+// With a token we hit /user/repos (the token owner's OWN repos — includes private);
+// without one, /users/{username}/repos (public only). Paginated up to 500 repos.
+export async function fetchRepos(username: string, token?: string): Promise<GhRepo[]> {
+  const out: GhRepo[] = [];
+  for (let page = 1; page <= 5; page++) {
+    const url = token
+      ? `${GH}/user/repos?per_page=100&page=${page}&affiliation=owner&visibility=all&sort=pushed`
+      : `${GH}/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&type=owner&sort=pushed`;
+    const res = await fetch(url, { headers: headers(token) });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`GitHub repos ${res.status}: ${body.slice(0, 160)}`);
+    }
+    const arr = (await res.json()) as Record<string, unknown>[];
+    out.push(...arr.map(mapRepo));
+    if (arr.length < 100) break;
+  }
+  return out;
 }
 
 // The README endpoint returns the repo's README regardless of filename/branch.
