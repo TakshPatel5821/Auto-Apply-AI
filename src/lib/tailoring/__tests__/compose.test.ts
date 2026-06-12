@@ -29,7 +29,7 @@ const analysis: JobAnalysis = {
 describe("composeSummary", () => {
   const fb = buildFactBook(defaultCandidate());
   it("opens with the level phrase and lists the selected skills", () => {
-    const summary = composeSummary(selection(fb), fb);
+    const summary = composeSummary(selection(fb), fb, analysis);
     expect(summary.startsWith(LEVEL_PHRASE[fb.candidate.experienceLevel])).toBe(true);
     expect(summary).toContain("Python");
     expect(summary).toContain("SQL");

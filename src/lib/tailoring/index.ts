@@ -69,7 +69,7 @@ export async function composeApplication(
   preFilter(analysis, facts);
 
   const sel = await selectFacts(analysis, facts, hints); // may throw EligibilityError (30% floor)
-  const summary = composeSummary(sel, facts);
+  const summary = composeSummary(sel, facts, analysis);
   const letter = composeLetter(sel, facts, analysis);
   try {
     validateOutputs(summary, letter, analysis, sel, facts);

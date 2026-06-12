@@ -25,3 +25,12 @@ export function truncate(s: string, max: number): string {
   const lastSpace = cut.lastIndexOf(" ");
   return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).replace(/[.,;:]+$/, "") + "...";
 }
+
+// Like truncate but with NO ellipsis and trailing punctuation stripped — for
+// embedding a clean fragment inside another sentence ("Recent work: <clip>.").
+export function clip(s: string, max: number): string {
+  const t = (s || "").trim();
+  const cut = t.length <= max ? t : t.slice(0, max);
+  const out = t.length <= max ? cut : cut.slice(0, Math.max(0, cut.lastIndexOf(" ")));
+  return (out || cut).replace(/[.,;:]+$/, "").trim();
+}
