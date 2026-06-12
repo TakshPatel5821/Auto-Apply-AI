@@ -20,6 +20,7 @@ export function GithubProjectsPanel() {
   const [projects, setProjects] = useState<GhProject[]>([]);
   const [username, setUsername] = useState("TakshPatel5821");
   const [token, setToken] = useState("");
+  const [includeForks, setIncludeForks] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -40,17 +41,17 @@ export function GithubProjectsPanel() {
       const res = await fetch("/api/github/fetch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, token: token.trim() || undefined }),
+        body: JSON.stringify({ username, token: token.trim() || undefined, includeForks }),
       });
       const data = await res.json();
       if (data.projects) {
         setProjects(data.projects);
+        const s = data.stats as { fetched: number; forks: number } | undefined;
+        const forkNote = s && s.forks ? `, ${s.forks} fork${s.forks === 1 ? "" : "s"} ${includeForks ? "included" : "hidden"}` : "";
         setNotice(
           data.warning ||
-            `Imported ${data.count} repo${data.count === 1 ? "" : "s"}${
-              data.authenticatedAs
-                ? ` as @${data.authenticatedAs} (incl. private)`
-                : " (public only — add a token for private repos)"
+            `Imported ${data.count}${s ? ` of ${s.fetched}` : ""} repo${data.count === 1 ? "" : "s"}${forkNote}${
+              data.authenticatedAs ? ` — @${data.authenticatedAs}` : " (public only — add a token for private)"
             }.`
         );
       } else setError(data.error || "Fetch failed.");
@@ -95,6 +96,10 @@ export function GithubProjectsPanel() {
             title="A GitHub personal access token with 'repo' scope. Optional — only needed to import PRIVATE repos. Not stored."
             className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-white w-44 focus:outline-none focus:border-blue-500"
           />
+          <label className="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer whitespace-nowrap" title="Include repos you forked from others">
+            <input type="checkbox" checked={includeForks} onChange={(e) => setIncludeForks(e.target.checked)} className="w-3 h-3 accent-emerald-500" />
+            forks
+          </label>
           <button
             onClick={fetchGithub}
             disabled={loading}

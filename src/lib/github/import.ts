@@ -78,9 +78,21 @@ async function llmCleanChunk(items: CleanInput[]): Promise<Map<string, CleanProj
 // Fetch the user's repos (skip forks / archived / the profile repo), read each
 // README, clean them, and upsert into GithubProject. `selected` is preserved on
 // re-fetch so the user's curation survives.
-export async function importGithubProjects(username: string, token?: string) {
-  const repos = (await fetchRepos(username, token)).filter(
-    (r) => !r.fork && !r.archived && r.name.toLowerCase() !== username.toLowerCase()
+export interface ImportStats {
+  fetched: number; // total repos GitHub returned
+  forks: number; // how many of those are forks
+  imported: number; // how many were cleaned + stored
+}
+
+export async function importGithubProjects(
+  username: string,
+  token?: string,
+  opts: { includeForks?: boolean } = {}
+): Promise<{ projects: Awaited<ReturnType<typeof prisma.githubProject.upsert>>[]; stats: ImportStats }> {
+  const all = await fetchRepos(username, token);
+  const forks = all.filter((r) => r.fork).length;
+  const repos = all.filter(
+    (r) => !r.archived && r.name.toLowerCase() !== username.toLowerCase() && (opts.includeForks || !r.fork)
   );
 
   const withReadme = await Promise.all(
@@ -133,5 +145,5 @@ export async function importGithubProjects(username: string, token?: string) {
     });
     out.push(row);
   }
-  return out;
+  return { projects: out, stats: { fetched: all.length, forks, imported: out.length } };
 }

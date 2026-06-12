@@ -46,8 +46,8 @@ export async function fetchRepos(username: string, token?: string): Promise<GhRe
   const out: GhRepo[] = [];
   for (let page = 1; page <= 5; page++) {
     const url = token
-      ? `${GH}/user/repos?per_page=100&page=${page}&affiliation=owner&visibility=all&sort=pushed`
-      : `${GH}/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&type=owner&sort=pushed`;
+      ? `${GH}/user/repos?per_page=100&page=${page}&visibility=all&affiliation=owner,collaborator,organization_member&sort=pushed`
+      : `${GH}/users/${encodeURIComponent(username)}/repos?per_page=100&page=${page}&sort=pushed`;
     const res = await fetch(url, { headers: headers(token) });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
