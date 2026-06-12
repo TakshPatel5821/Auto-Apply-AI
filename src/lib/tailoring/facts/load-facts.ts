@@ -52,7 +52,7 @@ const CANONICAL_CONTACT = {
   phone: "+1 (214)-883-2966",
   location: "Arlington, TX",
   github: "github.com/TakshPatel5821",
-  linkedin: undefined as string | undefined,
+  linkedin: "linkedin.com/in/taksh-patel-672b3a2a6" as string | undefined,
 };
 const CANONICAL_EDUCATION = {
   degree: "M.S. in Software Engineering",
