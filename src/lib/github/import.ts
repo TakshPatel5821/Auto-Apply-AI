@@ -25,11 +25,27 @@ function heuristic(repo: GhRepo): CleanProject {
   };
 }
 
+type CleanInput = { repo: string; name: string; description: string | null; language: string | null; topics: string[]; readme: string };
+
+// Clean in chunks so a big account (40+ repos) never blows the model's context.
+// Each chunk is independent — a failed chunk just falls back to heuristics.
+async function llmClean(items: CleanInput[]): Promise<Map<string, CleanProject>> {
+  const merged = new Map<string, CleanProject>();
+  const CHUNK = 8;
+  for (let i = 0; i < items.length; i += CHUNK) {
+    try {
+      const part = await llmCleanChunk(items.slice(i, i + CHUNK));
+      for (const [k, v] of part) merged.set(k, v);
+    } catch {
+      /* chunk failed → those repos use the heuristic fallback in the caller */
+    }
+  }
+  return merged;
+}
+
 // One batched LLM call: turn messy repo names + READMEs into clean résumé entries.
 // Grounded — the model may fix typos/naming and summarize, never invent features.
-async function llmClean(
-  items: { repo: string; name: string; description: string | null; language: string | null; topics: string[]; readme: string }[]
-): Promise<Map<string, CleanProject>> {
+async function llmCleanChunk(items: CleanInput[]): Promise<Map<string, CleanProject>> {
   const system =
     "You turn a developer's GitHub repos into clean, professional résumé project entries. " +
     "Use ONLY the provided repo info + README excerpt — never invent features or technologies. " +
