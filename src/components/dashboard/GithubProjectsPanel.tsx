@@ -1,0 +1,187 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { Github, Loader2, Check, Pencil, ExternalLink, Star } from "lucide-react";
+
+interface GhProject {
+  id: string;
+  repo: string;
+  name: string;
+  bullet: string;
+  stack: string[];
+  url: string;
+  language: string | null;
+  stars: number;
+  hasReadme: boolean;
+  selected: boolean;
+}
+
+export function GithubProjectsPanel() {
+  const [projects, setProjects] = useState<GhProject[]>([]);
+  const [username, setUsername] = useState("TakshPatel5821");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    const res = await fetch("/api/github/projects");
+    if (res.ok) setProjects((await res.json()).projects || []);
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function fetchGithub() {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/github/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username }),
+      });
+      const data = await res.json();
+      if (data.projects) setProjects(data.projects);
+      else setError(data.error || "Fetch failed.");
+    } catch {
+      setError("Fetch failed — see logs.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function update(id: string, patch: Partial<GhProject>) {
+    setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p))); // optimistic
+    await fetch("/api/github/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, ...patch }),
+    });
+  }
+
+  const selectedCount = projects.filter((p) => p.selected).length;
+
+  return (
+    <div className="card-glass p-5 space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Github className="w-5 h-5 text-white" />
+          <h3 className="text-sm font-semibold text-white">GitHub Projects</h3>
+          <span className="text-xs text-gray-500">{selectedCount} selected → shown on your résumé + cover letter</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="github username"
+            className="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-white w-36 focus:outline-none focus:border-blue-500"
+          />
+          <button
+            onClick={fetchGithub}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-gradient-to-br from-gray-700 to-gray-800 hover:from-gray-600 hover:to-gray-700 border border-white/10 rounded-lg disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Github className="w-3.5 h-3.5" />}
+            {loading ? "Fetching…" : "Fetch from GitHub"}
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="text-xs text-red-400">{error}</div>}
+
+      {projects.length === 0 ? (
+        <div className="text-xs text-gray-600 py-6 text-center">
+          No projects yet — hit &quot;Fetch from GitHub&quot; to import your repos. We clean up the names and pull details from each README.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {projects.map((p) => (
+            <ProjectCard key={p.id} p={p} onUpdate={update} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProjectCard({ p, onUpdate }: { p: GhProject; onUpdate: (id: string, patch: Partial<GhProject>) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(p.name);
+  const [bullet, setBullet] = useState(p.bullet);
+
+  function save() {
+    onUpdate(p.id, { name: name.trim() || p.name, bullet: bullet.trim() || p.bullet });
+    setEditing(false);
+  }
+
+  return (
+    <div
+      className={`rounded-lg p-3 border transition-colors ${
+        p.selected ? "bg-emerald-500/5 border-emerald-500/30" : "bg-gray-800/40 border-white/[0.06]"
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <button
+          onClick={() => onUpdate(p.id, { selected: !p.selected })}
+          className={`mt-0.5 w-5 h-5 rounded flex items-center justify-center flex-shrink-0 border transition-colors ${
+            p.selected ? "bg-emerald-500 border-emerald-500" : "border-gray-600 hover:border-emerald-400"
+          }`}
+          title={p.selected ? "Shown on your CV — click to remove" : "Click to include on your CV"}
+        >
+          {p.selected && <Check className="w-3.5 h-3.5 text-white" />}
+        </button>
+
+        <div className="flex-1 min-w-0">
+          {editing ? (
+            <div className="space-y-2">
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full px-2 py-1 bg-gray-900 border border-gray-700 rounded text-sm text-white focus:outline-none focus:border-blue-500"
+              />
+              <textarea
+                value={bullet}
+                onChange={(e) => setBullet(e.target.value)}
+                rows={2}
+                className="w-full px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500 resize-y"
+              />
+              <div className="flex gap-2">
+                <button onClick={save} className="px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded">Save</button>
+                <button
+                  onClick={() => { setName(p.name); setBullet(p.bullet); setEditing(false); }}
+                  className="text-xs text-gray-500 hover:text-gray-300"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-1.5">
+                <span className="text-sm font-medium text-white truncate">{p.name}</span>
+                <button onClick={() => setEditing(true)} className="text-gray-600 hover:text-blue-400 flex-shrink-0" title="Edit title / description">
+                  <Pencil className="w-3 h-3" />
+                </button>
+                <a href={p.url} target="_blank" rel="noopener noreferrer" className="text-gray-600 hover:text-blue-400 flex-shrink-0">
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+              <div className="text-xs text-gray-400 mt-0.5">{p.bullet}</div>
+              <div className="flex flex-wrap gap-1 mt-1.5 items-center">
+                {p.stack.map((s) => (
+                  <span key={s} className="text-[10px] bg-white/5 text-gray-300 px-1.5 py-0.5 rounded">{s}</span>
+                ))}
+                {p.stars > 0 && (
+                  <span className="text-[10px] text-gray-500 flex items-center gap-0.5">
+                    <Star className="w-2.5 h-2.5" />
+                    {p.stars}
+                  </span>
+                )}
+                {!p.hasReadme && <span className="text-[10px] text-gray-600">no README</span>}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
