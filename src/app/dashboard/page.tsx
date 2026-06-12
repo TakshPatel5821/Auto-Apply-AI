@@ -17,6 +17,7 @@ import { LogsConsole } from "@/components/dashboard/LogsConsole";
 import { QuickSetupPanel } from "@/components/dashboard/QuickSetupPanel";
 import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
 import { AtsCheckerModal } from "@/components/dashboard/AtsCheckerModal";
+import { GithubProjectsPanel } from "@/components/dashboard/GithubProjectsPanel";
 import {
   Briefcase,
   Send,
@@ -339,6 +340,7 @@ export default function DashboardPage() {
 
               {activeTab === "resume" && (
                 <div className="space-y-6">
+                  <GithubProjectsPanel />
                   {resumes.map((resume) => (
                     <ResumeCard key={resume.id} resume={resume} onSaved={fetchAll} />
                   ))}
