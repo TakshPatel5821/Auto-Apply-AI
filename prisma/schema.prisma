@@ -195,6 +195,28 @@ model Job {
   @@index([scrapedAt])
 }
 
+// A project imported from the user's GitHub (cleaned from repo + README). The user
+// toggles `selected` to choose which appear on the résumé + cover letter.
+model GithubProject {
+  id          String   @id @default(cuid())
+  repo        String   @unique // owner/name
+  name        String            // cleaned, presentable title
+  bullet      String   @db.Text // one-line résumé bullet
+  stack       String[] @default([])
+  url         String
+  language    String?
+  stars       Int      @default(0)
+  topics      String[] @default([])
+  hasReadme   Boolean  @default(false)
+  selected    Boolean  @default(false)
+  pushedAt    DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([selected])
+}
+
 // Employer-side ATS screening run for a job (one row per loop run; history kept).
 model ScreeningResult {
   id          String   @id @default(cuid())
