@@ -63,15 +63,18 @@ export async function fetchRepos(username: string, token?: string): Promise<GhRe
 // Verify a token + read its scopes (classic tokens expose them via the
 // X-OAuth-Scopes header; fine-grained tokens return an empty list). login === null
 // means the token is invalid/expired.
-export async function ghAuthInfo(token: string): Promise<{ login: string | null; scopes: string[] }> {
+export async function ghAuthInfo(
+  token: string
+): Promise<{ login: string | null; scopes: string[]; ownedRepos: number }> {
   try {
     const res = await fetch(`${GH}/user`, { headers: headers(token) });
-    if (!res.ok) return { login: null, scopes: [] };
+    if (!res.ok) return { login: null, scopes: [], ownedRepos: 0 };
     const scopes = (res.headers.get("x-oauth-scopes") || "").split(",").map((s) => s.trim()).filter(Boolean);
-    const data = (await res.json()) as { login?: string };
-    return { login: data.login || null, scopes };
+    const data = (await res.json()) as { login?: string; public_repos?: number; owned_private_repos?: number; total_private_repos?: number };
+    const ownedRepos = (Number(data.public_repos) || 0) + (Number(data.owned_private_repos ?? data.total_private_repos) || 0);
+    return { login: data.login || null, scopes, ownedRepos };
   } catch {
-    return { login: null, scopes: [] };
+    return { login: null, scopes: [], ownedRepos: 0 };
   }
 }
 

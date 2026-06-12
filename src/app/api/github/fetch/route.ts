@@ -19,6 +19,7 @@ export async function POST(req: NextRequest) {
 
   try {
     let authenticatedAs: string | null = null;
+    let ownedRepos = 0;
     let warning: string | undefined;
     if (token) {
       const info = await ghAuthInfo(token);
@@ -26,12 +27,18 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "GitHub token invalid or expired — double-check it." }, { status: 400 });
       }
       authenticatedAs = info.login;
+      ownedRepos = info.ownedRepos;
       if (info.scopes.length > 0 && !info.scopes.includes("repo")) {
-        warning = "Token is missing the 'repo' scope, so only public repos imported. Regenerate a classic token with the 'repo' box ticked.";
+        warning = "Token is missing the 'repo' scope, so only public repos imported. Use a classic token with the 'repo' box ticked.";
       }
     }
     const { projects, stats } = await importGithubProjects(username, token, { includeForks });
-    return NextResponse.json({ success: true, count: projects.length, stats, authenticatedAs, warning, projects });
+    // Token couldn't see most of the account's repos → almost always a fine-grained
+    // token without 'All repositories' access (or a classic token without 'repo').
+    if (token && !warning && ownedRepos > 0 && stats.fetched < ownedRepos - 2) {
+      warning = `GitHub returned only ${stats.fetched} of your ~${ownedRepos} repos — your token can't see your private ones. Use a CLASSIC token with the 'repo' scope, or a fine-grained token with Repository access = All repositories.`;
+    }
+    return NextResponse.json({ success: true, count: projects.length, stats, authenticatedAs, ownedRepos, warning, projects });
   } catch (e) {
     await Logger.error("GITHUB", `Fetch failed for ${username}: ${e}`);
     return NextResponse.json(
