@@ -37,3 +37,29 @@ describe("loadFacts / buildFactBook", () => {
     }
   });
 });
+
+describe("dedupeGithubProjects", () => {
+  it("collapses a near-duplicate repo, keeping the entry with the real bullet", () => {
+    const rows = [
+      { name: "Test Case Check By Jacoco", bullet: "Code coverage analysis for Java projects using JaCoCo.", stars: 1 },
+      { name: "TestCaseCheckByJacoco JAVA", bullet: "TestCaseCheckByJacoco JAVA a project built with code.", stars: 0 },
+    ];
+    const out = dedupeGithubProjects(rows);
+    expect(out).toHaveLength(1);
+    expect(out[0].name).toBe("Test Case Check By Jacoco");
+  });
+
+  it("keeps genuinely distinct projects", () => {
+    const rows = [
+      { name: "Bank Management System", bullet: "Web-based banking application.", stars: 2 },
+      { name: "ai-job-agent", bullet: "Job application automation tool.", stars: 5 },
+    ];
+    expect(dedupeGithubProjects(rows)).toHaveLength(2);
+  });
+
+  it("does not collapse on short shared fragments", () => {
+    expect(nearDuplicateProjectName("api", "apiserver")).toBe(false);
+    expect(nearDuplicateProjectName("Weather", "WeatherApp")).toBe(true);
+    expect(nearDuplicateProjectName("TestCaseCheckByJacoco", "TestCaseCheckByJacoco JAVA")).toBe(true);
+  });
+});
