@@ -1,640 +1,521 @@
 # Job Application Automation Tool
 
-**Automated job scraping, resume tailoring, CV generation, and application submission** — a full-stack Next.js + Playwright + Claude AI pipeline for intelligent job hunting.
+A full-stack, **single-user, local-first** AI job-application assistant. It scrapes jobs, scores them against your résumé, tailors a résumé + cover letter from your *real* facts (no hallucination), compiles them to PDF, auto-applies across 13+ ATS platforms with a human-in-the-loop safety net, and tracks everything — including reading application OTP codes and status emails straight from your Gmail.
 
-## Overview
-
-This tool automates the entire job application workflow:
-
-1. **Scrape** job listings from LinkedIn, Indeed, Glassdoor, Greenhouse, and custom sites
-2. **Analyze** each job against your resume using Claude AI — with an automatic **ATS keyword score** and visa/sponsorship detection
-3. **Tailor** your resume and generate a cover letter with a **fact-selection engine** — the AI only picks *which of your real facts to feature*; deterministic templates write the text (both compiled to PDF)
-4. **Generate** a single-page PDF CV via local LaTeX compilation
-5. **Apply** intelligently on LinkedIn (Easy Apply + external forms) and 13+ ATS platforms
-6. **Track** the full funnel and get **AI career guidance** from the jobs you've analyzed
-
-**Key Innovations:**
-- The tailoring engine (`src/lib/tailoring/`) makes hallucination **structurally impossible**: the LLM never writes prose — it only selects *fact IDs* from a strict allow-list built from your real résumé, and deterministic TypeScript templates compose the summary + cover letter. A skill, employer, or metric you don't have has **no ID to select**.
-- Resume tailoring uses a **fixed, hand-tuned LaTeX template** — only the Professional Summary and a *validated reordering* of your real skills/bullets change per job — guaranteeing 1-page output and 100% compilable PDFs.
-- Jobs you clearly don't fit (a senior title with too little experience, a hard domain like aerospace/clinical with zero overlap, or < 30% of the required skills) are **skipped**, not force-tailored.
-- The apply engine **never fakes success** — it only reports "submitted" on a real confirmation; otherwise it pauses for you and **resumes automatically** once you fill the gap (no button press needed).
-- It reads **email verification codes (OTP) straight from your Gmail** mid-apply, so login/verification walls don't stop the run.
-- Anything you type during a pause is **captured to memory** and reused on future jobs — even when the same question is **worded differently** (semantic matching).
+> Designed to run on **your own machine** for **just you** (`userId` is hardcoded to `"local"` throughout). It is not multi-tenant SaaS.
 
 ---
 
-## Quick Start
+## Table of Contents
 
-### Prerequisites
-
-- **Node.js** 18+
-- **PostgreSQL** (local or cloud)
-- **An AI provider** — Anthropic API (default), AWS Bedrock, or local **Ollama**
-- **Playwright browsers** (`npx playwright install`)
-- **Tectonic** (local LaTeX compiler) at `~/.job-agent-tools/`
-- **(Optional) Google Cloud OAuth client** — for live Gmail OTP + status sync
-- **Git**
-
-### 1. Install & Setup
-
-```bash
-git clone <repo-url>
-cd Application-automation-tool
-npm install
-
-# Install Playwright browsers (required for scraping + applying)
-npx playwright install
-
-# OPTIONAL — only if using the local Ollama provider
-ollama pull qwen2.5:3b         # tailoring + Q&A model
-ollama pull nomic-embed-text   # semantic memory matching (recommended)
-
-# Sync the database schema
-npx prisma db push
-```
-
-### 2. Configure `.env`
-
-Copy `.env.example` to `.env` and fill it in. The essentials:
-
-```bash
-# Auth (single password gate — JWT in an httpOnly cookie)
-AUTH_PASSWORD=your_secure_password
-AUTH_SECRET=your_64_char_random_secret
-
-# AI Provider — "anthropic" (default) | "bedrock" | "ollama"
-AI_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-sonnet-4-6
-# (Bedrock instead: AWS_REGION + AWS_BEARER_TOKEN_BEDROCK)
-# (Ollama instead: OLLAMA_BASE_URL + OLLAMA_MODEL)
-
-# Database
-DATABASE_URL=postgresql://user:password@localhost:5432/job_agent
-
-# LinkedIn — used for Easy Apply email + external-form login when required
-LINKEDIN_EMAIL=you@example.com
-LINKEDIN_PASSWORD=your-password
-
-# ATS account credentials (Workday / Greenhouse / etc.). Each company runs its
-# OWN Workday tenant, so the engine signs in OR creates an account per tenant
-# using these. Falls back to the LinkedIn values above if unset.
-ATS_EMAIL=you@example.com
-ATS_PASSWORD=your-password
-
-# Gmail (optional) — auto-fetch OTP/verification codes + live status sync
-GMAIL_CLIENT_ID=your_google_oauth_client_id
-GMAIL_CLIENT_SECRET=your_google_oauth_client_secret
-GMAIL_OAUTH_REDIRECT=http://localhost:3000/api/gmail/oauth/callback
-
-# Application limits
-AUTOMATION_MAX_APPLICATIONS_PER_DAY=30
-AUTOMATION_AUTO_APPLY=false
-```
-
-> **Security:** Prefer **Settings → Credentials** (AES-256-GCM encrypted at rest) over plaintext `.env`. If you do use `.env`, keep it out of git (it's gitignored by default) and never share it. Fine for local single-user use.
-
-### 3. Run
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
+- [What It Does](#what-it-does)
+- [Tech Stack](#tech-stack)
+- [The Five Core Flows](#the-five-core-flows)
+- [Project Structure](#project-structure)
+- [Module Reference](#module-reference) — *every module explained*
+  - [App shell & pages (`src/app`)](#app-shell--pages-srcapp)
+  - [API routes (`src/app/api`)](#api-routes-srcappapi)
+  - [UI components (`src/components`)](#ui-components-srccomponents)
+  - [Automation & apply engine (`src/lib/automation`)](#automation--apply-engine-srclibautomation)
+  - [Scraping (`src/lib/scraping`)](#scraping-srclibscraping)
+  - [Matching (`src/lib/matching`)](#matching-srclibmatching)
+  - [Tailoring pipeline (`src/lib/tailoring`)](#tailoring-pipeline-srclibtailoring)
+  - [ATS screening loop (`src/lib/ats-screen`)](#ats-screening-loop-srclibats-screen)
+  - [Profile engine (`src/lib/profile`)](#profile-engine-srclibprofile)
+  - [AI providers (`src/lib/ai`)](#ai-providers-srclibai)
+  - [Gmail integration (`src/lib/gmail`)](#gmail-integration-srclibgmail)
+  - [GitHub import (`src/lib/github`)](#github-import-srclibgithub)
+  - [Résumé parsing (`src/lib/resume`)](#résumé-parsing-srclibresume)
+  - [Storage & memory (`src/lib/storage`)](#storage--memory-srclibstorage)
+  - [Security (`src/lib/security`)](#security-srclibsecurity)
+  - [Auth (`src/lib/auth`)](#auth-srclibauth)
+  - [Cross-cutting (`db`, `logging`, `queue`, `export`, `utils`, `types`)](#cross-cutting-utilities)
+  - [Database (`prisma`)](#database-prisma)
+  - [Other top-level folders](#other-top-level-folders)
+- [Data Model](#data-model)
+- [Setup](#setup)
+- [Environment](#environment)
+- [Commands](#commands)
+- [Extending the System](#extending-the-system)
+- [Production Notes & Known Limitations](#production-notes--known-limitations)
+- [License](#license)
 
 ---
 
-## Architecture
+## What It Does
 
-### Tech Stack
-
-- **Frontend**: Next.js 15 (App Router), React 19, TailwindCSS (glass/aurora dark theme), Recharts
-- **Backend**: TypeScript (strict), Next.js API routes
-- **Database**: PostgreSQL + Prisma
-- **AI**: Claude via Anthropic API (default), AWS Bedrock, or local Ollama; `nomic-embed-text` for semantic memory
-- **Email**: Gmail API (OAuth2, read-only) via `googleapis`
-- **Automation**: Playwright (persistent Edge/Chromium profile)
-- **PDF**: Tectonic (local LaTeX compiler)
-- **Tests**: Vitest
-
-### Key Features
-
-✅ **Multi-platform scraping** (LinkedIn, Indeed, Glassdoor)  
-✅ **Profile Engine** (structured identity/contact/visa/education fields, deterministic form-fill, per-field lock)  
-✅ **Confidence-based automation** (>95% auto-fill · 85–95% fill + verify · <85% pause for review)  
-✅ **Compliance gating** (visa/EEO answers come only from your profile — never AI-guessed)  
-✅ **Dropdown intelligence** (maps TX→Texas, MS→Master's, USA→United States, etc. with no AI)  
-✅ **Encrypted credentials** (AES-256-GCM at rest — no plaintext passwords)  
-✅ **Fact-selection tailoring** (the LLM picks which of your *real* facts to feature; deterministic templates write the summary + reordered skills/bullets — nothing invented)  
-✅ **Hallucination-proof cover letters** (composed from selected fact IDs, then hard-gated: 3 paragraphs, first-person, **employer↔achievement binding**, ATS-keyword floor, banned-phrase/placeholder checks — no free-text path)  
-✅ **ATS score analyzer** (keyword-match % + missing keywords + suggestions, auto-computed per job)  
-✅ **Job fit scoring** (Technical / Experience / Education + overall match, in the ATS panel)  
-✅ **H1B / CPT / OPT detection** (sponsorship + international-friendliness flagged per job)  
-✅ **Funnel analytics** (response / interview / offer rates, application status charts)  
-✅ **Local PDF compilation** (résumé **and** cover letter, ~2.5s each)  
-✅ **LinkedIn Easy Apply** (sets email, uploads résumé, auto-submits)  
-✅ **13+ ATS adapters** (Greenhouse, Lever, Workday, iCIMS, ADP, Taleo, Oracle Cloud, SmartRecruiters, Ashby, BambooHR, Jobvite, Workable, Dice) + generic fallback  
-✅ **Workday auto-login / account creation** (per-tenant sign-in, else creates an account with `ATS_EMAIL`/`ATS_PASSWORD`)  
-✅ **Generic login walls** (auto sign-in for Greenhouse candidate portal, Dice, etc.)  
-✅ **Session pre-warm** (auto-mode logs into Greenhouse once per batch so every apply is pre-authenticated)  
-✅ **Strict success detection** (only counts a confirmed submission — no false "submitted" from job-slug URLs)  
-✅ **Multi-step form handling** (walks each section; never fakes a submit)  
-✅ **Auto-takeover** (stops on unknown fields, auto-resumes when you fill them — no button)  
-✅ **"I submitted it" confirmation** (tell the engine you finished a manual takeover so it isn't wrongly marked failed)  
-✅ **Cover letter on demand** (pastes into text boxes or uploads PDF when a job asks)  
-✅ **Robust checkboxes** (handles styled/hidden checkboxes; auto-ticks consent boxes)  
-✅ **Semantic memory** (reuses your answers even when a question is worded differently)  
-✅ **Self-correcting memory** (fixing a wrong answer overwrites the bad one, including near-duplicates)  
-✅ **Memory lock + validation** (lock answers so AI can't change them; bad value↔field matches are rejected; one-click cleanup)  
-✅ **Live Gmail integration** (OAuth2 read-only: auto-fetches **OTP/verification codes** mid-apply + scans your inbox to auto-update application statuses)  
-✅ **Recruiter outreach** (AI-drafted connection note + message + follow-up per job)  
-✅ **Interview prep workspace** (technical / behavioral-STAR / **system-design** questions, talking points, prep tips)  
-✅ **AI career advisor** (skill-gap analysis + learning roadmap + target roles + salary insight, mined from the jobs you've analyzed)  
-✅ **Email status detection** (paste — or auto-sync — an interview/offer/rejection email → classifies it and updates the application status)  
-✅ **Manual status updates** (set interview/offer/rejected to keep funnel analytics accurate)  
-✅ **Resume diff viewer** (see changes per job)  
-✅ **Excel export** (job tracker)  
-✅ **Manual review mode** (pause before applying)  
-✅ **Pipeline overview dashboard** (at-a-glance funnel, stats, charts, recent executions)  
-✅ **Modern glass UI** (frosted cards, aurora background, gradient accents)  
-✅ **Screenshots** (every apply step, debugging)  
+- **Scrapes** jobs from LinkedIn, Indeed, Greenhouse company boards, and arbitrary custom sites.
+- **Scores** each job against your résumé with a fast keyword filter, then a Claude/OpenAI/Ollama match score, plus ATS-keyword, visa/sponsorship, and experience-level signals.
+- **Tailors** a per-job summary + cover letter from a strict **FactBook** built from your canonical résumé — the LLM selects facts, deterministic templates write the prose, so a skill you don't have *cannot* be claimed.
+- **Compiles** a one-page LaTeX résumé + cover letter to PDF locally (Tectonic) or via Overleaf.
+- **Screens** the application as an employer's ATS would, in a closed loop that re-features your real-but-underweighted skills until accept — or an honest reject with a "skills to learn" list.
+- **Auto-applies** with Playwright across 13+ ATS templates: LinkedIn Easy Apply, Workday (auto sign-in/account-create), Greenhouse, Lever, iCIMS, etc. — with strict success detection and a human-takeover fallback that never fakes a submission.
+- **Remembers** your answers (semantic + exact match), learns corrections as negative memory, and auto-fills repeat questions while never guessing on sensitive/legal fields.
+- **Reads Gmail** (read-only OAuth) to auto-enter emailed OTP/verification codes mid-apply and to scan your inbox and auto-update application statuses (interview / offer / rejection).
+- **Tracks** everything: live dashboard, analytics, logs, screenshots, Excel export, and per-field decision audit trails.
 
 ---
 
-## Resume Template
+## Tech Stack
 
-Your résumé is defined in **`src/lib/automation/resume-template.ts`** — the single source of truth.
-
-**Why this approach?**
-- Always 1 page (tested in Overleaf)
-- Always compilable
-- AI focuses on job-specific summary
-- No wasted tokens on rewriting education/experience
-
-To update: edit `resume-template.ts`. The **Professional Summary** is swapped per job; everything else stays static.
-
----
-
-## Tailoring Engine (fact-selection)
-
-Résumé + cover-letter generation lives in **`src/lib/tailoring/`** and exposes one function — `tailorJob(resumeId, jobId)`. Its design makes hallucination **structurally impossible** by inverting the usual contract: **the LLM never writes prose.** It only selects *fact IDs* from a strict allow-list (the `FactBook`) built from your canonical résumé; deterministic TypeScript templates compose the actual text. A skill, employer, project, or metric you don't have simply has no ID to select.
-
-The pipeline:
-
-1. **loadFacts** — build an immutable `FactBook` (skills, employers, achievements, projects, contact) from `resume-template.ts` + your résumé row, with stable IDs (`skill:python`, `employer:brainy-bean-info-tech`, …).
-2. **analyzeJob** *(LLM call #1)* — parse the JD into **structured JSON only** (required skills, ATS keywords, domain tags, seniority, years). Never prose.
-3. **preFilter** — eligibility gates (no LLM): senior-title vs. your experience, required-years floor, hard-domain overlap, and a **30% required-skill floor**. A job you clearly don't fit is **skipped**, not tailored.
-4. **selectFacts** *(LLM call #2)* — the model returns only **fact IDs + one verbatim JD detail**: 2–3 skills to feature, two evidence achievements from *different* employers, and an anchor. The skill orderings and the JD↔skill match are derived deterministically; **every ID is verified to exist**, and anything missing/invalid falls back to real facts — so the selection is always valid and grounded, even on a small local model.
-5. **composeSummary / composeLetter** *(no LLM)* — deterministic templates turn the selection into the summary + a 3-paragraph cover letter. Every word comes from a real skill name, real achievement text, a real project, or a JD-derived term.
-6. **validate** — hard gates that **throw** (no retry): exactly 3 paragraphs, 160–300 words, first-person, ≤ 2 second-person, no company-voice / placeholder labels / banned phrases, **employer↔achievement binding**, and an ATS-keyword floor. Because composition is deterministic, a gate failure means a *template regression* — so it fails loudly instead of silently shipping.
-7. **render → compile → persist** — LaTeX for both docs, Tectonic PDFs (the résumé keeps its 1-page guarantee with a canonical fallback), saved to the application folder + DB.
-
-Exactly **two** LLM calls per job, both structured — no regeneration loop. Smoke-test the whole pipeline end-to-end against a real job:
-
-```bash
-npx tsx --env-file=.env scripts/smoke-tailor.ts [jobId]
-```
-
----
-
-## AI Provider Setup
-
-The provider is selected with `AI_PROVIDER` (`anthropic` | `bedrock` | `ollama`). All three speak the same Messages API under the hood via `src/lib/ai/claude.ts`.
-
-> **Model note:** `output_config.effort` and adaptive thinking are gated behind `MODEL_SUPPORTS_EFFORT` (`opus-4-[678]` / `sonnet-4-6`) — Haiku 4.5 / Sonnet 4.5 reject those params, so the code omits them automatically.
-
-### Cloud: Anthropic API (default)
-
-**Best for:** Simplest setup, best quality.
-
-```bash
-# In .env
-AI_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-sonnet-4-6
-```
-
-### Local: Ollama + GPU
-
-**Best for:** Privacy, no costs, GPU-accelerated (~25–30s/job on GTX 1650).
-
-```bash
-ollama serve
-ollama pull qwen2.5:3b
-ollama ps  # Verify: 100% GPU
-```
-
-**Hardware:**
-- **4GB+ VRAM** (e.g., GTX 1650): qwen2.5:3b → ~25–30s/job
-- **8GB+ VRAM** (e.g., RTX 3060): mistral:7b → ~10–15s/job
-- **CPU-only**: ~60–90s/job (slow)
-
-### Cloud: AWS Bedrock
-
-**Best for:** Speed (~5s/job), cheap (~$1 per 100 jobs).
-
-```bash
-# In .env
-AI_PROVIDER=bedrock
-AWS_REGION=us-east-1
-AWS_BEARER_TOKEN_BEDROCK=ABSK...your-key...
-```
-
-> **First-time Anthropic-on-Bedrock setup:** the old "Model access" page is retired — serverless models auto-enable on first invoke, but first-time Anthropic use requires submitting a one-time use-case form (Bedrock console → Model catalog → the model → *Open in playground* triggers it). After submitting, access is instant.
-
----
-
-## Workflow
-
-### Manual Review (Recommended)
-
-```
-Scrape → Analyze → Tailor → PDF → Review → Apply (when ready)
-```
-
-Dashboard shows tailored versions; click "Apply" when happy.
-
-### Auto-Submit
-
-```
-Scrape → Analyze → Tailor → PDF → Auto-Apply
-```
-
-Set `AUTOMATION_AUTO_APPLY=true`. Daily limit: `AUTOMATION_MAX_JOBS`.
-
-**Caution:** LinkedIn may rate-limit or flag high-volume auto-submit.
-
----
-
-## How the Apply Engine Works
-
-External job forms come in hundreds of layouts. Instead of trying to "train" a model on them, the engine combines a **pattern library of ATS adapters** with an **honest multi-step loop**:
-
-1. **Detect the ATS** by URL (Greenhouse, Lever, Workday, iCIMS, ADP, etc.) → use that platform's known selectors. Unknown sites fall back to generic heuristics.
-2. **Authenticate if needed** — login-gated platforms (Workday/ADP/Taleo) are signed into automatically. Any page that throws up a sign-in wall (e.g. Greenhouse candidate portal, Dice) is auto-logged-in with your stored ATS credentials. See Workday flow below.
-3. **Walk each section** — fill fields, upload résumé, attach cover letter, click *Next* / *Save & Go to Next Section* until a real *Submit*.
-4. **Confirm or pause** — success is reported **only** when a real confirmation page is detected. If a field is unknown, a button is missing, or the form won't advance, it **pauses**.
-5. **Auto-takeover** — you fill the gap in the open browser; the engine detects your input (no Resume button needed), **captures it to memory**, and continues.
-
-Adapters live in `src/lib/automation/ats-adapters.ts` — adding a platform is a single array entry.
-
-> **Why this matters:** earlier versions reported "✓ submitted" even when nothing happened. The engine now never claims a submission it can't verify — success requires that we actually clicked a final **Submit** *and* see a confirmation-specific page (not just a URL/word that happens to contain "applied", like a job slug `…/applied-ai-engineer/`). An unconfirmed apply is marked **FAILED** so you can retry, never silently dropped.
-
-### Login walls & session pre-warm
-
-- **Generic login handler** — when any external apply page shows a sign-in wall, the engine fills email + password from your **encrypted ATS credentials** and submits. This covers the Greenhouse candidate portal (`my.greenhouse.io`), Dice, and similar. If it can't complete (2FA/captcha), it falls back to human takeover.
-- **Session pre-warm** — at the start of an **auto-mode** batch, the engine logs into Greenhouse once (in both browser profiles it uses) so every Greenhouse application in that run is already authenticated. The session persists in the browser profile across runs.
-
-### Workday (and other account-gated ATSes)
-
-Every company runs its **own separate Workday tenant** — there is no universal Workday login. When the engine hits one it automatically:
-
-1. Clicks into the application (Apply → *Apply Manually*)
-2. **Tries to sign in** with `ATS_EMAIL` / `ATS_PASSWORD`
-3. If no account exists on that tenant, **creates one** (email, password, confirm-password, terms)
-4. Once authenticated, runs the normal multi-step form loop
-5. Only falls back to **human takeover** if auth genuinely can't complete (email verification link, captcha, security question)
-
-### When it pauses for you
-
-During a takeover the dashboard shows two buttons:
-
-- **✓ I submitted it** — you finished the application yourself; the engine trusts you and marks it **SUBMITTED** (fixes the case where a real submission can't be auto-detected).
-- **Resume / Skip** — continue without claiming a submission (stays retryable).
-
-It still auto-detects a real confirmation page on its own; the buttons are the fallback.
-
----
-
-## ATS Score Analyzer
-
-Every scraped job gets a **keyword-match %** automatically (no extra AI call — derived from the analyze step). It appears next to the match score in the Jobs table, color-coded (green ≥80, yellow ≥60, red below).
-
-Click the **gauge icon** on any job for the deep dive:
-- **Strong matches** — required keywords your résumé already has
-- **Missing keywords** — what to add (only if you genuinely have the experience)
-- **Suggestions** — concrete, ATS-aware tips
-
-Matching is **deterministic** (keyword coverage against your résumé text), so the score is explainable — not a black box.
-
-The panel also shows a **fit breakdown** — Technical (keyword coverage), Experience (your years vs. required), Education (your degree vs. required), and a weighted **Overall** — so you can prioritize which jobs to actually pursue.
-
----
-
-## International Students (H1B / CPT / OPT)
-
-Every scraped job is scanned for visa signals (from the description text):
-- **Sponsors** / **No sponsor** badge on the job row
-- `intlFriendlyScore` (0–10) for sorting toward visa-friendly roles
-- CPT/OPT mentions detected
-
-Detection is phrase-based and explainable (see `src/lib/matching/visa-detector.ts`). A "No sponsor" badge means the posting explicitly states it won't sponsor — useful to skip early. (A future version can cross-reference public H1B filing data.)
-
----
-
-## Funnel Analytics
-
-The **Analytics** tab tracks the full pipeline, not just "applied":
-
-```
-Applications → Submitted → Responses → Interviews → Offers
-            response rate   interview rate   offer rate
-```
-
-Plus applications-per-day, jobs-by-source, match-score distribution, and a status funnel. Update an application's status (interview/offer/rejected) to keep the rates accurate.
-
----
-
-## After You Apply
-
-The pipeline doesn't stop at "Applied." Each application row has tools for the rest of the journey:
-
-- **Recruiter outreach** (people icon) — AI drafts a LinkedIn connection note (<300 chars), a longer intro message, and a one-week follow-up, grounded in your real strengths. Optionally name the recruiter for personalization. One-click copy each.
-- **Interview prep** (grad-cap icon) — generates likely **technical**, **behavioral (STAR)**, and **system-design** questions scaled to the role's seniority, plus why-you-fit talking points, questions to ask, and a prep checklist — all grounded in your résumé.
-- **Email status detection** — paste an email you received (interview invite / assessment / offer / rejection), or let the **live Gmail sync** pull it in. The classifier labels it, suggests a reply, matches it to the application by company, and updates its status automatically.
-- **Manual status dropdown** — set any application to interview/offer/rejected/etc. directly, keeping the funnel analytics honest.
-
-See **[Gmail Integration](#gmail-integration-live)** below for the OTP auto-fetch + live inbox sync.
-
----
-
-## Gmail Integration (Live)
-
-Connect a Gmail account (OAuth2, **read-only** `gmail.readonly` scope) for two things:
-
-1. **OTP / verification codes mid-apply** — when an apply hits an email-verification gate (Workday account creation, Greenhouse/Bloomerang security codes, etc.), the engine fetches the emailed code from Gmail and enters it automatically. Human takeover stays as the fallback. *(One-time codes are never saved to memory — they're single-use.)*
-2. **Live inbox scan + auto-status** — periodically (and at the start of each automation batch) classifies incoming job mail and auto-updates the matching application's status. Manual "Scan now" and "Get latest code" buttons live on the **Gmail Inbox** panel (Applications tab).
-
-### One-time setup
-
-1. **Google Cloud Console** → create a project → enable the **Gmail API**.
-2. **OAuth consent screen** → *External* (Testing mode is fine for single-user); add your Gmail under **Audience → Test users** (the new console splits test users onto their own page — skipping it causes `403 access_denied`).
-3. **Credentials** → *Create OAuth client ID* → **Web application**, redirect URI `http://localhost:3000/api/gmail/oauth/callback`.
-4. Put `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_OAUTH_REDIRECT` in `.env`, then click **Connect Gmail** in the app.
-
-The refresh token is **encrypted at rest** (`UserSettings.encGmailRefreshToken`); only `gmail.readonly` is requested (a local sync cursor is kept instead of needing `modify`). Connect the *same inbox the apply engine fills into forms* so OTP and status mail land where the bot looks.
-
----
-
-## Profile Engine & Field Accuracy
-
-The **Profile** tab holds a structured source of truth — Identity, Contact, Immigration (work auth / sponsorship / CPT / OPT), Education, Professional. When filling a form, the engine resolves each field in this order:
-
-```
-Profile (deterministic) → Memory → Résumé shortcut → AI (open-ended only)
-```
-
-- **Deterministic structured fields** — name/email/phone/state/degree/visa never go to the AI, eliminating that source of hallucination and field-pollution.
-- **Per-field lock** 🔒 — locked values can't be changed by AI or capture.
-- **Dropdown intelligence** — `TX↔Texas`, `USA↔United States`, `MS↔Master's`, `authorized→Yes` matched deterministically against the dropdown's real options.
-- **Compliance gating** — visa/EEO fields (work auth, sponsorship, gender, race, veteran, disability) are answered **only** from your profile. If a value isn't set, the engine **pauses** rather than letting the AI guess.
-- **Auto-seed** — uploading a résumé fills blank profile fields (never overwrites locked ones). Or click **"Seed from résumé"** in the Profile tab.
-
-### Confidence-based automation
-
-Every fill carries a confidence score (profile-locked = 100%, memory ≈ 90%, résumé ≈ 85%, AI ≈ 60%):
-
-| Confidence | Behavior |
+| Layer | Technology |
 |---|---|
-| **≥ 95%** | Auto-fill |
-| **85–95%** | Fill, then **read back to verify**; pause if it didn't land |
-| **< 85%** | Leave blank and pause for your review |
-
-This trades a little speed for accuracy — it won't blindly commit a low-trust guess.
-
----
-
-## Security — Encrypted Credentials
-
-Passwords are **encrypted at rest** (AES-256-GCM), not stored in plaintext.
-
-- **Settings → Credentials** — enter LinkedIn / ATS email + password; they're encrypted before saving.
-- **"Import from .env"** — one-click migrate existing plaintext `.env` credentials into the encrypted store.
-- The encryption key lives in `~/.job-agent-tools/secret.key` (outside the repo, `chmod 600`), or via the `JOB_AGENT_SECRET_KEY` env var for ephemeral setups.
-- At apply time the engine decrypts in-memory only; the encrypted store takes precedence over `.env` (which remains a fallback).
-
-> This is **local** protection (the key is on the same machine) — a real upgrade over plaintext `.env` for a single-user install, not a substitute for a cloud secrets manager.
+| Framework | Next.js 15 (App Router, Turbopack), React 19, TypeScript 5.7 |
+| Styling | Tailwind CSS 3, Radix UI primitives, lucide-react icons |
+| Database | PostgreSQL via Prisma 5 |
+| Browser automation | Playwright (Edge/Chromium, persistent profiles, stealth) |
+| AI | Anthropic Claude · OpenAI · Ollama (local) — pluggable provider |
+| Email | Gmail API (googleapis), read-only OAuth2 |
+| PDF / LaTeX | Tectonic (local) or Overleaf (browser-driven) |
+| Files | pdf-parse, mammoth (docx), exceljs, adm-zip, cheerio |
+| Security | AES-256-GCM at rest, JWT sessions (jose), bcryptjs |
+| Tests | Vitest |
 
 ---
 
-## Memory & Auto-Fill
+## The Five Core Flows
 
-The engine answers application questions from three sources, in order:
-1. **Memory** — answers you've saved or it has captured before
-2. **Résumé shortcuts** — name, email, phone, location, links
-3. **Claude AI** — for free-text questions
-
-Anything you fill manually during a pause is saved automatically. Four things make memory robust:
-
-- **Semantic matching** — *"Are you authorized to work in the US?"* and *"Do you have US work authorization?"* resolve to the same saved answer (uses `nomic-embed-text` embeddings; falls back to exact-match if the model isn't installed).
-- **Self-correction** — if a saved answer was wrong, just fix it in the form (or the **Memory** tab). Your correction overwrites the bad entry, including near-duplicate phrasings, so it won't resurface.
-- **Value↔field validation** — automated captures are rejected when the value doesn't fit the field (e.g. an email can't be saved into a "Degree" or "Last Name" field, a phone can't land in "School"). This prevents the auto-capture pollution that used to spread one value across every field.
-- **Lock** — click the 🔒 on any answer in the **Memory** tab to freeze it. Locked answers can't be changed by the AI, capture, or semantic correction — ideal for identity fields (First Name, Last Name, email, phone). Click any answer to edit it inline; use **"Clean up bad answers"** to purge existing mismatches in one click.
-
-Standard consent checkboxes (terms/privacy/certify) are auto-ticked. Styled/hidden checkboxes are handled via label-click and JS-event fallbacks.
-
-> **First-run tip:** open **Memory → "Clean up bad answers"**, then lock your core identity fields (First/Last Name, email, phone) so they stay correct forever.
-
----
-
-## Troubleshooting
-
-### "Executable doesn't exist … run npx playwright install"
-
-**Fix:** Run `npx playwright install` once to download the browser binaries.
-
-### "No Apply button found"
-
-**Fix:** Manually log into LinkedIn in `~/.job-agent-profiles/linkedin`, stay logged in. The profile is persistent.
-
-### Memory doesn't reuse differently-worded questions
-
-**Fix:** Semantic matching needs the embedding model: `ollama pull nomic-embed-text`. Without it, only exact-match reuse works (the feature silently no-ops).
-
-### Cover letter not uploaded on an old job
-
-**Fix:** Jobs tailored before the cover-letter-PDF feature have no PDF — re-tailor the job. (Paste-in text boxes still work without a PDF.)
-
-### Slow tailoring (>60s)
-
-**Fix:** Switch to `qwen2.5:3b` (fits in 4GB VRAM) or use Bedrock.
-
-### PDF won't compile
-
-**Fix:** Ensure Tectonic is at `~/.job-agent-tools/tectonic.exe`. Check logs for LaTeX errors.
-
-### Gmail "403 access_denied" when connecting
-
-**Fix:** In the Google Cloud console, add your Gmail address under **OAuth consent screen → Audience → Test users**. The new console splits test users onto a separate page; if it's missing there, OAuth is denied even with a valid client ID.
-
-### Database schema out of sync / column errors
-
-**Fix:**
-```bash
-npx prisma db push      # Sync schema to the DB (adds new columns)
-npx prisma generate     # Regenerate the client
+```
+          ┌─────────┐   ┌──────────┐   ┌─────────┐   ┌────────┐   ┌────────┐
+  SETTINGS│ Scrape  │──▶│ Analyze  │──▶│ Tailor  │──▶│ Screen │──▶│ Apply  │──▶ TRACK
+          └─────────┘   └──────────┘   └─────────┘   └────────┘   └────────┘
+           per-site      fast-filter    FactBook →    employer     Playwright    Gmail sync,
+           scrapers      + Claude        deterministic ATS loop      + ATS         analytics,
+                         match score     compose+PDF   (no invent)   adapters      Excel, logs
 ```
 
----
+1. **Scrape** — `scraping-orchestrator` fans out to per-site scrapers; each fit job is streamed straight into the pipeline.
+2. **Analyze** — cheap `fast-filter` gate, then a Claude match score + ATS/visa/experience signals.
+3. **Tailor** — `tailoring/index.tailorJob` builds the FactBook, selects facts, composes summary + letter, validates, renders LaTeX, compiles PDFs.
+4. **Screen** *(optional)* — `ats-screen` runs the employer-side accept/reject loop and feeds back real under-featured skills.
+5. **Apply** — `apply-engine` drives the browser, fills fields safely, handles OTP/login/takeover, and only reports verified submissions.
 
-## Performance & Costs
-
-| Task | Cloud (Anthropic / Bedrock) | Ollama (Local) |
-|---|---|---|
-| Analyze + Tailor (1 job) | 5–10s | 25–30s |
-| Cost (10 jobs) | ~$0.10 | $0.10–$0.20 (power) |
-| **Total (10 jobs)** | ~2–3 min | ~4–5 min |
-
-> Tailoring makes exactly **two** LLM calls per job (analyze JD + select facts); the summary, cover letter, and validation gates are deterministic — no regeneration loop.
+The whole sequence is orchestrated per-job and concurrently with scraping by `automation-engine`, with live state streamed to the dashboard over SSE.
 
 ---
 
 ## Project Structure
 
-```
+```text
 src/
-├── app/
-│   ├── globals.css           # Theme: aurora bg, .card-glass / .text-gradient utilities
-│   ├── dashboard/            # Dashboard UI (tabs: Dashboard/Jobs/Applications/Analytics/
-│   │                         #   Career/Profile/Resume/Memory/Settings)
-│   └── api/                  # REST endpoints
-│       ├── jobs/             #   ats-score, interview-prep, recruiter-message, …
-│       ├── applications/     #   classify-email, status, apply, …
-│       ├── automation/       #   start/stop/status (pause, resume, confirmSubmitted)
-│       ├── gmail/            #   connect, oauth/callback, status, disconnect, sync, otp
-│       ├── career/           #   AI career advice from analyzed jobs
-│       └── memory/           #   CRUD + lock + cleanup
-├── lib/
-│   ├── ai/                   # claude.ts (anthropic/bedrock/ollama), ollama.ts,
-│   │                         #   ats-analyzer.ts (scoring + fit)
-│   ├── tailoring/            # fact-selection engine — tailorJob(): facts/ (FactBook),
-│   │                         #   analysis/ (JD→JSON), routing/ (preFilter), composition/
-│   │                         #   (select-facts + deterministic summary/letter builders),
-│   │                         #   validation/ (gates), rendering/ (LaTeX+compile), persistence/
-│   ├── automation/           # apply-engine, ats-adapters, resume-template,
-│   │                         #   latex-compiler, automation-engine,
-│   │                         #   scraper-status (human-takeover signals)
-│   ├── gmail/                # client (OAuth2), fetch, otp (extractOtp), sync (inbox scan)
-│   ├── matching/             # fast-filter, visa-detector (H1B/CPT/OPT)
-│   ├── scraping/             # Job scrapers + orchestrator
-│   ├── storage/              # memory.ts (semantic + lock + validation), file-manager
-│   └── db/                   # Prisma client
-├── components/dashboard/     # DashboardOverview (pipeline/stats/charts), JobsTable
-│                             #   (ATS+fit panel, visa badge), ApplicationsTable, AnalyticsPanel,
-│                             #   CareerAdvisorPanel, EmailClassifierPanel (Gmail inbox),
-│                             #   RecruiterOutreachModal, InterviewPrepModal, ProfilePanel,
-│                             #   AutomationControls, StatsCards
-└── prisma/
-    └── schema.prisma         # Job.atsKeywordScore / sponsorshipStatus / intlFriendlyScore,
-                              #   CoverLetter.pdfPath, ApplicationMemory.locked,
-                              #   UserSettings.encGmailRefreshToken, EmailEvent (inbox + dedupe)
+  app/                      Next.js pages + API routes (App Router)
+    page.tsx                Login / landing screen
+    layout.tsx              Root layout (fonts, aurora background)
+    dashboard/page.tsx      The entire dashboard UI (9 tabs)
+    api/                    ~47 route handlers (see Module Reference)
+  components/
+    ui/                     Radix-based primitives (button, card, tabs, …)
+    dashboard/              Feature panels & modals (jobs, applications, …)
+  lib/
+    automation/             Apply engine, ATS adapters, field classifier, orchestrator
+      apply/                Extracted apply-engine modules (stealth, selectors, dom, types)
+    scraping/               Orchestrator + per-site scrapers
+    matching/               Fast keyword filter + visa detector
+    tailoring/              Hallucination-proof résumé/letter pipeline
+    ats-screen/             Employer-side screening loop
+    profile/                Structured profile (Engine V2) + dropdown intelligence
+    ai/                     Claude / OpenAI / Ollama provider wrappers + ATS analyzer
+    gmail/                  OAuth client, fetch, OTP parser, inbox sync
+    github/                 GitHub REST client + project importer
+    resume/                 PDF/DOCX parsing + quick regex extraction
+    storage/                Application memory + file/folder manager
+    security/               AES-256-GCM crypto + credential resolution
+    auth/                   JWT session helpers
+    db/                     Prisma client singleton
+    logging/                DB-backed logger
+    queue/                  Lightweight in-process job queue
+    export/                 Excel workbook generation
+    utils.ts                cn() class merge helper
+  types/index.ts            Shared TypeScript types
+  middleware.ts             Route auth guard
+prisma/                     schema.prisma + migrations + seed
+extension/                  Companion browser extension
+applications/               Generated artifacts (PDFs, screenshots, .tex)
+test/                       Vitest suites + fixtures
 ```
 
-**Key files:**
-- `lib/automation/apply-engine.ts` — multi-step apply loop, Workday auto-auth, auto-takeover, OTP/email-verification handling, checkbox/cover-letter handling
-- `lib/automation/ats-adapters.ts` — per-platform selectors (add new ATSes here)
-- `lib/tailoring/` — fact-selection tailoring (`tailorJob`): `FactBook` allow-list, LLM picks IDs only, deterministic compose, hard gates, render/compile/persist
-- `lib/gmail/` — OAuth2 client + inbox fetch/parse + OTP extraction + live status sync
-- `lib/ai/ats-analyzer.ts` — ATS keyword scoring + Technical/Experience/Education fit
-- `lib/matching/visa-detector.ts` — sponsorship / CPT / OPT detection
-- `lib/storage/memory.ts` — exact + semantic recall, self-correction, lock, value↔field validation
-- `lib/automation/resume-template.ts` — your résumé (single source of truth)
-- `app/globals.css` — shared visual language (`.card-glass`, `.text-gradient`, aurora bg)
+---
+
+## Module Reference
+
+> Every module below has a one-to-three-line description. File-level header comments in the source go deeper.
+
+### App shell & pages (`src/app`)
+
+| File | What it does |
+|---|---|
+| [page.tsx](src/app/page.tsx) | Password login / landing screen. Posts to `/api/auth/login`, then routes to `/dashboard`. Shows the feature + pipeline marketing strip. |
+| [layout.tsx](src/app/layout.tsx) | Root HTML layout — Inter font, page metadata, forced dark mode, and a small script that strips browser-extension-injected attributes before React hydrates (avoids hydration warnings). Global styles (the aurora/glass theme) live in `globals.css`. |
+| [dashboard/page.tsx](src/app/dashboard/page.tsx) | The whole authenticated app: a 9-tab client page (Dashboard, Jobs, Applications, Analytics, Career, Profile, Resume, Memory, Settings). Loads all data once, then receives live `state`/`logs`/`stats` over an SSE `EventSource`, refetching heavy tables only when counts change. Also contains the inline Memory and Settings/Credentials tabs. |
+| [middleware.ts](src/middleware.ts) | Edge auth guard. Lets `/` and `/api/auth/login` through; 401s unauthenticated `/api/*`; redirects unauthenticated `/dashboard` to `/`. |
+
+### API routes (`src/app/api`)
+
+Each is a Next.js route handler. All non-auth routes require a valid session (enforced by middleware **and** re-checked via `getSession()`).
+
+**Auth**
+| Route | Purpose |
+|---|---|
+| [auth/login](src/app/api/auth/login/route.ts) | Validates the shared password, creates the JWT session cookie, ensures the `"local"` user exists. |
+| [auth/logout](src/app/api/auth/logout/route.ts) | Clears the session cookie. |
+
+**Jobs**
+| Route | Purpose |
+|---|---|
+| [jobs/scrape](src/app/api/jobs/scrape/route.ts) | Kick off a scrape-only run via the orchestrator. |
+| [jobs/list](src/app/api/jobs/list/route.ts) | Paginated job list for the Jobs table. |
+| [jobs/match](src/app/api/jobs/match/route.ts) | Re-run the Claude match score for a job. |
+| [jobs/ats-score](src/app/api/jobs/ats-score/route.ts) | Compute the transparent ATS keyword score for a job. |
+| [jobs/interview-prep](src/app/api/jobs/interview-prep/route.ts) | Generate system-design/behavioral interview prep for a job. |
+| [jobs/recruiter-message](src/app/api/jobs/recruiter-message/route.ts) | Draft a recruiter outreach message. |
+
+**Automation**
+| Route | Purpose |
+|---|---|
+| [automation/start](src/app/api/automation/start/route.ts) | Builds the `SearchConfig` from settings + body and starts `automationEngine`. |
+| [automation/stop](src/app/api/automation/stop/route.ts) | Requests a graceful stop. |
+| [automation/status](src/app/api/automation/status/route.ts) | Returns engine state + dashboard stats (also used as the non-SSE fallback). |
+
+**Applications**
+| Route | Purpose |
+|---|---|
+| [applications/list](src/app/api/applications/list/route.ts) | Applications table data. |
+| [applications/apply](src/app/api/applications/apply/route.ts) | Multi-action endpoint: `tailor`, `approve`, `submit` (runs the apply engine in the background). |
+| [applications/apply-all](src/app/api/applications/apply-all/route.ts) | Batch-apply approved applications. |
+| [applications/tailor-all](src/app/api/applications/tailor-all/route.ts) | Batch-tailor fit jobs. |
+| [applications/screen](src/app/api/applications/screen/route.ts) | Run the employer-side ATS screening loop for a job. |
+| [applications/diff](src/app/api/applications/diff/route.ts) | Base vs. tailored résumé diff for the diff viewer. |
+| [applications/status](src/app/api/applications/status/route.ts) | Manually set an application status. |
+| [applications/decisions](src/app/api/applications/decisions/route.ts) | Per-field decision audit trail (replay/debug view). |
+| [applications/file](src/app/api/applications/file/route.ts) | Serve a generated artifact (PDF/screenshot/.tex). |
+| [applications/delete](src/app/api/applications/delete/route.ts) | Delete an application + its files. |
+| [applications/classify-email](src/app/api/applications/classify-email/route.ts) | Classify pasted email text and apply the detected status. |
+
+**Resume / Profile / Settings / Credentials / Memory**
+| Route | Purpose |
+|---|---|
+| [resume/upload](src/app/api/resume/upload/route.ts) | Upload + parse a résumé (PDF/DOCX); also lists résumés. |
+| [resume/status](src/app/api/resume/status/route.ts) · [resume/update](src/app/api/resume/update/route.ts) · [resume/delete](src/app/api/resume/delete/route.ts) | Parse status, edit parsed data, delete. |
+| [profile](src/app/api/profile/route.ts) | Read/write the structured Profile Engine V2 data. |
+| [settings](src/app/api/settings/route.ts) · [settings/sites](src/app/api/settings/sites/route.ts) | Search/automation settings; custom-site CRUD. |
+| [credentials](src/app/api/credentials/route.ts) | Save encrypted LinkedIn/ATS creds; migrate from `.env`; status. |
+| [memory](src/app/api/memory/route.ts) | CRUD over `ApplicationMemory` (add/edit/lock/delete/cleanup). |
+
+**Gmail**
+| Route | Purpose |
+|---|---|
+| [gmail/connect](src/app/api/gmail/connect/route.ts) | Start the OAuth consent flow. |
+| [gmail/oauth/callback](src/app/api/gmail/oauth/callback/route.ts) | OAuth redirect handler; stores the encrypted refresh token. |
+| [gmail/status](src/app/api/gmail/status/route.ts) · [gmail/disconnect](src/app/api/gmail/disconnect/route.ts) | Connection status; revoke. |
+| [gmail/sync](src/app/api/gmail/sync/route.ts) | Scan inbox and auto-update statuses. |
+| [gmail/otp](src/app/api/gmail/otp/route.ts) | Fetch the latest emailed verification code on demand. |
+
+**GitHub & misc**
+| Route | Purpose |
+|---|---|
+| [github/fetch](src/app/api/github/fetch/route.ts) | Import + clean repos into `GithubProject` rows. |
+| [github/projects](src/app/api/github/projects/route.ts) | List / toggle which projects appear on the résumé. |
+| [career](src/app/api/career/route.ts) | Career-advisor analysis (skill-gap, trajectory). |
+| [analytics](src/app/api/analytics/route.ts) | Funnel + outcome analytics for the Analytics tab. |
+| [dashboard/stats](src/app/api/dashboard/stats/route.ts) | Aggregate counters. |
+| [logs](src/app/api/logs/route.ts) | Recent `AutomationLog` rows; clear. |
+| [stream](src/app/api/stream/route.ts) | **SSE** endpoint streaming `state` / `logs` / `stats` to the dashboard. |
+| [export](src/app/api/export/route.ts) | Stream the Excel workbook (jobs or applications). |
+| [ats-check](src/app/api/ats-check/route.ts) | Standalone résumé-vs-JD ATS checker (the header modal). |
+| [extension/scan](src/app/api/extension/scan/route.ts) | Endpoint the companion browser extension posts page data to. |
+
+### UI components (`src/components`)
+
+**Primitives (`ui/`)** — thin Radix wrappers styled with Tailwind: [button](src/components/ui/button.tsx), [badge](src/components/ui/badge.tsx), [card](src/components/ui/card.tsx), [tabs](src/components/ui/tabs.tsx), [progress](src/components/ui/progress.tsx), [scroll-area](src/components/ui/scroll-area.tsx).
+
+**Dashboard panels & modals (`dashboard/`)**
+| Component | Purpose |
+|---|---|
+| [DashboardOverview](src/components/dashboard/DashboardOverview.tsx) | The "Dashboard" tab — at-a-glance funnel + recent activity. |
+| [StatsCards](src/components/dashboard/StatsCards.tsx) | Top metric cards (jobs, applied today, totals). |
+| [AutomationControls](src/components/dashboard/AutomationControls.tsx) | Start/stop/pause, mode toggle, resume selector, takeover buttons. |
+| [QuickSetupPanel](src/components/dashboard/QuickSetupPanel.tsx) | One-shot setup of keywords/locations/platforms. |
+| [JobsTable](src/components/dashboard/JobsTable.tsx) | Scraped jobs with scores, tailor/apply actions. |
+| [ApplicationsTable](src/components/dashboard/ApplicationsTable.tsx) | Applications with status, files, decisions. |
+| [ResumeUpload](src/components/dashboard/ResumeUpload.tsx) · [ResumeCard](src/components/dashboard/ResumeCard.tsx) | Upload dropzone; parsed-résumé editor card. |
+| [ProfilePanel](src/components/dashboard/ProfilePanel.tsx) | Structured Profile Engine V2 editor. |
+| [GithubProjectsPanel](src/components/dashboard/GithubProjectsPanel.tsx) | Import + select GitHub projects for the résumé. |
+| [CustomSitesPanel](src/components/dashboard/CustomSitesPanel.tsx) | Manage custom scraping targets. |
+| [AnalyticsPanel](src/components/dashboard/AnalyticsPanel.tsx) | Recharts funnel/outcome charts. |
+| [CareerAdvisorPanel](src/components/dashboard/CareerAdvisorPanel.tsx) | Skill-gap + trajectory advice. |
+| [EmailClassifierPanel](src/components/dashboard/EmailClassifierPanel.tsx) | Paste/scan email → detected status. |
+| [ScreeningPanel](src/components/dashboard/ScreeningPanel.tsx) | Run + display the ATS screening loop result. |
+| [LogsConsole](src/components/dashboard/LogsConsole.tsx) | Live, color-coded log stream. |
+| [AtsCheckerModal](src/components/dashboard/AtsCheckerModal.tsx) | Header résumé-vs-JD ATS score modal. |
+| [InterviewPrepModal](src/components/dashboard/InterviewPrepModal.tsx) · [RecruiterOutreachModal](src/components/dashboard/RecruiterOutreachModal.tsx) | Post-apply helpers. |
+| [ResumeDiffModal](src/components/dashboard/ResumeDiffModal.tsx) · [PdfCompareModal](src/components/dashboard/PdfCompareModal.tsx) | Base-vs-tailored text diff / PDF compare. |
+
+### Automation & apply engine (`src/lib/automation`)
+
+The heart of the system. The apply engine was split so the brittle, site-facing parts live in dedicated files.
+
+| File | What it does |
+|---|---|
+| [automation-engine.ts](src/lib/automation/automation-engine.ts) | The orchestrator singleton. Runs the streaming pipeline (scrape → analyze → tailor → CV → optional auto-apply) per job, manages run state (running/paused/stopped, daily caps), pre-warms ATS logins, kicks Gmail sync, and saves the Excel tracker. |
+| [apply-engine.ts](src/lib/automation/apply-engine.ts) | The Playwright apply engine (`ApplyEngine` class). Drives LinkedIn Easy Apply, external sites, and Workday; detects + fills fields safely; handles OTP/login walls; pre-submit review; strict success detection; and human-takeover with auto-resume. ~2,450 lines of flow logic; the DOM/selectors/types are imported from `apply/`. |
+| [apply/stealth.ts](src/lib/automation/apply/stealth.ts) | The anti-bot-detection init script injected into every apply browser context (patches `navigator.webdriver`, plugins, WebGL vendor, etc.). |
+| [apply/selectors.ts](src/lib/automation/apply/selectors.ts) | **The brittle bits in one place** — generic final-submit / advance / dismiss selector lists, OTP label/exclude regexes, and the self-heal intent→text patterns. *Fix these when a site changes its DOM.* |
+| [apply/dom-scripts.ts](src/lib/automation/apply/dom-scripts.ts) | Pure in-browser scanners passed to `page.evaluate()` — field detection, the LinkedIn apply-button finder, and the self-healing click scanner. Run in the page context, never reference Node scope. |
+| [apply/types.ts](src/lib/automation/apply/types.ts) | Shared apply types (`DetectedField`, `FieldDecisionRecord`, `ApplicationWithRelations`), the `getApplicationWithRelations` query, and `resolveResumePath`. |
+| [ats-adapters.ts](src/lib/automation/ats-adapters.ts) | A pattern library of major ATS platforms. Each adapter augments the generic form loop with platform-specific button text, file-input quirks, success markers, validation-error selectors, and a "needs login" flag. **Add a new ATS here.** |
+| [field-classifier.ts](src/lib/automation/field-classifier.ts) | The safety net (Phase 1). Classifies what a blank is *actually* asking, decides whether AI may answer it, gates on confidence, and validates that a candidate value even fits the field. Single source of truth; unit-tested. |
+| [selector-memory.ts](src/lib/automation/selector-memory.ts) | Self-healing selector cache (#24). Remembers which selector worked for a `(host, intent)` so it's tried first next time; on-disk + in-process. |
+| [scraper-status.ts](src/lib/automation/scraper-status.ts) | Shared cross-module signal for "waiting for human" / "user confirmed submit" during bot-wall or takeover pauses. |
+| [latex-compiler.ts](src/lib/automation/latex-compiler.ts) | Compiles `.tex` → PDF with the Tectonic binary (env override → `~/.job-agent-tools` → PATH); reports page count. |
+| [overleaf.ts](src/lib/automation/overleaf.ts) | Browser-driven Overleaf compile fallback. Serializes all compiles through one promise (a single project/profile can't run two at once). |
+| [resume-template.ts](src/lib/automation/resume-template.ts) | The canonical one-page résumé as **structured data** + a renderer that reproduces the exact hand-tuned Overleaf layout. The single source of truth tailoring reorders. |
+
+### Scraping (`src/lib/scraping`)
+
+| File | What it does |
+|---|---|
+| [scraping-orchestrator.ts](src/lib/scraping/scraping-orchestrator.ts) | Coordinates a scrape run across enabled platforms, dedupes, applies the fast filter, persists `Job` rows + a `ScrapingSession`, and streams each fit job id to a callback (so the pipeline starts immediately). |
+| [base-scraper.ts](src/lib/scraping/base-scraper.ts) | Shared Playwright base — launches a persistent, real-looking browser profile with cookies/fingerprint; common navigation + extraction helpers. |
+| [linkedin.ts](src/lib/scraping/linkedin.ts) | LinkedIn jobs scraper (handles both result layouts; reads the detail panel). |
+| [indeed.ts](src/lib/scraping/indeed.ts) | Indeed scraper with cookie/popup dismissal. |
+| [greenhouse.ts](src/lib/scraping/greenhouse.ts) | Pulls full descriptions from Greenhouse's public boards JSON API per company (more reliable than HTML). |
+| [custom-scraper.ts](src/lib/scraping/custom-scraper.ts) | Generic configurable scraper for arbitrary career sites defined in `CustomSite`. |
+
+### Matching (`src/lib/matching`)
+
+| File | What it does |
+|---|---|
+| [fast-filter.ts](src/lib/matching/fast-filter.ts) | Instant keyword pre-filter that eliminates obvious mismatches in microseconds before any AI/embedding call. Also exposes `extractRequiredYears` used to gate over-senior roles. |
+| [visa-detector.ts](src/lib/matching/visa-detector.ts) | Deterministic phrase scan for sponsorship + CPT/OPT signals → an `intlFriendlyScore` and accept flags. Fast and explainable. |
+
+### Tailoring pipeline (`src/lib/tailoring`)
+
+A pipeline engineered so **hallucination is structurally impossible**: the LLM only selects fact ids from a strict allowlist; deterministic templates write all prose.
+
+| File | What it does |
+|---|---|
+| [index.ts](src/lib/tailoring/index.ts) | Public entry. `tailorJob()` (and `composeApplication` / `finalize` for the screening loop) runs the full pipeline and persists. Re-exports the error/result types. |
+| [types.ts](src/lib/tailoring/types.ts) | The contract: `FactBook`, `FactSelection`, `JobAnalysis`, `TailorResult`, and the `EligibilityError` / `ValidationError` types. |
+| [facts/load-facts.ts](src/lib/tailoring/facts/load-facts.ts) | Builds the FactBook from the canonical résumé + skill-synonym map used to match JD skills to fact ids. |
+| [analysis/analyze-jd.ts](src/lib/tailoring/analysis/analyze-jd.ts) | LLM JD analysis (required/nice-to-have skills, level, signals), cached by `jobId`. |
+| [routing/pre-filter.ts](src/lib/tailoring/routing/pre-filter.ts) | Pure routing gate — throws `EligibilityError` when the candidate is clearly disqualified, so the job is soft-skipped before any generation. |
+| [composition/select-facts.ts](src/lib/tailoring/composition/select-facts.ts) | Deterministic skill↔JD matching + the LLM fact-selection step. Also exports `computeRequiredSkillMatch` reused by screening. Enforces the 30% coverage floor. |
+| [composition/summary-builder.ts](src/lib/tailoring/composition/summary-builder.ts) | Composes the résumé summary purely from level phrases + real skill canonicals + real achievements — no free text. |
+| [composition/letter-builder.ts](src/lib/tailoring/composition/letter-builder.ts) | Composes the cover letter from the same fact selection. |
+| [composition/text-utils.ts](src/lib/tailoring/composition/text-utils.ts) | Deterministic text helpers (`humanList`, `clip`, `lowerFirst`, …) — same input always yields the same prose. |
+| [validation/gates.ts](src/lib/tailoring/validation/gates.ts) | Defense-in-depth gates that re-check final strings and **throw loudly** if a template change breaks an invariant. |
+| [rendering/resume-latex.ts](src/lib/tailoring/rendering/resume-latex.ts) | Renders the tailored + a guaranteed-one-page canonical LaTeX résumé. |
+| [rendering/letter-latex.ts](src/lib/tailoring/rendering/letter-latex.ts) | Renders the cover-letter LaTeX (with proper escaping). |
+| [rendering/compile.ts](src/lib/tailoring/rendering/compile.ts) | Compiles both PDFs (with a tex-only/skip-compile fallback). |
+| [persistence/save.ts](src/lib/tailoring/persistence/save.ts) | Writes `.tex`/letter/JD/metadata to the application folder, creates `TailoredResume` + `CoverLetter`, flips the job to `TAILORED`. |
+
+### ATS screening loop (`src/lib/ats-screen`)
+
+The inverse of the applicant engine — decide as a recruiter's ATS would.
+
+| File | What it does |
+|---|---|
+| [screening-loop.ts](src/lib/ats-screen/screening-loop.ts) | The closed loop: generate → screen → on reject, feed real under-featured skills back to feature next round; stops with an honest reject + learn-list when only genuinely-absent gaps remain. Only the accepted version is compiled + persisted. |
+| [screen.ts](src/lib/ats-screen/screen.ts) | The single-round screener — required-coverage threshold accept/reject, gap classification (coverable vs. absent), optional LLM recruiter note. |
+| [types.ts](src/lib/ats-screen/types.ts) | `LoopResult` / `LoopRound` / screen result shapes. |
+| [persist.ts](src/lib/ats-screen/persist.ts) | Saves a screening run (accepted or rejected) with full round history to `ScreeningResult`. |
+
+### Profile engine (`src/lib/profile`)
+
+| File | What it does |
+|---|---|
+| [profile.ts](src/lib/profile/profile.ts) | Profile Engine V2 — a structured source of truth (value + category + confidence + lock per field) and a deterministic field resolver that maps a detected form field → the right profile value, so name/email/phone/visa/education never need AI. |
+| [profile-store.ts](src/lib/profile/profile-store.ts) | Load/save the profile (stored in `UserSettings.profile` JSON); seed it from a parsed résumé. |
+| [dropdown-intelligence.ts](src/lib/profile/dropdown-intelligence.ts) | Deterministically picks the best dropdown/radio option for a value (state abbreviations, country spellings, degree levels, yes/no), with ambiguity detection — no AI. Unit-tested. |
+
+### AI providers (`src/lib/ai`)
+
+| File | What it does |
+|---|---|
+| [claude.ts](src/lib/ai/claude.ts) | Provider router (`AI_PROVIDER` ∈ ollama/bedrock/anthropic, falls back to Ollama). Exposes the typed helpers used everywhere: `claudeComplete`, `claudeCompleteJSON`, `claudeMatchJobToResume`, `claudeAnswerQuestion`, `claudeParseResume`, `claudeClassifyEmail`, etc. |
+| [openai.ts](src/lib/ai/openai.ts) | OpenAI client wrapper. |
+| [ollama.ts](src/lib/ai/ollama.ts) | Local Ollama wrapper (OpenAI-compatible). Long timeout (default 10 min) because local LaTeX generation is slow. |
+| [ats-analyzer.ts](src/lib/ai/ats-analyzer.ts) | Transparent ATS scorer — 0-100 weighted keyword score (required 2× nice-to-have), strong matches, missing keywords, suggestions. Also `atsKeywordPct`. |
+
+### Gmail integration (`src/lib/gmail`)
+
+| File | What it does |
+|---|---|
+| [client.ts](src/lib/gmail/client.ts) | OAuth2 client + token lifecycle (read-only scope). Refresh token encrypted at rest; `gmailStatus()` reports connection. |
+| [fetch.ts](src/lib/gmail/fetch.ts) | List/fetch/normalize Gmail messages into a flat shape with decoded plain-text bodies (HTML stripped via cheerio). |
+| [otp.ts](src/lib/gmail/otp.ts) | `extractOtp()` pure parser (unit-tested) + `fetchLatestOtp()` polling used by the apply engine's OTP gate. |
+| [sync.ts](src/lib/gmail/sync.ts) | `syncInbox()` scans new mail, classifies it, records `EmailEvent` (dedupes), and auto-updates the matching application's status. |
+
+### GitHub import (`src/lib/github`)
+
+| File | What it does |
+|---|---|
+| [client.ts](src/lib/github/client.ts) | Minimal GitHub REST client (no SDK). Public repos unauthenticated; PAT unlocks private repos + higher rate limit. |
+| [import.ts](src/lib/github/import.ts) | Fetches repos + READMEs, cleans each into a presentable `GithubProject` (LLM, batched) with a deterministic metadata fallback. |
+
+### Résumé parsing (`src/lib/resume`)
+
+| File | What it does |
+|---|---|
+| [parser.ts](src/lib/resume/parser.ts) | Extracts text from PDF/DOCX and runs `claudeParseResume` into structured `parsedData`. |
+| [quick-extract.ts](src/lib/resume/quick-extract.ts) | Instant regex extraction (contact info, etc.) that runs before AI to cut latency. |
+
+### Storage & memory (`src/lib/storage`)
+
+| File | What it does |
+|---|---|
+| [memory.ts](src/lib/storage/memory.ts) | The application-answer memory: exact + **semantic** lookup (cached embeddings), `saveAnswer`/`saveHumanAnswer`, negative memory (`recordRejection`/`isRejected`), locking, and cleanup. Also `getOrCreateUser`. |
+| [file-manager.ts](src/lib/storage/file-manager.ts) | Per-application folder layout + writers (`saveApplicationFiles`, `saveScreenshot`, `saveFile`, `getApplicationFolder`, `ensureDir`), defensively serializing non-string content. |
+
+### Security (`src/lib/security`)
+
+| File | What it does |
+|---|---|
+| [crypto.ts](src/lib/security/crypto.ts) | AES-256-GCM encrypt/decrypt with a key in `~/.job-agent-tools/secret.key` (or `JOB_AGENT_SECRET_KEY`). `enc:v1:` prefix marks blobs; plaintext is tolerated during migration. |
+| [credentials.ts](src/lib/security/credentials.ts) | Resolves credentials preferring the encrypted DB value, falling back to legacy `.env`; save/migrate/status helpers. |
+
+### Auth (`src/lib/auth`)
+
+| File | What it does |
+|---|---|
+| [session.ts](src/lib/auth/session.ts) | JWT session helpers (jose): `createSession`, `verifySession`, `getSession`, set/clear the `job_agent_session` cookie (7-day, httpOnly). |
+
+### Cross-cutting utilities
+
+| File | What it does |
+|---|---|
+| [db/prisma.ts](src/lib/db/prisma.ts) | Prisma client singleton (HMR-safe). Quiet logging by default; `PRISMA_LOG_QUERIES=true` for SQL. |
+| [logging/logger.ts](src/lib/logging/logger.ts) | DB-backed `Logger` (`info/warn/error/success/debug`) writing `AutomationLog` rows that feed the live console; never throws on logging failure. |
+| [queue/job-queue.ts](src/lib/queue/job-queue.ts) | Lightweight in-process `EventEmitter`-based job queue. |
+| [export/excel.ts](src/lib/export/excel.ts) | Builds the jobs/applications Excel workbook (exceljs); encodes the "is fit" rule (matchScore ≤ 6). |
+| [utils.ts](src/lib/utils.ts) | `cn()` — clsx + tailwind-merge class combiner. |
+| [types/index.ts](src/types/index.ts) | Shared TS types: `JobStatus`, `ApplicationStatus`, `LogLevel`, `MemoryCategory`, `ParsedResume`, `AutomationState`, `SearchConfig`, `ScrapedJob`, `CustomSite`, `ExcelJobRow`, etc. |
+
+### Database (`prisma`)
+
+| File | What it does |
+|---|---|
+| [schema.prisma](prisma/schema.prisma) | The data model (see [Data Model](#data-model)). |
+| [migrations/](prisma/migrations/) | SQL migrations (`init`, `add_custom_sites`). |
+| [seed.ts](prisma/seed.ts) | Seeds the `"local"` user + default settings. |
+
+### Other top-level folders
+
+| Path | What it is |
+|---|---|
+| `extension/` | Companion browser extension that posts captured page data to `/api/extension/scan`. |
+| `applications/` | Generated artifacts at runtime — tailored PDFs, `.tex`, cover letters, screenshots, `jobs_tracker.xlsx`. |
+| `test/` | Vitest suites (field-classifier, profile, dropdown-intelligence, gmail-otp) + fixtures. The tailoring suite lives in `src/lib/tailoring/__tests__/`. |
+| `scripts/gh-debug.ts` | Ad-hoc GitHub-import debugging script. |
 
 ---
 
-## Key Design Decisions
+## Data Model
 
-### 1. Template-Based Resumes
+PostgreSQL via Prisma. Key models (full definitions in [schema.prisma](prisma/schema.prisma)):
 
-Why: Reliable, cheaper, always 1 page. Tested in Overleaf.
-
-Trade-off: Less variety per job. Offset by cover letter + AI summary.
-
-### 2. Local LaTeX (Tectonic)
-
-Why: Fast (~2.5s), offline, no browser automation.
-
-Trade-off: Requires a one-time binary install (auto-downloaded to `~/.job-agent-tools/`).
-
-### 3. Pluggable AI Provider
-
-Why: One code path (`src/lib/ai/claude.ts`) speaks the Messages API to Anthropic, Bedrock, or Ollama. Default is the Anthropic API for quality + zero local setup; switch to Ollama for fully-private, no-cost local inference.
-
-Trade-off: Cloud providers cost a little per job; Ollama needs a local GPU (CPU-only is slow).
-
-### 4. Manual Review by Default
-
-Why: Auto-apply to 50+/day risks LinkedIn rate-limits and flags.
-
-Trade-off: Not fully hands-off. But integrated: dashboard shows tailored versions, you click "Apply" when happy.
-
-### 5. Fact-Selection over Free-Text Generation
-
-Why: Letting an LLM write résumé/cover-letter prose freely is the root cause of fabricated skills, leaked template labels, and wrong voice — no amount of post-hoc gating fully fixes it. So the LLM is demoted to a *selector*: it returns fact IDs from your real résumé, and deterministic templates write every word. Hallucination becomes impossible by construction, not by inspection.
-
-Trade-off: Slightly less linguistic variety per job, and the strict eligibility/skill gates will *skip* borderline-fit jobs rather than stretch the truth. Worth it for letters you can send without re-reading every line.
+- **User / UserSettings** — the single `"local"` user; settings hold search prefs, enabled platforms, daily caps, custom sites, the structured `profile` JSON, encrypted credentials, and Gmail tokens.
+- **Resume / TailoredResume / CoverLetter** — the base résumé (parsed + `baseLatex`) and per-job generated artifacts (LaTeX, PDF paths, ATS score, keywords).
+- **Job** — a scraped posting with all match/ATS/visa signals and a `JobStatus` lifecycle (`FOUND → ANALYZED → TAILORING → TAILORED → APPLYING → APPLIED → …`).
+- **Application** — the apply record: status, screenshots, confirmation, `answeredQuestions`, and the recovery/replay fields (`recoveryState`, `actionLog`, `fieldDecisions`).
+- **ApplicationMemory** — reusable Q&A with category, usage count, lock flag, and `rejectedAnswers` (negative memory).
+- **GithubProject** — imported, cleaned repos with a `selected` toggle.
+- **ScreeningResult** — one row per employer-screening run with full round history.
+- **EmailEvent** — Gmail-derived events (OTP fetches + classified status mail), deduped by `gmailId`.
+- **AutomationLog / ScrapingSession** — the live log feed and scrape-run records.
 
 ---
 
-## FAQ
+## Setup
 
-**Q: Can I use this on my phone?**  
-A: Not yet.
+```bash
+git clone <repo-url>
+cd Application-automation-tool
+npm install
+npx playwright install
+cp .env.example .env        # then edit it
+npx prisma db push
+npm run db:seed             # optional: create the local user + defaults
+npm run dev
+```
 
-**Q: Will LinkedIn ban me?**  
-A: Unlikely on manual mode (you click Apply). Auto-submit 50+/day might trigger rate-limits. Recommended: max 10–15/day auto.
+Open `http://localhost:3000` and log in with `AUTH_PASSWORD`.
 
-**Q: What if a job fails to apply?**  
-A: Check screenshots (in job folder) and logs. The engine pauses for unknown fields and resumes when you fill them; if it can't confirm a submission it marks the job FAILED (never a false "submitted") so you can retry.
-
-**Q: It stopped mid-apply — do I have to click Resume?**  
-A: No. Just fill the highlighted field(s) in the open browser; it detects your input and continues on its own. (The Resume button still works as a manual override.)
-
-**Q: It paused on a Workday job and then I finished it myself — why did it say FAILED?**  
-A: It can't always auto-detect a confirmation page. When you finish a takeover, click **"✓ I submitted it"** (not just Resume) so it records the application as submitted.
-
-**Q: Does it really log into Workday for me?**  
-A: Yes — it signs in, or creates an account on that company's tenant, using `ATS_EMAIL`/`ATS_PASSWORD`. If the tenant requires email verification or a captcha, it hands off to you, then you click "I submitted it".
-
-**Q: Does it handle email verification codes (OTP)?**  
-A: Yes, if you connect Gmail. When an apply emails a code (e.g. Workday account creation, Greenhouse/Bloomerang security codes), the engine reads it from your inbox and enters it automatically. Without Gmail connected, it pauses for human takeover instead. One-time codes are never saved to memory.
-
-**Q: Is the Gmail access safe?**  
-A: It's **read-only** (`gmail.readonly` scope) and the refresh token is encrypted at rest. The app stays in Google's "Testing" mode (single-user), and it only reads — it never sends or deletes mail.
-
-**Q: A saved answer is wrong / the same value got into every field. How do I fix it?**  
-A: Open the **Memory** tab → **"Clean up bad answers"** to purge mismatches, then click any answer to edit it and 🔒 **lock** your identity fields so they can't drift again. Typing a correction during an application also overwrites the bad entry (and similarly-worded duplicates).
-
-**Q: How do I add support for a new ATS?**  
-A: Add one entry to `src/lib/automation/ats-adapters.ts` with that platform's URL + button/file selectors.
-
-**Q: How do I update my resume?**  
-A: Edit `src/lib/automation/resume-template.ts` (single source of truth).
-
-**Q: Where's my data?**  
-A: All local in PostgreSQL. Screenshots + metadata in `./applications/`.
+**Requirements:** Node 18+, PostgreSQL, Playwright browsers, at least one AI provider key (or local Ollama). Optional: Tectonic for local PDF compile, Gmail OAuth for OTP/status sync.
 
 ---
 
-## Support
+## Environment
 
-- **GitHub Issues**: Include job links, screenshots, error logs
-- **Dashboard**: Settings → Report Issue (includes logs + metadata)
+Configure `.env` (see [.env.example](.env.example) for the full list). Highlights:
 
-## Contributing
+```env
+AUTH_PASSWORD=your_secure_password
+AUTH_SECRET=your_64_char_random_secret
+DATABASE_URL=postgresql://postgres:password@localhost:5432/job_agent
 
-1. Fork
-2. Create feature branch
-3. Make changes, test locally
-4. Submit PR
+AI_PROVIDER=anthropic            # anthropic | bedrock | ollama
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=claude-sonnet-4-6
+OPENAI_API_KEY=...
+
+LINKEDIN_COOKIE=your_li_at_cookie
+
+GMAIL_CLIENT_ID=...
+GMAIL_CLIENT_SECRET=...
+GMAIL_OAUTH_REDIRECT=http://localhost:3000/api/gmail/oauth/callback
+
+AUTOMATION_AUTO_APPLY=false
+AUTOMATION_REQUIRE_APPROVAL=true
+AUTOMATION_MAX_APPLICATIONS_PER_DAY=30
+```
+
+Prefer the in-app **Settings → Credentials** screen (encrypts at rest) over plaintext `.env`. Other useful knobs: `ANALYZE_TIMEOUT_MS`, `TAILOR_TIMEOUT_MS`, `OLLAMA_TIMEOUT_MS`, `JOB_AGENT_SECRET_KEY`, `PRISMA_LOG_QUERIES`, `SKIP_OVERLEAF`.
+
+---
+
+## Commands
+
+```bash
+npm run dev          # Dev server (Turbopack)
+npm run build        # Production build
+npm run start        # Production server
+npm run test         # Vitest (run once)
+npm run test:watch   # Vitest watch
+npm run db:generate  # prisma generate
+npm run db:push      # push schema (dev)
+npm run db:migrate   # create + apply a migration
+npm run db:studio    # Prisma Studio
+npm run db:seed      # seed local user + defaults
+npx tsc --noEmit     # typecheck (no script alias yet)
+```
+
+---
+
+## Extending the System
+
+- **Add a job board** → subclass [base-scraper.ts](src/lib/scraping/base-scraper.ts) and register it in [scraping-orchestrator.ts](src/lib/scraping/scraping-orchestrator.ts).
+- **Add an ATS platform** → add an adapter in [ats-adapters.ts](src/lib/automation/ats-adapters.ts) (button text, file inputs, success markers, login flag).
+- **A site changed its DOM** → fix the relevant list in [apply/selectors.ts](src/lib/automation/apply/selectors.ts) (and/or the adapter); the self-healing layer often recovers automatically.
+- **New form-field behavior** → extend the rules in [field-classifier.ts](src/lib/automation/field-classifier.ts) (the single source of truth) and add a test.
+- **Tune fit scoring** → [fast-filter.ts](src/lib/matching/fast-filter.ts) and `composition/select-facts.ts`.
+- **Change the résumé layout** → edit the structured data in [resume-template.ts](src/lib/automation/resume-template.ts).
+
+---
+
+## Production Notes & Known Limitations
+
+This is a **local, single-user** tool; "production-ready" here means *reliable and maintainable*, not *hosted multi-tenant*.
+
+- `automationEngine` and the apply engine are **in-memory singletons** — they assume one Node process. Run state is lost on restart, and this design will **not** scale to serverless or multiple replicas without a job queue + persisted run state.
+- `userId` is hardcoded `"local"`; making it multi-user requires real auth + scoping every query.
+- Browser automation depends on live sessions, selectors, and site behavior; some applications intentionally **pause for human input** rather than risk a wrong/fake submission.
+- `AUTOMATION_AUTO_APPLY=false` is recommended until you've reviewed the flow.
+- No CI workflow yet, and ESLint isn't configured; `npx tsc --noEmit` + `npm run test` are the current gates. Tests cover tailoring, the field classifier, profile, dropdown intelligence, and OTP parsing.
+- Generated files live under `applications/` (git-ignored).
 
 ---
 
 ## License
 
-MIT — Free for personal and commercial use.
-
----
-
-**Happy hunting! 🚀**
+Private project.
