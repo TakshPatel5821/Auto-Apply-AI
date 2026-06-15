@@ -1,6 +1,6 @@
-import { chromium, BrowserContext, Page, ElementHandle } from "playwright";
-import { mkdirSync, existsSync } from "fs";
-import { join, isAbsolute } from "path";
+import { chromium, BrowserContext, Page } from "playwright";
+import { mkdirSync } from "fs";
+import { join } from "path";
 import { homedir } from "os";
 import { prisma } from "@/lib/db/prisma";
 import { findAnswer, saveAnswer, saveHumanAnswer, recordRejection, isRejected } from "@/lib/storage/memory";
@@ -13,17 +13,6 @@ import { claudeAnswerQuestion } from "@/lib/ai/claude";
 import { saveScreenshot, saveFile } from "@/lib/storage/file-manager";
 import { fetchLatestOtp } from "@/lib/gmail/otp";
 import { gmailStatus } from "@/lib/gmail/client";
-
-// Résumé PDF paths are stored relative to the project root ("applications/..").
-// existsSync on a relative path is cwd-dependent, so resolve to absolute first.
-function resolveResumePath(p?: string | null): string | null {
-  if (!p) return null;
-  const abs = isAbsolute(p) ? p : join(process.cwd(), p);
-  return existsSync(abs) ? abs : null;
-}
-
-// Field classification + value validation now live in ./field-classifier
-// (Phase 1). The engine consumes classifyField/validateValue/decideFill below.
 import { Logger } from "@/lib/logging/logger";
 import { scraperStatus } from "./scraper-status";
 import { detectAts, AtsAdapter, GENERIC_VALIDATION_ERROR_SELECTORS } from "./ats-adapters";
@@ -34,88 +23,24 @@ import {
   isSensitive,
   aiMayAnswer,
 } from "./field-classifier";
-
-// Element handle type as returned by page.$$ — used for OTP input detection.
-type OtpHandle = ElementHandle<SVGElement | HTMLElement>;
-
-type ApplicationWithRelations = Awaited<ReturnType<typeof getApplicationWithRelations>>;
-
-async function getApplicationWithRelations(id: string) {
-  return prisma.application.findUnique({
-    where: { id },
-    include: {
-      job: true,
-      tailoredResume: { select: { pdfPath: true, texPath: true } },
-      coverLetter: { select: { pdfPath: true, content: true } },
-      resume: { select: { parsedData: true } },
-    },
-  });
-}
-
-interface DetectedField {
-  type: string;
-  label: string;
-  name?: string;
-  required: boolean;
-  options?: string[];
-  selector: string;
-  // Phase 3: richer context signals so the classifier understands the blank.
-  placeholder?: string;
-  ariaLabel?: string;
-  sectionHeading?: string;
-  // Phase 6: the field's character limit (maxlength), for open-ended answers.
-  maxLength?: number;
-}
-
-// Phase 9: a single per-field decision for the debug/replay view.
-interface FieldDecisionRecord {
-  t: string;
-  step: number;
-  label: string;
-  category: string;
-  domKind: string;
-  source: string | null;       // profile[x] | memory | resume | AI | consent | prefilled
-  confidence: number | null;
-  decision: string;            // filled | verified | pause | reject | skip | consent | prefilled
-  valuePreview: string | null; // truncated; "‹hidden›" for sensitive categories
-  reason: string | null;
-}
-
-const STEALTH_SCRIPT = () => {
-  Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-  (window as unknown as Record<string, unknown>).chrome = {
-    app: { isInstalled: false, InstallState: {}, RunningState: {} },
-    runtime: { id: "x", connect: () => ({ onMessage: { addListener: () => {} }, postMessage: () => {}, disconnect: () => {} }), sendMessage: () => {}, onMessage: { addListener: () => {}, removeListener: () => {}, hasListeners: () => false }, onConnect: { addListener: () => {}, removeListener: () => {}, hasListeners: () => false }, lastError: undefined },
-    loadTimes: () => ({}), csi: () => ({}),
-  };
-  const fakePlugins = [
-    { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer", description: "Portable Document Format" },
-    { name: "Chrome PDF Viewer", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai", description: "" },
-    { name: "Native Client", filename: "internal-nacl-plugin", description: "" },
-  ] as unknown as PluginArray;
-  Object.defineProperty(navigator, "plugins", { get: () => fakePlugins });
-  Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-  Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 });
-  try { Object.defineProperty(navigator, "deviceMemory", { get: () => 8 }); } catch { /* ignore */ }
-  Object.defineProperty(navigator, "maxTouchPoints", { get: () => 0 });
-  try {
-    const origQuery = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (params) =>
-      (params as PermissionDescriptor).name === "notifications"
-        ? Promise.resolve({ state: Notification.permission, onchange: null } as PermissionStatus)
-        : origQuery(params);
-  } catch { /* ignore */ }
-  try {
-    const origGetParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (p: number) {
-      if (p === 37445) return "Intel Inc.";
-      if (p === 37446) return "Intel Iris OpenGL Engine";
-      return origGetParam.call(this, p);
-    };
-  } catch { /* ignore */ }
-  try { Object.defineProperty(screen, "colorDepth", { get: () => 24 }); } catch { /* ignore */ }
-  try { Object.defineProperty(screen, "pixelDepth", { get: () => 24 }); } catch { /* ignore */ }
-};
+import { STEALTH_SCRIPT } from "./apply/stealth";
+import {
+  type OtpHandle,
+  type DetectedField,
+  type FieldDecisionRecord,
+  type ApplicationWithRelations,
+  getApplicationWithRelations,
+  resolveResumePath,
+} from "./apply/types";
+import {
+  FINAL_SUBMIT_SELECTORS,
+  ADVANCE_SELECTORS,
+  DISMISS_SELECTORS,
+  OTP_LABEL_RE,
+  OTP_EXCLUDE_RE,
+  intentTextPatterns,
+} from "./apply/selectors";
+import { scanDetectFields, scanLinkedInApplyButton, scanHealClick } from "./apply/dom-scripts";
 
 export class ApplyEngine {
   private context: BrowserContext | null = null;
@@ -460,48 +385,7 @@ export class ApplyEngine {
       { timeout: 12000 }
     ).catch(() => null);
 
-    return this.page!.evaluate(() => {
-      const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim();
-      const els = Array.from(document.querySelectorAll("button, a")) as HTMLElement[];
-
-      for (const b of els) {
-        if ((b as HTMLButtonElement).disabled) continue;
-        // Visible only (skip 0-size / hidden controls).
-        const rect = b.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-
-        const aria = b.getAttribute("aria-label") || "";
-        const text = norm(b.innerText + " " + aria);
-        const lower = text.toLowerCase();
-
-        const isApplyClass =
-          b.classList.contains("jobs-apply-button") || !!b.closest(".jobs-apply-button");
-        // Accessible name starts with "apply"/"easy apply", or it's the apply-button widget.
-        const looksApply =
-          isApplyClass || lower.startsWith("apply") || /\beasy apply\b/.test(lower);
-        if (!looksApply) continue;
-        // Exclude look-alikes (counts, AI helpers, save/share/alerts).
-        if (/(save|share|follow|set alert|clicked apply|tailor|cover letter|match details|stand out|report)/.test(lower)) {
-          continue;
-        }
-
-        // Build a usable selector.
-        const tag = b.tagName.toLowerCase();
-        const id = b.id ? `#${CSS.escape(b.id)}` : "";
-        let selector = id;
-        if (!selector && aria) selector = `${tag}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
-        if (!selector && isApplyClass) selector = ".jobs-apply-button";
-        if (!selector) {
-          const all = Array.from(document.querySelectorAll(tag));
-          const idx = all.indexOf(b);
-          if (idx >= 0) selector = `${tag}:nth-of-type(${idx + 1})`;
-        }
-        if (!selector) continue;
-
-        return { selector, text: text.slice(0, 80), isEasyApply: /\beasy apply\b/.test(lower) };
-      }
-      return null;
-    });
+    return this.page!.evaluate(scanLinkedInApplyButton);
   }
 
   // ─── Easy Apply modal flow ──────────────────────────────────────────────────
@@ -1087,11 +971,7 @@ export class ApplyEngine {
   // email"). When Gmail is connected, fetch the freshly-emailed code and enter
   // it automatically; otherwise return false so the existing human-takeover path
   // handles it. Returns true only when a code was filled + submitted.
-  private OTP_LABEL_RE =
-    /(?:verification|one[\s-]?time|security|confirmation|passcode|otp|auth(?:entication)?)\s*code|^\s*(?:otp|passcode)\s*$|enter\s+(?:the\s+)?(?:code|otp)|code\s+we\s+(?:sent|emailed)/i;
-  private OTP_EXCLUDE_RE =
-    /(?:zip|postal|post|area|country|dial|promo|coupon|discount|gift|referral|invite|sort)\s*code|postcode/i;
-
+  // OTP_LABEL_RE / OTP_EXCLUDE_RE now live in ./apply/selectors.
   private async handleEmailVerificationIfPresent(scope: string = "body"): Promise<boolean> {
     // Cheap pre-check: any code-ish input or one-time-code field on the page?
     const quick = await this.page!
@@ -1237,9 +1117,9 @@ export class ApplyEngine {
     // Single field whose label/attrs look like a verification code.
     const score = (v: { meta: Meta }): number => {
       const hay = `${v.meta.label} ${v.meta.name} ${v.meta.id} ${v.meta.placeholder} ${v.meta.aria}`;
-      if (this.OTP_EXCLUDE_RE.test(hay)) return -1;
+      if (OTP_EXCLUDE_RE.test(hay)) return -1;
       if (v.meta.autocomplete === "one-time-code") return 3;
-      if (this.OTP_LABEL_RE.test(hay)) return 2;
+      if (OTP_LABEL_RE.test(hay)) return 2;
       if (verifyContext && /\bcode\b|otp|pin/i.test(hay)) return 1;
       return 0;
     };
@@ -1367,24 +1247,7 @@ export class ApplyEngine {
   // The selectors that identify a genuine FINAL submit button (shared by the
   // clicker and the pre-submit probe).
   private finalSubmitCandidates(ats?: AtsAdapter | null): string[] {
-    return [
-      ...(ats?.submitButtons || []),
-      'button[aria-label="Submit application"]',
-      'button:has-text("Submit application")',
-      'button:has-text("Submit Application")',
-      'button:has-text("Submit your application")',
-      'button:has-text("Submit Your Application")',
-      'button:has-text("Send application")',
-      'button:has-text("Send Application")',
-      'button:has-text("Complete application")',
-      'button:has-text("Complete Application")',
-      'input[type="submit"][value*="Submit application" i]',
-      'a:has-text("Submit application")',
-      // Plain "Submit"/"Send" — last, and only as a final action.
-      'button:has-text("Submit")',
-      'button:has-text("Send")',
-      'input[type="submit"][value*="submit" i]',
-    ];
+    return [...(ats?.submitButtons || []), ...FINAL_SUBMIT_SELECTORS];
   }
 
   // Is a final-submit button visible right now (without clicking it)? Used to
@@ -1407,30 +1270,7 @@ export class ApplyEngine {
 
   // Click a button that ADVANCES to the next step of a multi-step form.
   private async clickAdvance(ats?: AtsAdapter | null): Promise<boolean> {
-    const candidates = [
-      ...(ats?.advanceButtons || []),
-      'button:has-text("Save & Go to Next Section")',
-      'button:has-text("Save and Go to Next Section")',
-      'button:has-text("Save & Continue")',
-      'button:has-text("Save and Continue")',
-      'button:has-text("Save & Next")',
-      'button:has-text("Continue to next step")',
-      'button[aria-label*="Continue to next step"]',
-      'button:has-text("Review your application")',
-      'button[aria-label*="Review"]',
-      'button:has-text("Review")',
-      'button:has-text("Continue")',
-      'button:has-text("Next")',
-      'button:has-text("Proceed")',
-      'button:has-text("Save and continue")',
-      '[data-automation-id="bottom-navigation-next-button"]',
-      'a:has-text("Continue")',
-      'a:has-text("Next")',
-      // Generic form-submit as a last resort (advances single-form steps).
-      'button[type="submit"]',
-      'input[type="submit"]',
-      '.btn-primary[type="submit"]',
-    ];
+    const candidates = [...(ats?.advanceButtons || []), ...ADVANCE_SELECTORS];
     return this.clickFirstVisible(candidates, "Next");
   }
 
@@ -1470,64 +1310,14 @@ export class ApplyEngine {
     return healed;
   }
 
-  // Intent → text patterns used by the self-healing fallback scan.
-  private intentTextPatterns(kind: string): RegExp {
-    const k = kind.toLowerCase();
-    if (k.includes("submit"))
-      return /\b(submit|send) (application|app)\b|submit$|send application|complete application/i;
-    if (k.includes("next") || k.includes("continue"))
-      return /\b(next|continue|save (and|&) (continue|next)|review|proceed|save (and|&) go)\b/i;
-    if (k.includes("sign in") || k.includes("login"))
-      return /\bsign in\b|\blog in\b|\blogin\b/i;
-    if (k.includes("create account"))
-      return /create account|sign up|register/i;
-    if (k.includes("apply"))
-      return /\bapply\b|easy apply|quick apply/i;
-    return new RegExp(kind.replace(/[^a-z0-9]+/gi, "\\s*"), "i");
-  }
-
   // Find + click the best-matching visible button/link by text for `kind`.
-  // Returns true and learns a stable selector if it succeeds.
+  // Returns true and learns a stable selector if it succeeds. The DOM scan +
+  // intent→text patterns now live in ./apply/dom-scripts + ./apply/selectors.
   private async healClick(kind: string): Promise<boolean> {
-    const rxSource = this.intentTextPatterns(kind).source;
-    const rxFlags = this.intentTextPatterns(kind).flags;
-
-    const found = await this.page!.evaluate(
-      ({ src, flags }) => {
-        const rx = new RegExp(src, flags);
-        const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim();
-        const els = Array.from(
-          document.querySelectorAll<HTMLElement>(
-            "button, a, input[type=submit], input[type=button], [role=button]"
-          )
-        );
-        for (const el of els) {
-          const r = el.getBoundingClientRect();
-          if (r.width === 0 || r.height === 0) continue;
-          if ((el as HTMLButtonElement).disabled) continue;
-          const label = norm(
-            el.innerText ||
-              (el as HTMLInputElement).value ||
-              el.getAttribute("aria-label") ||
-              ""
-          );
-          if (!label || !rx.test(label)) continue;
-          // Build a durable selector for this element.
-          let selector = "";
-          const id = el.id;
-          const aria = el.getAttribute("aria-label");
-          const auto = el.getAttribute("data-automation-id");
-          if (id) selector = `#${CSS.escape(id)}`;
-          else if (auto) selector = `[data-automation-id="${auto}"]`;
-          else if (aria) selector = `${el.tagName.toLowerCase()}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
-          // Mark the element so the caller can click it even without a selector.
-          el.setAttribute("data-jobagent-heal", "1");
-          return { selector, label: label.slice(0, 60) };
-        }
-        return null;
-      },
-      { src: rxSource, flags: rxFlags }
-    ).catch(() => null);
+    const rx = intentTextPatterns(kind);
+    const found = await this.page!
+      .evaluate(scanHealClick, { src: rx.source, flags: rx.flags })
+      .catch(() => null);
 
     if (!found) return false;
 
@@ -1757,21 +1547,7 @@ export class ApplyEngine {
   // ─── Popup dismissal ────────────────────────────────────────────────────────
 
   private async dismissPopups(): Promise<void> {
-    const dismissSelectors = [
-      'button[aria-label="Dismiss"]',
-      'button[aria-label="Close"]',
-      'button.contextual-sign-in-modal__modal-dismiss-icon',
-      '.modal__dismiss',
-      '#onetrust-accept-btn-handler',
-      'button[id*="accept-cookies"]',
-      'button:has-text("Accept all")',
-      'button:has-text("Accept")',
-      'button:has-text("I agree")',
-      'button:has-text("Got it")',
-      'button:has-text("Continue")',
-      '[data-testid="close-button"]',
-    ];
-    for (const sel of dismissSelectors) {
+    for (const sel of DISMISS_SELECTORS) {
       try {
         const btn = await this.page!.$(sel);
         if (btn && await btn.isVisible().catch(() => false)) {
@@ -2038,184 +1814,7 @@ export class ApplyEngine {
   }
 
   private async detectFields(scope: string): Promise<DetectedField[]> {
-    return this.page!.evaluate((scopeSel: string) => {
-      const root = document.querySelector(scopeSel) || document.body;
-      const results: Array<{
-        type: string;
-        label: string;
-        name?: string;
-        required: boolean;
-        options?: string[];
-        selector: string;
-        placeholder?: string;
-        ariaLabel?: string;
-        sectionHeading?: string;
-        maxLength?: number;
-      }> = [];
-
-      const clean = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
-
-      // Resolve aria-labelledby → concatenated text of the referenced nodes.
-      const ariaLabelledByText = (el: Element): string => {
-        const ids = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
-        if (!ids.length) return "";
-        return ids
-          .map((id) => document.getElementById(id)?.textContent || "")
-          .map(clean)
-          .filter(Boolean)
-          .join(" ");
-      };
-
-      const getLabel = (el: Element): string => {
-        const elId = (el as HTMLInputElement).id;
-        if (elId) {
-          const lbl = document.querySelector(`label[for="${CSS.escape(elId)}"]`);
-          if (lbl) return clean(lbl.textContent);
-        }
-        const wrap = el.closest("label");
-        if (wrap) return clean(wrap.textContent);
-        const byId = ariaLabelledByText(el);
-        if (byId) return byId;
-        const parent = el.closest(
-          ".form-group, .jobs-easy-apply-form-element, [class*='field'], [class*='question'], fieldset, [data-automation-id]"
-        );
-        if (parent) {
-          const lbl = parent.querySelector("label, legend, .label, h3, h4, [class*='label'], [class*='title']");
-          if (lbl && lbl !== el) return clean(lbl.textContent);
-        }
-        return clean(
-          (el as HTMLInputElement).getAttribute("aria-label") ||
-          (el as HTMLInputElement).placeholder ||
-          (el as HTMLInputElement).name ||
-          ""
-        );
-      };
-
-      // Nearest section heading ABOVE the field — only consulted by the
-      // classifier when the field's own text is inconclusive, so it can't
-      // override a clear label. Conservative: search within the closest
-      // section-like ancestor and its preceding siblings.
-      const getSectionHeading = (el: Element): string => {
-        const HEAD = /^(H[1-4]|LEGEND)$/;
-        let node: Element | null = el;
-        for (let depth = 0; depth < 6 && node; depth++) {
-          let sib: Element | null = node.previousElementSibling;
-          while (sib) {
-            if (HEAD.test(sib.tagName)) {
-              const t = clean(sib.textContent);
-              if (t && t.length < 120) return t;
-            }
-            const h = sib.querySelector?.("h1,h2,h3,h4,legend");
-            const ht = clean(h?.textContent);
-            if (ht && ht.length < 120) return ht;
-            sib = sib.previousElementSibling;
-          }
-          node = node.parentElement;
-        }
-        return "";
-      };
-
-      const makeSelector = (el: Element): string => {
-        const elId = (el as HTMLInputElement).id;
-        if (elId) return `#${CSS.escape(elId)}`;
-        const name = (el as HTMLInputElement).name;
-        if (name) return `[name="${name}"]`;
-        return "";
-      };
-
-      const inputs = root.querySelectorAll(
-        'input:not([type="hidden"]):not([type="submit"]):not([type="file"]):not([type="button"]):not([type="image"]), textarea, select'
-      );
-
-      inputs.forEach((el) => {
-        const htmlEl = el as HTMLElement;
-        // Skip completely invisible (display:none, visibility:hidden)
-        const style = window.getComputedStyle(htmlEl);
-        if (style.display === "none" || style.visibility === "hidden") return;
-
-        // Allow elements that might be scrolled out of view (still need width/height)
-        const rect = htmlEl.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-
-        const label = getLabel(el);
-        const selector = makeSelector(el);
-        if (!selector) return;
-
-        const type = el.tagName === "SELECT"
-          ? "select"
-          : el.tagName === "TEXTAREA"
-          ? "textarea"
-          : (el as HTMLInputElement).type || "text";
-
-        const options = el.tagName === "SELECT"
-          ? Array.from((el as HTMLSelectElement).options).map((o) => o.text.trim()).filter(Boolean)
-          : undefined;
-
-        results.push({
-          type,
-          label: label || `field_${results.length}`,
-          name: (el as HTMLInputElement).name || undefined,
-          required: (el as HTMLInputElement).required || false,
-          options,
-          selector,
-          placeholder: clean((el as HTMLInputElement).placeholder) || undefined,
-          ariaLabel: clean((el as HTMLInputElement).getAttribute("aria-label")) || undefined,
-          sectionHeading: getSectionHeading(el) || undefined,
-          maxLength: (el as HTMLInputElement).maxLength > 0 ? (el as HTMLInputElement).maxLength : undefined,
-        });
-      });
-
-      // Radio groups
-      const fieldsets = root.querySelectorAll("fieldset");
-      fieldsets.forEach((fs) => {
-        const legend = clean(fs.querySelector("legend")?.textContent);
-        const radios = Array.from(fs.querySelectorAll('input[type="radio"]'));
-        if (radios.length === 0) return;
-
-        const label = legend || clean(fs.querySelector("[class*='label']")?.textContent) || "";
-        if (!label) return;
-
-        const options = radios.map((r) => {
-          const rid = (r as HTMLInputElement).id;
-          const lbl = rid ? document.querySelector(`label[for="${CSS.escape(rid)}"]`)?.textContent?.trim() : "";
-          return lbl || (r as HTMLInputElement).value;
-        }).filter(Boolean);
-
-        const firstRadio = radios[0] as HTMLInputElement;
-        const groupSelector = firstRadio.name ? `input[type="radio"][name="${firstRadio.name}"]` : "";
-
-        if (groupSelector) {
-          results.push({
-            type: "radio",
-            label,
-            name: firstRadio.name,
-            required: false,
-            options,
-            selector: groupSelector,
-            // The legend IS the question; surface it as section heading too.
-            sectionHeading: getSectionHeading(fs) || undefined,
-          });
-        }
-      });
-
-      // Standalone checkboxes (e.g., "I agree to terms")
-      const checkboxes = root.querySelectorAll('input[type="checkbox"]');
-      checkboxes.forEach((cb) => {
-        const label = getLabel(cb);
-        const selector = makeSelector(cb);
-        if (!selector || !label) return;
-        results.push({
-          type: "checkbox",
-          label,
-          name: (cb as HTMLInputElement).name,
-          required: false,
-          selector,
-          sectionHeading: getSectionHeading(cb) || undefined,
-        });
-      });
-
-      return results;
-    }, scope) as Promise<DetectedField[]>;
+    return this.page!.evaluate(scanDetectFields, scope) as Promise<DetectedField[]>;
   }
 
   // Fills one field. Returns true if it was filled (or safely skippable),
@@ -2711,7 +2310,7 @@ export class ApplyEngine {
         if (f.type === "checkbox" || f.type === "radio") continue;
         // Never memorize one-time / email verification codes — they're single-use,
         // so a captured "Security code" → "B" would only poison future applies.
-        if (this.OTP_LABEL_RE.test(f.label) && !this.OTP_EXCLUDE_RE.test(f.label)) continue;
+        if (OTP_LABEL_RE.test(f.label) && !OTP_EXCLUDE_RE.test(f.label)) continue;
 
         let value = "";
         if (f.type === "select") {
