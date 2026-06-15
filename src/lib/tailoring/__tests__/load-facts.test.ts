@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { buildFactBook, defaultCandidate } from "@/lib/tailoring/facts/load-facts";
+import {
+  buildFactBook,
+  defaultCandidate,
+  dedupeGithubProjects,
+  nearDuplicateProjectName,
+} from "@/lib/tailoring/facts/load-facts";
 import { RESUME_EXPERIENCE } from "@/lib/automation/resume-template";
 
 describe("loadFacts / buildFactBook", () => {

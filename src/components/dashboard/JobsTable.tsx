@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, Fragment } from "react";
-import { ExternalLink, Wand2, Send, ChevronDown, ChevronUp, Gauge } from "lucide-react";
+import { ExternalLink, Wand2, Send, ChevronDown, ChevronUp, Gauge, Loader2, ShieldCheck } from "lucide-react";
+import { ScreeningPanel, type ScreeningView } from "./ScreeningPanel";
 
 interface AtsAnalysis {
   score: number;
@@ -33,7 +34,12 @@ interface Job {
   url: string;
   scrapedAt: string;
   application: { status: string; appliedAt: string | null } | null;
+  _count?: { tailoredResumes: number };
 }
+
+// Job statuses we should NOT bulk-tailor (already applied / terminal / skipped).
+// Kept in sync with the /api/applications/tailor-all route.
+const SKIP_STATUSES = ["APPLYING", "APPLIED", "INTERVIEWING", "OFFERED", "REJECTED", "WITHDRAWN", "SKIPPED"];
 
 function ScoreBadge({ score }: { score: number | null }) {
   if (!score) return <span className="text-gray-600 text-xs">—</span>;
@@ -75,6 +81,17 @@ export function JobsTable({
   // ATS analysis results + the row currently expanded.
   const [atsResults, setAtsResults] = useState<Record<string, AtsAnalysis>>({});
   const [atsOpen, setAtsOpen] = useState<string | null>(null);
+  // Employer-ATS screening results + the row currently expanded.
+  const [screenResults, setScreenResults] = useState<Record<string, ScreeningView>>({});
+  const [screenOpen, setScreenOpen] = useState<string | null>(null);
+  // Bulk "Tailor All" run state + the latest status message.
+  const [bulkTailoring, setBulkTailoring] = useState(false);
+  const [bulkMsg, setBulkMsg] = useState<string | null>(null);
+
+  // Jobs that still need analyze + cover letter + résumé (no tailored résumé yet).
+  const needsTailoring = jobs.filter(
+    (j) => (j._count?.tailoredResumes ?? 0) === 0 && !SKIP_STATUSES.includes(j.status)
+  );
 
   const filtered = jobs
     .filter((j) => {
@@ -94,6 +111,42 @@ export function JobsTable({
   function toggleSort(field: typeof sortField) {
     if (sortField === field) setSortDir(sortDir === "asc" ? "desc" : "asc");
     else { setSortField(field); setSortDir("asc"); }
+  }
+
+  // Kick off the bulk tailor (analyze + cover letter + résumé for every untailored
+  // job), then poll the server until the run finishes, refreshing the table as
+  // applications appear. Prepares only — submitting stays with the Apply flow.
+  async function tailorAll() {
+    setBulkTailoring(true);
+    setBulkMsg(null);
+    try {
+      const res = await fetch("/api/applications/tailor-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      setBulkMsg(data.message || null);
+      if (!data.success) {
+        setBulkTailoring(false);
+        return;
+      }
+      const poll = setInterval(async () => {
+        onRefresh();
+        const s = await fetch("/api/applications/tailor-all")
+          .then((r) => r.json())
+          .catch(() => ({ running: false }));
+        if (!s.running) {
+          clearInterval(poll);
+          setBulkTailoring(false);
+          setBulkMsg("Done — résumés and cover letters are ready. Review and apply below.");
+          onRefresh();
+        }
+      }, 5000);
+    } catch {
+      setBulkTailoring(false);
+      setBulkMsg("Couldn't start bulk tailor — check the logs.");
+    }
   }
 
   async function tailorResume(jobId: string) {
@@ -140,6 +193,28 @@ export function JobsTable({
     }
   }
 
+  // Run the employer-side ATS screening loop for a job (accept/reject + round
+  // history + gaps), then show it inline. Toggles closed if already open.
+  async function screenJob(jobId: string) {
+    if (screenOpen === jobId) { setScreenOpen(null); return; }
+    if (screenResults[jobId]) { setScreenOpen(jobId); return; }
+    setLoading(jobId + "_screen");
+    try {
+      const res = await fetch("/api/applications/screen", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      const data = await res.json();
+      if (data.screening) {
+        setScreenResults((prev) => ({ ...prev, [jobId]: data.screening }));
+        setScreenOpen(jobId);
+      }
+    } finally {
+      setLoading(null);
+    }
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex gap-3 flex-wrap">
@@ -160,8 +235,31 @@ export function JobsTable({
             <option key={s} value={s}>{s}</option>
           ))}
         </select>
+        <button
+          onClick={tailorAll}
+          disabled={bulkTailoring || needsTailoring.length === 0}
+          title="Analyze each job and generate a tailored résumé + cover letter for every job that doesn't have one yet"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white bg-gradient-to-br from-violet-500/90 to-fuchsia-600/90 hover:from-violet-500 hover:to-fuchsia-600 shadow-lg shadow-violet-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+        >
+          {bulkTailoring ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Wand2 className="w-4 h-4" />
+          )}
+          {bulkTailoring ? "Tailoring…" : "Tailor All"}
+          {!bulkTailoring && needsTailoring.length > 0 && (
+            <span className="text-xs bg-white/20 rounded-full px-1.5 py-0.5">{needsTailoring.length}</span>
+          )}
+        </button>
         <div className="text-xs text-gray-500 self-center">{filtered.length} jobs</div>
       </div>
+
+      {bulkMsg && (
+        <div className="text-xs text-violet-300 bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
+          {bulkTailoring && <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />}
+          <span>{bulkMsg}</span>
+        </div>
+      )}
 
       <div className="overflow-x-auto card-glass">
         <table className="w-full text-sm">
@@ -240,6 +338,16 @@ export function JobsTable({
                     >
                       <Gauge className={`w-3.5 h-3.5 ${loading === job.id + "_ats" ? "animate-pulse" : ""}`} />
                     </button>
+                    <button
+                      onClick={() => screenJob(job.id)}
+                      disabled={loading === job.id + "_screen"}
+                      className={`p-1.5 transition-colors disabled:opacity-50 ${
+                        screenOpen === job.id ? "text-emerald-400" : "text-gray-500 hover:text-emerald-400"
+                      }`}
+                      title="Employer ATS: would they accept this résumé?"
+                    >
+                      <ShieldCheck className={`w-3.5 h-3.5 ${loading === job.id + "_screen" ? "animate-pulse" : ""}`} />
+                    </button>
                     <a
                       href={job.applyUrl || job.url}
                       target="_blank"
@@ -275,6 +383,13 @@ export function JobsTable({
                 <tr className="border-b border-gray-800/50 bg-gray-900/60">
                   <td colSpan={7} className="px-4 py-4">
                     <AtsPanel a={atsResults[job.id]} />
+                  </td>
+                </tr>
+              )}
+              {screenOpen === job.id && screenResults[job.id] && (
+                <tr className="border-b border-gray-800/50 bg-gray-900/60">
+                  <td colSpan={7} className="px-4 py-4">
+                    <ScreeningPanel screening={screenResults[job.id]} />
                   </td>
                 </tr>
               )}

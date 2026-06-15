@@ -287,24 +287,71 @@ export async function loadFacts(resumeId: string): Promise<FactBook> {
   return fb;
 }
 
-// Merge the user's SELECTED GitHub projects into the FactBook (deduped by name).
-// They then flow into the cover letter (pickProject) + the résumé automatically.
-// Degrades gracefully if the table/client isn't available.
+// A GitHub bullet is "weak" when it's the importer's deterministic metadata
+// fallback (e.g. "X — a project built with Java.") rather than a real
+// description — among duplicates we prefer the sibling with a real one.
+function isWeakGithubBullet(b: string): boolean {
+  return !b.trim() || /\ba project built with\b/i.test(b);
+}
+
+// Résumé-quality score for a GitHub project, so that among near-duplicate repos
+// we keep the BEST entry (real bullet ≫ cleaned spaced title ≫ more stars), not
+// just whichever happened to sort first.
+function githubProjectQuality(p: { name: string; bullet: string; stars: number }): number {
+  return (isWeakGithubBullet(p.bullet) ? 0 : 100) + (/\s/.test(p.name) ? 10 : 0) + Math.min(p.stars, 9);
+}
+
+// Two project names are near-duplicates when one normalized name is a prefix or
+// suffix of the other (covers "TestCaseCheckByJacoco" vs "TestCaseCheckByJacoco
+// JAVA"), guarded by a min length so short fragments never collapse unrelated
+// projects ("api" inside "apiserver").
+export function nearDuplicateProjectName(a: string, b: string): boolean {
+  const na = a.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const nb = b.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
+  return short.length >= 6 && (long.startsWith(short) || long.endsWith(short));
+}
+
+// Collapse near-duplicate GitHub repos (the user keeps two copies of the same
+// project) down to one, keeping the highest-quality entry per cluster. Pure +
+// exported so the dedup is unit-testable without a database.
+export function dedupeGithubProjects<T extends { name: string; bullet: string; stars: number }>(rows: T[]): T[] {
+  const clusters: { rep: T }[] = [];
+  for (const gp of rows) {
+    const hit = clusters.find((c) => nearDuplicateProjectName(c.rep.name, gp.name));
+    if (hit) {
+      // Same project under another name → keep the better-written one.
+      if (githubProjectQuality(gp) > githubProjectQuality(hit.rep)) hit.rep = gp;
+    } else {
+      clusters.push({ rep: gp });
+    }
+  }
+  return clusters.map((c) => c.rep);
+}
+
+// Merge the user's SELECTED GitHub projects into the FactBook. Near-duplicate
+// repos are collapsed (keeping the best one) and any repo that's the same
+// project as a canonical résumé entry is skipped, so the résumé never lists the
+// same project twice. They then flow into the cover letter (pickProject) + the
+// résumé automatically. Degrades gracefully if the table/client isn't available.
 async function attachGithubProjects(fb: FactBook): Promise<void> {
-  let selected: { repo: string; name: string; bullet: string; stack: string[] }[];
+  let selected: { repo: string; name: string; bullet: string; stack: string[]; stars: number }[];
   try {
     selected = await prisma.githubProject.findMany({
       where: { selected: true },
       orderBy: { pushedAt: "desc" },
-      select: { repo: true, name: true, bullet: true, stack: true },
+      select: { repo: true, name: true, bullet: true, stack: true, stars: true },
     });
   } catch {
     return; // table not migrated / DB error → skip
   }
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const seen = new Set([...fb.projects.values()].map((p) => norm(p.name)));
-  for (const gp of selected) {
-    if (seen.has(norm(gp.name))) continue;
+  // Seed with the canonical résumé project names so a GitHub repo that duplicates
+  // a hand-written entry is dropped too.
+  const takenNames = [...fb.projects.values()].map((p) => p.name);
+  for (const gp of dedupeGithubProjects(selected)) {
+    if (takenNames.some((name) => nearDuplicateProjectName(name, gp.name))) continue;
     const id = `project:gh-${slugify(gp.repo)}` as ProjectId;
     if (fb.projects.has(id)) continue;
     fb.projects.set(id, {
@@ -314,6 +361,6 @@ async function attachGithubProjects(fb: FactBook): Promise<void> {
       description: gp.bullet,
       keywords: extractKeywords(`${gp.name} ${gp.bullet}`),
     });
-    seen.add(norm(gp.name));
+    takenNames.push(gp.name);
   }
 }
