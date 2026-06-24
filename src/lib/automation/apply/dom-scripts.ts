@@ -2,67 +2,173 @@
 // context, NOT Node — so they may only reference browser globals (document,
 // window, CSS, HTML*Element) and their own arguments, never module scope or
 // `this`. Extracted from the engine to keep the heavy DOM logic in one place.
+//
+// scanDetectFields is intentionally self-contained (every helper is nested) so
+// it survives Function.prototype.toString() serialization into the browser AND
+// can be unit-tested under linkedom by injecting `document`/`window` globals.
+
+// The descriptor scanDetectFields returns for each field. Mirrors DetectedField
+// in ../apply/types.ts (kept structurally compatible, not imported, so the
+// function stays serializable).
+export interface ScannedField {
+  type: string;                     // normalized: text/email/select/radio/checkbox/textarea/date/range/aria-radio/aria-combobox…
+  inputType?: string;               // the raw DOM input type (e.g. "date", "range", "tel")
+  label: string;
+  name?: string;
+  required: boolean;
+  options?: string[];               // select/radio/aria-radio option labels
+  possibleDropdownOptions?: string[]; // datalist / aria listbox options scraped for matching
+  selector: string;
+  placeholder?: string;
+  ariaLabel?: string;
+  sectionHeading?: string;
+  maxLength?: number;
+  labelConfidence?: number;         // 0–1 confidence the resolved label is correct
+}
 
 // Detect all fillable fields within `scopeSel`: text/select/textarea inputs,
-// radio groups (by fieldset), and standalone checkboxes — each with a resolved
-// label, a usable selector, and classifier context (placeholder/aria/heading).
-export function scanDetectFields(scopeSel: string) {
-  const root = document.querySelector(scopeSel) || document.body;
-  const results: Array<{
-    type: string;
-    label: string;
-    name?: string;
-    required: boolean;
-    options?: string[];
-    selector: string;
-    placeholder?: string;
-    ariaLabel?: string;
-    sectionHeading?: string;
-    maxLength?: number;
-  }> = [];
+// native + ARIA radio groups, standalone checkboxes, date/range inputs, and
+// ARIA comboboxes — each with a resolved label, a usable selector, classifier
+// context (placeholder/aria/heading), and a label-confidence score. Traverses
+// OPEN shadow roots so web-component forms (Workday, custom design systems) are
+// no longer invisible.
+export function scanDetectFields(scopeSel: string): ScannedField[] {
+  const root: ParentNode = (document.querySelector(scopeSel) as ParentNode) || document.body;
+  const results: ScannedField[] = [];
 
   const clean = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
+
+  // CSS.escape isn't present in every runtime (e.g. linkedom under test); fall
+  // back to a conservative manual escape so selectors still build.
+  const cssEscape = (s: string): string => {
+    try {
+      const C = (window as unknown as { CSS?: { escape?: (x: string) => string } }).CSS;
+      if (C && typeof C.escape === "function") return C.escape(s);
+    } catch { /* ignore */ }
+    return s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+  };
+
+  // Layout availability: headless DOMs used in unit tests (linkedom) have no
+  // layout engine, so every rect is 0×0 and getComputedStyle is empty. Detect
+  // that ONCE — visibility filtering then only applies in a real browser, while
+  // tests still see every field.
+  const hasLayout = (() => {
+    try {
+      const base = (document.body || document.documentElement) as Element | null;
+      if (!base) return false;
+      const r = base.getBoundingClientRect();
+      return (r.width || r.height) > 0;
+    } catch {
+      return false;
+    }
+  })();
+
+  const isVisible = (el: Element): boolean => {
+    if (!hasLayout) return true;
+    try {
+      const style = window.getComputedStyle(el as HTMLElement);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    } catch {
+      return true;
+    }
+  };
+
+  // Collect every element matching `selector` under root AND inside any open
+  // shadow root beneath it. A Set dedupes; a stack avoids recursion limits.
+  const deepQueryAll = (selector: string): Element[] => {
+    const acc = new Set<Element>();
+    const stack: ParentNode[] = [root];
+    while (stack.length) {
+      const node = stack.pop()!;
+      try {
+        node.querySelectorAll(selector).forEach((el) => acc.add(el));
+        node.querySelectorAll("*").forEach((el) => {
+          const sr = (el as HTMLElement).shadowRoot;
+          if (sr) stack.push(sr);
+        });
+      } catch { /* exotic node — skip */ }
+    }
+    return Array.from(acc);
+  };
+
+  // Find the closest matching ancestor/self for `el`, piercing shadow hosts.
+  const closestDeep = (el: Element, selector: string): Element | null => {
+    let cur: Element | null = el;
+    while (cur) {
+      if (cur.matches && cur.matches(selector)) return cur;
+      const parent: Node | null = cur.parentNode;
+      if (parent && (parent as ShadowRoot).host) {
+        cur = (parent as ShadowRoot).host;          // hop out of a shadow root
+      } else {
+        cur = cur.parentElement;
+      }
+    }
+    return null;
+  };
+
+  // Look up an element by id within the SAME root node as `el` (so labels inside
+  // a shadow root resolve correctly — document.getElementById can't see them).
+  const byId = (el: Element, id: string): Element | null => {
+    if (!id) return null;
+    const rootNode = el.getRootNode() as Document | ShadowRoot;
+    try {
+      return rootNode.querySelector(`#${cssEscape(id)}`);
+    } catch {
+      return null;
+    }
+  };
 
   // Resolve aria-labelledby → concatenated text of the referenced nodes.
   const ariaLabelledByText = (el: Element): string => {
     const ids = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
     if (!ids.length) return "";
     return ids
-      .map((id) => document.getElementById(id)?.textContent || "")
+      .map((id) => byId(el, id)?.textContent || "")
       .map(clean)
       .filter(Boolean)
       .join(" ");
   };
 
-  const getLabel = (el: Element): string => {
+  // Resolve a label AND how confident we are in it (1.0 = explicit <label for>,
+  // down to 0.3 for a name-attr fallback). The engine uses this to decide
+  // whether to trust-fill or fill-and-verify.
+  const getLabel = (el: Element): { text: string; confidence: number } => {
     const elId = (el as HTMLInputElement).id;
     if (elId) {
-      const lbl = document.querySelector(`label[for="${CSS.escape(elId)}"]`);
-      if (lbl) return clean(lbl.textContent);
+      const rootNode = el.getRootNode() as Document | ShadowRoot;
+      let explicit: Element | null = null;
+      try { explicit = rootNode.querySelector(`label[for="${cssEscape(elId)}"]`); } catch { explicit = null; }
+      if (explicit) return { text: clean(explicit.textContent), confidence: 1 };
     }
     const wrap = el.closest("label");
-    if (wrap) return clean(wrap.textContent);
-    const byId = ariaLabelledByText(el);
-    if (byId) return byId;
-    const parent = el.closest(
-      ".form-group, .jobs-easy-apply-form-element, [class*='field'], [class*='question'], fieldset, [data-automation-id]"
+    if (wrap) return { text: clean(wrap.textContent), confidence: 0.9 };
+    const byLabelledBy = ariaLabelledByText(el);
+    if (byLabelledBy) return { text: byLabelledBy, confidence: 0.8 };
+    const parent = closestDeep(
+      el,
+      ".form-group, .jobs-easy-apply-form-element, [class*='field'], [class*='question'], [class*='select'], [class*='combobox'], fieldset, [data-automation-id], [role='group']"
     );
     if (parent) {
-      const lbl = parent.querySelector("label, legend, .label, h3, h4, [class*='label'], [class*='title']");
-      if (lbl && lbl !== el) return clean(lbl.textContent);
+      const lbl = parent.querySelector(
+        "label, legend, .label, h3, h4, [class*='label'], [class*='title'], [id*='label']"
+      );
+      if (lbl && lbl !== el) return { text: clean(lbl.textContent), confidence: 0.7 };
     }
-    return clean(
-      (el as HTMLInputElement).getAttribute("aria-label") ||
-      (el as HTMLInputElement).placeholder ||
-      (el as HTMLInputElement).name ||
-      ""
-    );
+    const aria = clean((el as HTMLInputElement).getAttribute("aria-label"));
+    if (aria) return { text: aria, confidence: 0.5 };
+    const placeholder = clean((el as HTMLInputElement).placeholder);
+    if (placeholder) return { text: placeholder, confidence: 0.4 };
+    const name = clean((el as HTMLInputElement).name);
+    if (name) return { text: name, confidence: 0.3 };
+    return { text: "", confidence: 0 };
   };
 
-  // Nearest section heading ABOVE the field — only consulted by the
-  // classifier when the field's own text is inconclusive, so it can't
-  // override a clear label. Conservative: search within the closest
-  // section-like ancestor and its preceding siblings.
+  // Nearest section heading ABOVE the field — only consulted by the classifier
+  // when the field's own text is inconclusive, so it can't override a clear
+  // label. Conservative: search within the closest section-like ancestor and
+  // its preceding siblings.
   const getSectionHeading = (el: Element): string => {
     const HEAD = /^(H[1-4]|LEGEND)$/;
     let node: Element | null = el;
@@ -83,102 +189,205 @@ export function scanDetectFields(scopeSel: string) {
     return "";
   };
 
+  // Build a re-findable selector. Prefers #id (Playwright's CSS engine pierces
+  // open shadow DOM, so an id inside a web component is still fillable), then
+  // [name], then a stable attribute, then an nth-of-type fallback.
   const makeSelector = (el: Element): string => {
-    const elId = (el as HTMLInputElement).id;
-    if (elId) return `#${CSS.escape(elId)}`;
+    const elId = (el as HTMLElement).id;
+    if (elId) return `#${cssEscape(elId)}`;
     const name = (el as HTMLInputElement).name;
-    if (name) return `[name="${name}"]`;
+    if (name) return `[name="${cssEscape(name)}"]`;
+    const auto = el.getAttribute("data-automation-id");
+    if (auto) return `[data-automation-id="${cssEscape(auto)}"]`;
+    const aria = el.getAttribute("aria-label");
+    if (aria) return `${el.tagName.toLowerCase()}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
+    try {
+      const tag = el.tagName.toLowerCase();
+      const sameTag = Array.from((el.getRootNode() as Document | ShadowRoot).querySelectorAll(tag));
+      const idx = sameTag.indexOf(el);
+      if (idx >= 0) return `${tag}:nth-of-type(${idx + 1})`;
+    } catch { /* ignore */ }
     return "";
   };
 
-  const inputs = root.querySelectorAll(
-    'input:not([type="hidden"]):not([type="submit"]):not([type="file"]):not([type="button"]):not([type="image"]), textarea, select'
+  // Scrape datalist options for an <input list="…">.
+  const datalistOptions = (el: Element): string[] | undefined => {
+    const listId = el.getAttribute("list");
+    if (!listId) return undefined;
+    const dl = byId(el, listId);
+    if (!dl) return undefined;
+    const opts = Array.from(dl.querySelectorAll("option"))
+      .map((o) => clean((o as HTMLOptionElement).value || o.textContent))
+      .filter(Boolean);
+    return opts.length ? opts : undefined;
+  };
+
+  // ── Native inputs / selects / textareas ──────────────────────────────────────
+  const NATIVE = deepQueryAll(
+    'input:not([type="hidden"]):not([type="submit"]):not([type="file"]):not([type="button"]):not([type="image"]):not([type="radio"]):not([type="checkbox"]), textarea, select'
   );
 
-  inputs.forEach((el) => {
-    const htmlEl = el as HTMLElement;
-    // Skip completely invisible (display:none, visibility:hidden)
-    const style = window.getComputedStyle(htmlEl);
-    if (style.display === "none" || style.visibility === "hidden") return;
+  NATIVE.forEach((el) => {
+    if (!isVisible(el)) return;
 
-    // Allow elements that might be scrolled out of view (still need width/height)
-    const rect = htmlEl.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-
-    const label = getLabel(el);
+    const { text: label, confidence: labelConfidence } = getLabel(el);
     const selector = makeSelector(el);
     if (!selector) return;
 
+    const rawType = (el as HTMLInputElement).type || "";
     const type = el.tagName === "SELECT"
       ? "select"
       : el.tagName === "TEXTAREA"
       ? "textarea"
-      : (el as HTMLInputElement).type || "text";
+      : rawType || "text";
 
     const options = el.tagName === "SELECT"
-      ? Array.from((el as HTMLSelectElement).options).map((o) => o.text.trim()).filter(Boolean)
+      ? Array.from((el as HTMLSelectElement).options).map((o) => (o.text || o.textContent || "").trim()).filter(Boolean)
       : undefined;
 
     results.push({
       type,
+      inputType: el.tagName === "INPUT" ? rawType || "text" : undefined,
       label: label || `field_${results.length}`,
       name: (el as HTMLInputElement).name || undefined,
-      required: (el as HTMLInputElement).required || false,
+      required: (el as HTMLInputElement).required || el.getAttribute("aria-required") === "true" || false,
       options,
+      possibleDropdownOptions: datalistOptions(el),
       selector,
       placeholder: clean((el as HTMLInputElement).placeholder) || undefined,
       ariaLabel: clean((el as HTMLInputElement).getAttribute("aria-label")) || undefined,
       sectionHeading: getSectionHeading(el) || undefined,
       maxLength: (el as HTMLInputElement).maxLength > 0 ? (el as HTMLInputElement).maxLength : undefined,
+      labelConfidence,
     });
   });
 
-  // Radio groups
-  const fieldsets = root.querySelectorAll("fieldset");
-  fieldsets.forEach((fs) => {
-    const legend = clean(fs.querySelector("legend")?.textContent);
-    const radios = Array.from(fs.querySelectorAll('input[type="radio"]'));
-    if (radios.length === 0) return;
-
-    const label = legend || clean(fs.querySelector("[class*='label']")?.textContent) || "";
-    if (!label) return;
-
-    const options = radios.map((r) => {
-      const rid = (r as HTMLInputElement).id;
-      const lbl = rid ? document.querySelector(`label[for="${CSS.escape(rid)}"]`)?.textContent?.trim() : "";
-      return lbl || (r as HTMLInputElement).value;
-    }).filter(Boolean);
-
-    const firstRadio = radios[0] as HTMLInputElement;
-    const groupSelector = firstRadio.name ? `input[type="radio"][name="${firstRadio.name}"]` : "";
-
-    if (groupSelector) {
-      results.push({
-        type: "radio",
-        label,
-        name: firstRadio.name,
-        required: false,
-        options,
-        selector: groupSelector,
-        // The legend IS the question; surface it as section heading too.
-        sectionHeading: getSectionHeading(fs) || undefined,
-      });
-    }
+  // ── Native radio groups (grouped by name) ─────────────────────────────────────
+  // Group by name across the whole scope (fieldset is not required), so radios
+  // split across <div>s still form one logical question.
+  const radioByName = new Map<string, HTMLInputElement[]>();
+  (deepQueryAll('input[type="radio"]') as HTMLInputElement[]).forEach((r) => {
+    if (!isVisible(r)) return;
+    const key = r.name || `__anon_${radioByName.size}`;
+    const arr = radioByName.get(key) || [];
+    arr.push(r);
+    radioByName.set(key, arr);
   });
 
-  // Standalone checkboxes (e.g., "I agree to terms")
-  const checkboxes = root.querySelectorAll('input[type="checkbox"]');
-  checkboxes.forEach((cb) => {
-    const label = getLabel(cb);
+  radioByName.forEach((radios, name) => {
+    if (!radios.length) return;
+    const first = radios[0];
+    // Label from the enclosing fieldset legend / group label, else the question
+    // text nearest the group.
+    const fs = closestDeep(first, "fieldset, [role='radiogroup'], [role='group'], .form-group, [class*='question'], [class*='field']");
+    let label = "";
+    if (fs) {
+      const lg = fs.querySelector("legend, [class*='label'], [class*='title'], label");
+      label = clean(lg?.textContent);
+    }
+    if (!label) label = getLabel(first).text;
+    if (!label) return;
+
+    const options = radios
+      .map((r) => {
+        const forLbl = r.id
+          ? (() => { try { return (r.getRootNode() as Document | ShadowRoot).querySelector(`label[for="${cssEscape(r.id)}"]`); } catch { return null; } })()
+          : null;
+        return clean(forLbl?.textContent || r.closest("label")?.textContent || r.getAttribute("aria-label") || r.value);
+      })
+      .filter(Boolean);
+
+    const groupSelector = first.name
+      ? `input[type="radio"][name="${cssEscape(first.name)}"]`
+      : makeSelector(first);
+    if (!groupSelector) return;
+
+    results.push({
+      type: "radio",
+      label,
+      name: first.name || undefined,
+      required: radios.some((r) => r.required) || false,
+      options,
+      selector: groupSelector,
+      sectionHeading: getSectionHeading(first) || undefined,
+      labelConfidence: 0.8,
+    });
+    void name;
+  });
+
+  // ── ARIA radio groups (div[role=radiogroup] with [role=radio] children) ───────
+  deepQueryAll('[role="radiogroup"]').forEach((group) => {
+    if (!isVisible(group)) return;
+    const radios = Array.from(group.querySelectorAll('[role="radio"]'));
+    if (!radios.length) return;
+
+    const labelEl = group.querySelector("legend, label, [class*='label'], [class*='title']");
+    let label = clean(group.getAttribute("aria-label")) || ariaLabelledByText(group) || clean(labelEl?.textContent);
+    if (!label) label = getLabel(group).text;
+    if (!label) return;
+
+    const selector = makeSelector(group);
+    if (!selector) return;
+
+    const options = radios
+      .map((r) => clean(r.getAttribute("aria-label") || r.textContent))
+      .filter(Boolean);
+
+    results.push({
+      type: "aria-radio",
+      label,
+      required: group.getAttribute("aria-required") === "true",
+      options,
+      selector,
+      sectionHeading: getSectionHeading(group) || undefined,
+      labelConfidence: 0.8,
+    });
+  });
+
+  // ── ARIA comboboxes with NO backing <input> (button + listbox pattern) ────────
+  // Input-backed comboboxes (react-select etc.) are already captured above via
+  // their inner <input>; here we only surface the pure-ARIA ones so the engine
+  // can attempt an open→match→click, or safely pause.
+  deepQueryAll('[role="combobox"]').forEach((cb) => {
+    if (!isVisible(cb)) return;
+    if (cb.tagName === "INPUT" || cb.querySelector("input, textarea")) return; // input-backed: handled already
+    const { text: label, confidence } = getLabel(cb);
+    if (!label) return;
+    const selector = makeSelector(cb);
+    if (!selector) return;
+
+    // Listbox options are usually rendered only when open; scrape any present.
+    const listId = cb.getAttribute("aria-controls") || cb.getAttribute("aria-owns") || "";
+    const listbox = listId ? byId(cb, listId) : cb.parentElement?.querySelector('[role="listbox"]');
+    const possible = listbox
+      ? Array.from(listbox.querySelectorAll('[role="option"]')).map((o) => clean(o.textContent)).filter(Boolean)
+      : [];
+
+    results.push({
+      type: "aria-combobox",
+      label,
+      required: cb.getAttribute("aria-required") === "true",
+      possibleDropdownOptions: possible.length ? possible : undefined,
+      selector,
+      sectionHeading: getSectionHeading(cb) || undefined,
+      labelConfidence: confidence,
+    });
+  });
+
+  // ── Standalone checkboxes (e.g., "I agree to terms") ──────────────────────────
+  (deepQueryAll('input[type="checkbox"]') as HTMLInputElement[]).forEach((cb) => {
+    if (!isVisible(cb)) return;
+    const { text: label, confidence } = getLabel(cb);
     const selector = makeSelector(cb);
     if (!selector || !label) return;
     results.push({
       type: "checkbox",
       label,
-      name: (cb as HTMLInputElement).name,
-      required: false,
+      name: cb.name || undefined,
+      required: cb.required || false,
       selector,
       sectionHeading: getSectionHeading(cb) || undefined,
+      labelConfidence: confidence,
     });
   });
 

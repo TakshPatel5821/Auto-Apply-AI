@@ -4,7 +4,7 @@ import { prisma } from "@/lib/db/prisma";
 import { LinkedInScraper } from "./linkedin";
 import { IndeedScraper } from "./indeed";
 import { CustomScraper } from "./custom-scraper";
-import { GreenhouseScraper, DEFAULT_GREENHOUSE_COMPANIES } from "./greenhouse";
+import { searchAllSources, listSources, parseUrl } from "./registry";
 import { Logger } from "@/lib/logging/logger";
 import { ScrapedJob, SearchConfig, CustomSite } from "@/types";
 import { fastFilter } from "@/lib/matching/fast-filter";
@@ -45,6 +45,16 @@ function filterScoreToMatchScore(score: number): number {
   return 10;
 }
 
+// Inputs the per-job fast filter needs. Built once per session (or per URL
+// ingest) from the active résumé + the user's search intent.
+interface ScoringContext {
+  candidateSkills: string[];
+  candidateTech: string[];
+  candidateYears: number;
+  searchKeywords: string[];
+  entryLevelTarget: boolean;
+}
+
 export class ScrapingOrchestrator {
   private isRunning = false;
 
@@ -76,126 +86,25 @@ export class ScrapingOrchestrator {
     let notFitCount = 0;
     let duplicateCount = 0;
 
-    // Resume data for fast-filter (per-job filter needs candidate skills)
-    let candidateSkills: string[] = [];
-    let candidateTech: string[] = [];
-    let candidateYears = 0;
+    // Scoring context (candidate skills/years + entry-level intent) for the
+    // per-job fast filter. Extracted so URL ingestion reuses it identically.
+    const ctx = await this.buildScoringContext(resumeId, config.keywords, config.experienceLevels);
 
-    if (resumeId) {
-      const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
-      if (resume) {
-        candidateSkills = resume.skills || [];
-        candidateTech = resume.technologies || [];
-        candidateYears = resume.yearsOfExperience || 0;
-      }
-    }
-
-    // Whether the user is targeting entry-level/intern roles (drives the
-    // experience-gap filter — senior postings get skipped).
-    const entryLevelTarget =
-      (config.experienceLevels || []).some((l) => /intern|entry|junior|new\s*grad/i.test(l)) ||
-      config.keywords.some((k) => /intern|entry|junior|new\s*grad/i.test(k));
-
-    const searchKeywords = config.keywords;
-
-    // Per-job callback: save → fast filter → update Excel
+    // Per-job callback: persist (dedup + fast-filter score) → counts → Excel →
+    // stream fit jobs into the analyze/tailor pipeline.
     const onJob = async (job: ScrapedJob): Promise<void> => {
-      try {
-        // Dedup check
-        const exists = job.platformJobId
-          ? await prisma.job.findUnique({
-              where: { platform_platformJobId: { platform: job.platform, platformJobId: job.platformJobId } },
-            })
-          : await prisma.job.findFirst({ where: { url: job.url } });
-
-        if (exists) {
-          duplicateCount++;
-          return;
-        }
-
-        const isBlacklisted = this.isCompanyBlacklisted(job.companyName);
-        const isSpam = this.isSpamJob(job);
-
-        // Run fast filter immediately for fit-or-not classification
-        const filter = fastFilter(
-          job.jobTitle,
-          job.description,
-          candidateSkills,
-          candidateTech,
-          searchKeywords,
-          { candidateYears, entryLevelTarget }
-        );
-
-        const matchScore = filterScoreToMatchScore(filter.score);
-        const isFit = !filter.skip && matchScore <= 6;
-        const visa = detectVisaInfo(job.description || "");
-
-        if (isFit) fitCount++;
-        else notFitCount++;
-
-        const created = await prisma.job.create({
-          data: {
-            platform: job.platform,
-            platformJobId: job.platformJobId || null,
-            url: job.url,
-            applyUrl: job.applyUrl || null,
-            easyApplyUrl: job.easyApplyUrl || null,
-            isEasyApply: job.isEasyApply,
-            companyName: job.companyName,
-            jobTitle: job.jobTitle,
-            location: job.location || null,
-            salary: job.salary || null,
-            salaryMin: job.salaryMin || null,
-            salaryMax: job.salaryMax || null,
-            jobType: job.jobType || null,
-            isRemote: job.isRemote,
-            isHybrid: job.isHybrid,
-            requiresSponsorship: job.requiresSponsorship,
-            experienceLevel: job.experienceLevel || null,
-            description: job.description || "",
-            requirements: job.requirements || [],
-            responsibilities: job.responsibilities || [],
-            niceToHave: job.niceToHave || [],
-            benefits: job.benefits || [],
-            // Preliminary scoring from fast filter (AI step will refine later)
-            matchScore,
-            atsScore: filter.score / 10, // 0-10 scale
-            atsKeywordScore: atsKeywordPct(filter.matchedKeywords, filter.missingKeywords),
-            matchingSkills: filter.matchedKeywords,
-            missingSkills: filter.missingKeywords,
-            matchReason: filter.reason,
-            sponsorshipStatus: visa.sponsorshipStatus,
-            acceptsCpt: visa.acceptsCpt,
-            acceptsOpt: visa.acceptsOpt,
-            intlFriendlyScore: visa.intlFriendlyScore,
-            isBlacklisted,
-            isSpam,
-            status: "FOUND",
-          },
-        });
-
-        newCount++;
-
-        await Logger.success(
-          "SCRAPER",
-          `[+${newCount}] ${job.jobTitle} @ ${job.companyName} — Fit: ${isFit ? "YES" : "NO"} (score: ${matchScore}/10) | ${filter.reason}`
-        );
-
-        // Update Excel after each new job
-        queueExcelWrite();
-
-        // Stream fit jobs straight into the per-job pipeline (analyze → tailor →
-        // CV) so processing starts immediately instead of waiting for the full
-        // scrape to finish.
-        if (isFit && onFitJob) {
-          try {
-            onFitJob(created.id);
-          } catch (e) {
-            await Logger.warn("SCRAPER", `onFitJob handoff failed for ${job.jobTitle}: ${e}`);
-          }
-        }
-      } catch (e) {
-        await Logger.warn("SCRAPER", `Per-job save failed for ${job.jobTitle}: ${e}`);
+      const res = await this.persistJob(job, ctx);
+      if (res === "duplicate") { duplicateCount++; return; }
+      if (!res) return;
+      newCount++;
+      if (res.isFit) fitCount++; else notFitCount++;
+      await Logger.success(
+        "SCRAPER",
+        `[+${newCount}] ${res.jobTitle} @ ${res.companyName} — Fit: ${res.isFit ? "YES" : "NO"} (score: ${res.matchScore}/10) | ${res.reason}`
+      );
+      queueExcelWrite();
+      if (res.isFit && onFitJob) {
+        try { onFitJob(res.jobId); } catch (e) { await Logger.warn("SCRAPER", `onFitJob handoff failed: ${e}`); }
       }
     };
 
@@ -233,25 +142,38 @@ export class ScrapingOrchestrator {
         });
       }
 
-      // Settings (preferred companies for Greenhouse, custom sites).
+      // Settings (preferred companies for ATS boards, custom sites).
       const settings = await prisma.userSettings.findUnique({ where: { userId: "local" } });
 
-      // Greenhouse scrapes by COMPANY board (no global keyword search). Uses the
-      // user's preferred companies, else a curated default set so the toggle
-      // works out of the box.
-      if (config.platforms.includes("greenhouse") && newCount < maxJobs) {
+      // Registry sources: Greenhouse + Lever/Ashby/SmartRecruiters/Workable/
+      // Recruitee (ATS boards) and RemoteOK/Remotive/WeWorkRemotely/HackerNews
+      // (remote feeds). These run via the unified registry — in parallel, with
+      // per-domain rate limiting. Select them by id in `platforms`, or use the
+      // meta token "all"/"web" to run every source.
+      const registryIds = new Set(listSources().map((s) => s.id));
+      const wantsAll = config.platforms.some((p) => /^(all|web|everywhere)$/i.test(p));
+      const selectedSources = wantsAll
+        ? [...registryIds]
+        : config.platforms.filter((p) => registryIds.has(p));
+      if (selectedSources.length && newCount < maxJobs) {
         const userCompanies = (settings?.preferredCompanies || []).filter(Boolean);
-        const companies = userCompanies.length > 0 ? userCompanies : DEFAULT_GREENHOUSE_COMPANIES;
-        const src = userCompanies.length > 0 ? "your companies" : "default companies";
-        await Logger.info("SCRAPER", `── Greenhouse (${companies.length} ${src}) ──`);
-        const scraper = new GreenhouseScraper();
-        // Stream each job into the pipeline live (same as LinkedIn) — respecting
-        // the overall maxJobs cap via the onJob guard.
-        await scraper.scrapeJobs(companies, allKeywords, allLocations, async (job) => {
-          if (newCount >= maxJobs) return;
-          await onJob(job);
-        });
+        await Logger.info("SCRAPER", `── Web sources (${wantsAll ? "all" : selectedSources.join(", ")}) ──`);
+        await searchAllSources(
+          {
+            keywords: allKeywords,
+            locations: allLocations,
+            remote: config.remote,
+            maxJobs: Math.max(perPlatformLimit, maxJobs - newCount),
+            companies: userCompanies.length ? userCompanies : undefined,
+            onJob: async (job) => {
+              if (newCount >= maxJobs) return;
+              await onJob(job);
+            },
+          },
+          { sources: wantsAll ? undefined : selectedSources, concurrency: 4 }
+        );
       }
+
       const customSites = ((settings?.customSites as unknown as CustomSite[]) || []).filter((s) => s.enabled);
       for (const site of customSites) {
         if (newCount >= maxJobs) break;
@@ -293,6 +215,140 @@ export class ScrapingOrchestrator {
     }
 
     return { newCount, fitCount, notFitCount };
+  }
+
+  // Build the fast-filter scoring context from the active résumé + search intent.
+  private async buildScoringContext(
+    resumeId: string | undefined,
+    keywords: string[],
+    experienceLevels?: string[]
+  ): Promise<ScoringContext> {
+    let candidateSkills: string[] = [];
+    let candidateTech: string[] = [];
+    let candidateYears = 0;
+    if (resumeId) {
+      const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
+      if (resume) {
+        candidateSkills = resume.skills || [];
+        candidateTech = resume.technologies || [];
+        candidateYears = resume.yearsOfExperience || 0;
+      }
+    }
+    const entryLevelTarget =
+      (experienceLevels || []).some((l) => /intern|entry|junior|new\s*grad/i.test(l)) ||
+      keywords.some((k) => /intern|entry|junior|new\s*grad/i.test(k));
+    return { candidateSkills, candidateTech, candidateYears, searchKeywords: keywords, entryLevelTarget };
+  }
+
+  // Persist one scraped job: dedup → fast-filter score → create. Returns the
+  // created job's id + fit flag (for the caller to count/stream), the sentinel
+  // "duplicate", or null on error. Shared by the scrape session and URL ingest.
+  private async persistJob(
+    job: ScrapedJob,
+    ctx: ScoringContext
+  ): Promise<{ jobId: string; isFit: boolean; jobTitle: string; companyName: string; matchScore: number; reason: string } | "duplicate" | null> {
+    try {
+      const exists = job.platformJobId
+        ? await prisma.job.findUnique({
+            where: { platform_platformJobId: { platform: job.platform, platformJobId: job.platformJobId } },
+          })
+        : await prisma.job.findFirst({ where: { url: job.url } });
+      if (exists) return "duplicate";
+
+      const isBlacklisted = this.isCompanyBlacklisted(job.companyName);
+      const isSpam = this.isSpamJob(job);
+      const filter = fastFilter(
+        job.jobTitle,
+        job.description,
+        ctx.candidateSkills,
+        ctx.candidateTech,
+        ctx.searchKeywords,
+        { candidateYears: ctx.candidateYears, entryLevelTarget: ctx.entryLevelTarget }
+      );
+      const matchScore = filterScoreToMatchScore(filter.score);
+      const isFit = !filter.skip && matchScore <= 6;
+      const visa = detectVisaInfo(job.description || "");
+
+      const created = await prisma.job.create({
+        data: {
+          platform: job.platform,
+          platformJobId: job.platformJobId || null,
+          url: job.url,
+          applyUrl: job.applyUrl || null,
+          easyApplyUrl: job.easyApplyUrl || null,
+          isEasyApply: job.isEasyApply,
+          companyName: job.companyName,
+          jobTitle: job.jobTitle,
+          location: job.location || null,
+          salary: job.salary || null,
+          salaryMin: job.salaryMin || null,
+          salaryMax: job.salaryMax || null,
+          jobType: job.jobType || null,
+          isRemote: job.isRemote,
+          isHybrid: job.isHybrid,
+          requiresSponsorship: job.requiresSponsorship,
+          experienceLevel: job.experienceLevel || null,
+          description: job.description || "",
+          requirements: job.requirements || [],
+          responsibilities: job.responsibilities || [],
+          niceToHave: job.niceToHave || [],
+          benefits: job.benefits || [],
+          matchScore,
+          atsScore: filter.score / 10,
+          atsKeywordScore: atsKeywordPct(filter.matchedKeywords, filter.missingKeywords),
+          matchingSkills: filter.matchedKeywords,
+          missingSkills: filter.missingKeywords,
+          matchReason: filter.reason,
+          sponsorshipStatus: visa.sponsorshipStatus,
+          acceptsCpt: visa.acceptsCpt,
+          acceptsOpt: visa.acceptsOpt,
+          intlFriendlyScore: visa.intlFriendlyScore,
+          isBlacklisted,
+          isSpam,
+          status: "FOUND",
+        },
+      });
+      return { jobId: created.id, isFit, jobTitle: job.jobTitle, companyName: job.companyName, matchScore, reason: filter.reason };
+    } catch (e) {
+      await Logger.warn("SCRAPER", `Per-job save failed for ${job.jobTitle}: ${e}`);
+      return null;
+    }
+  }
+
+  // Ingest one or more pasted URLs (board or individual posting). The registry
+  // picks the right source (or the generic JSON-LD parser) per URL. Returns
+  // counts so the API can report what landed.
+  async scrapeUrls(urls: string[], resumeId?: string): Promise<{ newCount: number; fitCount: number; duplicateCount: number; jobIds: string[] }> {
+    const ctx = await this.buildScoringContext(resumeId, [], []);
+    let newCount = 0, fitCount = 0, duplicateCount = 0;
+    const jobIds: string[] = [];
+    for (const url of urls) {
+      const clean = (url || "").trim();
+      if (!/^https?:\/\//i.test(clean)) continue;
+      await Logger.info("SCRAPER", `── URL: ${clean} ──`);
+      let jobs: ScrapedJob[] = [];
+      try {
+        jobs = await parseUrl(clean);
+      } catch (e) {
+        await Logger.warn("SCRAPER", `URL parse failed (${clean}): ${e}`);
+      }
+      if (!jobs.length) {
+        await Logger.warn("SCRAPER", `No job posting found at ${clean}`);
+        continue;
+      }
+      for (const job of jobs) {
+        const res = await this.persistJob(job, ctx);
+        if (res === "duplicate") { duplicateCount++; continue; }
+        if (!res) continue;
+        newCount++;
+        if (res.isFit) fitCount++;
+        jobIds.push(res.jobId);
+        await Logger.success("SCRAPER", `[+${newCount}] ${res.jobTitle} @ ${res.companyName} (${res.matchScore}/10)`);
+      }
+      queueExcelWrite();
+    }
+    await queueExcelWrite();
+    return { newCount, fitCount, duplicateCount, jobIds };
   }
 
   async analyzeAndScoreJobs(resumeId: string): Promise<void> {
