@@ -1,9 +1,9 @@
-import { chromium, BrowserContext, Page } from "playwright";
+import { chromium, BrowserContext, Page, Frame } from "playwright";
 import { mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { prisma } from "@/lib/db/prisma";
-import { findAnswer, saveAnswer, saveHumanAnswer, recordRejection, isRejected } from "@/lib/storage/memory";
+import { findAnswer, suggestAnswer, saveAnswer, saveHumanAnswer, recordRejection, isRejected } from "@/lib/storage/memory";
 import { Profile, resolveField } from "@/lib/profile/profile";
 import { loadProfile } from "@/lib/profile/profile-store";
 import { matchDropdownOptionScored } from "@/lib/profile/dropdown-intelligence";
@@ -157,6 +157,8 @@ export class ApplyEngine {
       decision: outcome.decision,
       valuePreview: outcome.value ? (sensitive ? "‹hidden›" : outcome.value.slice(0, 80)) : null,
       reason: outcome.reason ?? null,
+      labelConfidence: field.labelConfidence ?? null,
+      frame: field.frameKey || null,
     });
     if (this.fieldDecisions.length > 500) this.fieldDecisions.shift();
   }
@@ -835,6 +837,15 @@ export class ApplyEngine {
 
     if (await this.workdayIsAuthed()) return true;
 
+    // ── Recovery: account exists but the password is wrong/forgotten ─────────
+    // Recover it automatically (forgot-password + emailed code) instead of
+    // creating a duplicate, so the candidate is never stranded mid-apply.
+    const wrongPassword = await this.page!.evaluate(() => {
+      const t = (document.body.innerText || "").toLowerCase();
+      return t.includes("incorrect") || t.includes("does not match") || t.includes("password you entered");
+    }).catch(() => false);
+    if (wrongPassword && (await this.workdayPasswordRecovery(email, password))) return true;
+
     // ── Attempt 2: CREATE ACCOUNT ───────────────────────────────────────────
     await Logger.info("APPLY", "Workday: sign-in didn't take — trying to create an account");
     // Switch to the create-account view if there's a toggle link.
@@ -868,6 +879,12 @@ export class ApplyEngine {
 
     if (await this.workdayIsAuthed()) return true;
 
+    // Create-account rejected because the email is already registered → recover.
+    const alreadyExists = await this.page!.evaluate(() =>
+      (document.body.innerText || "").toLowerCase().includes("already exists")
+    ).catch(() => false);
+    if (alreadyExists && (await this.workdayPasswordRecovery(email, password))) return true;
+
     // Workday usually emails a verification code on account creation — if Gmail
     // is connected, fetch + enter it automatically, then re-check auth.
     if (await this.handleEmailVerificationIfPresent()) {
@@ -876,6 +893,70 @@ export class ApplyEngine {
     }
 
     return this.workdayIsAuthed();
+  }
+
+  // Workday password recovery: when an account exists but sign-in fails (wrong /
+  // forgotten password), run the "Forgot password" flow — request a reset email,
+  // read the emailed code via Gmail (reusing the OTP gate handler), set a new
+  // password (the stored one), and continue. Returns true only if it ends
+  // authenticated; otherwise the caller falls back to human takeover. Needs
+  // Gmail connected — there's no way to read the reset code without it.
+  private async workdayPasswordRecovery(email: string, newPassword: string): Promise<boolean> {
+    const status = await gmailStatus().catch(() => null);
+    if (!status?.connected) {
+      await Logger.warn("APPLY", "Workday password reset needs Gmail connected to read the code — handing to you");
+      return false;
+    }
+    await Logger.info("APPLY", "Workday: account exists — attempting automated password recovery");
+    this.logAction("workday_recovery", email);
+
+    // 1) Open the forgot-password form.
+    const opened = await this.clickFirstVisible(
+      ['[data-automation-id="forgotPasswordLink"]', 'a:has-text("Forgot")', 'button:has-text("Forgot")'],
+      "Workday → Forgot Password"
+    );
+    if (!opened) return false;
+    await this.delay(1200, 2200);
+
+    // 2) Enter the email + submit the reset request.
+    const emailEl = await this.page!
+      .$('input[data-automation-id="email"], input[data-automation-id="userName"], input[type="email"]')
+      .catch(() => null);
+    if (emailEl) { await emailEl.fill(email).catch(() => {}); await this.delay(300, 600); }
+    await this.clickFirstVisible(
+      ['[data-automation-id="email-form-submit-button"]', 'button:has-text("Reset")', 'button:has-text("Send")', 'button:has-text("Submit")', 'button[type="submit"]'],
+      "Workday Reset Request"
+    );
+    await this.delay(3500, 5500);
+
+    // 3) Fetch + enter the emailed reset code (reuses the OTP gate handler).
+    if (!(await this.handleEmailVerificationIfPresent())) {
+      await Logger.warn("APPLY", "Workday reset code didn't arrive / couldn't be entered — handing to you");
+      return false;
+    }
+    await this.delay(2000, 3500);
+
+    // 4) Set a new password (the stored one) on the reset form.
+    const newPassEl = await this.page!
+      .$('input[data-automation-id="newPassword"], input[data-automation-id="password"], input[type="password"]:not([data-automation-id="verifyNewPassword"]):not([data-automation-id="verifyPassword"])')
+      .catch(() => null);
+    if (newPassEl && (await newPassEl.isVisible().catch(() => false))) {
+      await newPassEl.fill(newPassword).catch(() => {});
+      const verifyEl = await this.page!
+        .$('input[data-automation-id="verifyNewPassword"], input[data-automation-id="verifyPassword"]')
+        .catch(() => null);
+      if (verifyEl) await verifyEl.fill(newPassword).catch(() => {});
+      await this.delay(300, 600);
+      await this.clickFirstVisible(
+        ['[data-automation-id="submitButton"]', 'button:has-text("Change Password")', 'button:has-text("Submit")', 'button:has-text("Save")', 'button[type="submit"]'],
+        "Workday Set New Password"
+      );
+      await this.delay(3000, 4500);
+    }
+
+    const ok = await this.workdayIsAuthed();
+    if (ok) await Logger.success("APPLY", "Workday password recovery succeeded — continuing");
+    return ok;
   }
 
   // Fill Workday email/password (+ verify-password on the create-account form).
@@ -1417,18 +1498,21 @@ export class ApplyEngine {
     const valueToLabels = new Map<string, string[]>();
     for (const f of fields) {
       if (/^field_\d+$/i.test(f.label)) continue;
+      // Choice/ARIA controls have no readable text value here; their state is
+      // trusted (apply self-verifies) and required-but-empty is handled below.
+      const isChoice = ["checkbox", "radio", "aria-radio", "aria-combobox"].includes(f.type);
+      const frame = this.frameByKey(f.frameKey);
       let value = "";
       try {
-        if (f.type === "checkbox" || f.type === "radio") {
-          // Required single checkbox unchecked is caught below; skip value read.
+        if (isChoice) {
           value = "";
         } else if (f.type === "select") {
-          value = await this.page!.$eval(f.selector, (el) => {
+          value = await frame.$eval(f.selector, (el) => {
             const s = el as HTMLSelectElement;
             return s.options[s.selectedIndex]?.text?.trim() || "";
           }).catch(() => "");
         } else {
-          value = (await this.page!.inputValue(f.selector).catch(() => "")) || "";
+          value = (await frame.inputValue(f.selector).catch(() => "")) || "";
         }
       } catch { /* ignore unreadable field */ }
       value = value.trim();
@@ -1439,8 +1523,8 @@ export class ApplyEngine {
         sectionHeading: f.sectionHeading, options: f.options, required: f.required,
       });
 
-      // Required but empty (text/select only — checkboxes handled separately).
-      if (f.required && !value && f.type !== "checkbox" && f.type !== "radio") {
+      // Required but empty (text/select only — choice controls handled separately).
+      if (f.required && !value && !isChoice) {
         issues.push(`required field empty: "${f.label.slice(0, 40)}"`);
         continue;
       }
@@ -1449,7 +1533,7 @@ export class ApplyEngine {
         issues.push(`dropdown not chosen: "${f.label.slice(0, 40)}"`);
       }
       // A value that doesn't fit the field (email in name box, prose in yes/no…).
-      if (value && f.type !== "checkbox" && f.type !== "radio") {
+      if (value && !isChoice) {
         const v = validateValue(cls, value, f.options);
         if (!v.ok) issues.push(`"${f.label.slice(0, 40)}": ${v.reason}`);
       }
@@ -1461,7 +1545,7 @@ export class ApplyEngine {
         }
       }
       // Collect non-trivial values to detect the same answer repeated everywhere.
-      if (value && value.length > 3 && f.type !== "checkbox" && f.type !== "radio") {
+      if (value && value.length > 3 && !isChoice) {
         const k = value.toLowerCase();
         (valueToLabels.get(k) ?? valueToLabels.set(k, []).get(k)!).push(f.label);
       }
@@ -1813,8 +1897,55 @@ export class ApplyEngine {
     return unfilled;
   }
 
+  // Detect fields across EVERY frame, not just the top document. Workday,
+  // iCIMS, and embedded Greenhouse render their forms inside iframes — the old
+  // top-frame-only scan literally couldn't see those fields, which is the main
+  // cause of "left blank" failures. Each field is tagged with its owning frame
+  // so the fill path targets the right document. The main frame uses the caller
+  // `scope`; child frames are scanned whole (their document IS the form).
   private async detectFields(scope: string): Promise<DetectedField[]> {
-    return this.page!.evaluate(scanDetectFields, scope) as Promise<DetectedField[]>;
+    const page = this.page!;
+    const frames = page.frames();
+    const out: DetectedField[] = [];
+    for (let i = 0; i < frames.length; i++) {
+      const frame = frames[i];
+      const url = frame.url();
+      if (i > 0 && this.isThirdPartyFrame(url)) continue; // skip ads / captcha / analytics noise
+      const frameScope = i === 0 ? scope : "body";
+      let fields: DetectedField[] = [];
+      try {
+        fields = (await frame.evaluate(scanDetectFields, frameScope)) as DetectedField[];
+      } catch {
+        continue; // detached / navigating frame — skip this pass
+      }
+      const key = i === 0 ? "" : `${i}|${url}`;
+      for (const f of fields) {
+        f.frameKey = key;
+        out.push(f);
+      }
+    }
+    return out;
+  }
+
+  // Resolve a field's owning frame from its key ("idx|url"); fall back to the
+  // main frame. Detect→fill happens in the same tick, so frame order is stable;
+  // we still match on url to survive the rare reorder.
+  private frameByKey(key?: string): Frame {
+    const page = this.page!;
+    if (!key) return page.mainFrame();
+    const frames = page.frames();
+    const sep = key.indexOf("|");
+    const idx = Number(key.slice(0, sep));
+    const url = key.slice(sep + 1);
+    const atIdx = frames[idx];
+    if (atIdx && atIdx.url() === url) return atIdx;
+    return frames.find((f) => f.url() === url) || atIdx || page.mainFrame();
+  }
+
+  // Frames we never want to fill into — third-party widgets that show up as
+  // iframes on application pages but never contain the application form.
+  private isThirdPartyFrame(url: string): boolean {
+    return /recaptcha|hcaptcha|gstatic\.com|google\.com\/recaptcha|doubleclick|googletagmanager|google-analytics|youtube\.com|facebook\.com|twitter\.com|linkedin\.com\/(li\/|px\/)|datadoghq|segment\.|hotjar|intercom|drift\.com|optimizely/i.test(url);
   }
 
   // Fills one field. Returns true if it was filled (or safely skippable),
@@ -1834,9 +1965,9 @@ export class ApplyEngine {
     }
 
     // Skip pre-filled text fields
-    if (!["radio", "checkbox", "select"].includes(field.type)) {
+    if (!["radio", "checkbox", "select", "aria-radio", "aria-combobox"].includes(field.type)) {
       try {
-        const cur = await this.page!.inputValue(field.selector).catch(() => "");
+        const cur = await this.frameByKey(field.frameKey).inputValue(field.selector).catch(() => "");
         if (cur.trim().length > 0) {
           await Logger.info("APPLY", `  ✓ pre-filled: "${field.label}" = "${cur.slice(0, 50)}"`);
           return true;
@@ -1905,15 +2036,20 @@ export class ApplyEngine {
 
     // 1) Memory (exact + semantic) — never for sensitive categories. Ignore a
     //    stored value that fails validation (protects against poisoned memory).
+    //    suggestAnswer returns a calibrated confidence (exact > semantic) which
+    //    we cap by category trust so an unknown-category memory still pauses.
     if (!answer && !isSensitive(cls.category)) {
-      const mem = await findAnswer(field.label);
-      if (mem && accept(mem)) {
-        answer = mem;
-        confidence = cls.category === "unknown" ? 0.6 : 0.9;
-        source = cls.category === "unknown" ? "memory-unverified" : "memory";
-        await Logger.info("APPLY", `  💾 memory: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
-      } else if (mem) {
-        await Logger.warn("APPLY", `  ✗ ignoring memory "${mem.slice(0, 40)}…" — fails [${cls.category}/${cls.domKind}] validation`);
+      const sug = await suggestAnswer(field.label);
+      if (sug && accept(sug.answer)) {
+        answer = sug.answer;
+        // Known category: trust the suggestion's confidence (≤0.9, so it stays
+        // in fill-and-verify, never blind autofill). Unknown category: cap low
+        // so it pauses for review.
+        confidence = cls.category === "unknown" ? Math.min(0.6, sug.confidence) : sug.confidence;
+        source = cls.category === "unknown" ? `memory-unverified(${sug.source})` : `memory(${sug.source})`;
+        await Logger.info("APPLY", `  💾 memory[${sug.source} ${Math.round(sug.confidence * 100)}%]: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
+      } else if (sug) {
+        await Logger.warn("APPLY", `  ✗ ignoring memory "${sug.answer.slice(0, 40)}…" — fails [${cls.category}/${cls.domKind}] validation`);
       }
     }
 
@@ -1992,7 +2128,28 @@ export class ApplyEngine {
       return false;
     }
 
-    const applied = await this.applyAnswer(field, answer, resolution?.spec.kind);
+    let applied = await this.applyAnswer(field, answer, resolution?.spec.kind, !isSensitive(cls.category));
+
+    // Retry loop: a choice field (select/radio/aria) may list the answer under
+    // different wording than the profile value (e.g. profile "Master's" vs the
+    // dropdown's "Graduate Degree"). For NON-sensitive fields only, try one
+    // alternative phrasing from memory before giving up.
+    if (
+      !applied &&
+      !isSensitive(cls.category) &&
+      ["select", "radio", "aria-radio", "aria-combobox"].includes(field.type)
+    ) {
+      const alt = await findAnswer(field.label).catch(() => null);
+      if (alt && alt !== answer && accept(alt)) {
+        await Logger.info("APPLY", `  ↻ retrying "${field.label.slice(0, 40)}" with alternative "${alt.slice(0, 30)}"`);
+        applied = await this.applyAnswer(field, alt, resolution?.spec.kind, true);
+        if (applied) {
+          answer = alt;
+          source = source ? `${source}→memory-alt` : "memory-alt";
+        }
+      }
+    }
+
     if (!applied) {
       // Couldn't confidently apply (e.g. no/ambiguous dropdown option) — pause.
       await Logger.warn("APPLY", `  ⚠ couldn't apply a clear value to "${field.label.slice(0, 50)}" (${cls.domKind}) — leaving blank for your review`);
@@ -2023,17 +2180,20 @@ export class ApplyEngine {
   // Read back a text/select field to confirm our value actually applied.
   // Radios/checkboxes are trusted (toggleCheckable already self-verifies).
   private async verifyFieldValue(field: DetectedField, expected: string): Promise<boolean> {
-    if (field.type === "radio" || field.type === "checkbox") return true;
+    // Checkables (native + ARIA) self-verify on apply; the click either took or
+    // it didn't, and there's no readable text value to compare against.
+    if (["radio", "checkbox", "aria-radio", "aria-combobox"].includes(field.type)) return true;
+    const frame = this.frameByKey(field.frameKey);
     try {
       if (field.type === "select") {
-        const text = await this.page!.$eval(field.selector, (el) => {
+        const text = await frame.$eval(field.selector, (el) => {
           const s = el as HTMLSelectElement;
           return s.options[s.selectedIndex]?.text?.trim().toLowerCase() || "";
         }).catch(() => "");
         // A non-empty, non-placeholder selection counts as success.
         return !!text && !/^(select|choose|--|please)/.test(text);
       }
-      const cur = (await this.page!.inputValue(field.selector).catch(() => "")) || "";
+      const cur = (await frame.inputValue(field.selector).catch(() => "")) || "";
       if (!cur.trim()) return false;
       // Field-shortening (truncation/formatting) is fine — check overlap.
       const a = cur.toLowerCase().trim(), b = expected.toLowerCase().trim();
@@ -2098,17 +2258,21 @@ export class ApplyEngine {
   // Apply a value to a field. Returns false when it could NOT confidently set
   // the value (no dropdown/radio option matched, or the match was ambiguous) so
   // the caller can pause for the human instead of leaving a wrong/blank choice.
-  private async applyAnswer(field: DetectedField, answer: string, kind?: string): Promise<boolean> {
+  private async applyAnswer(field: DetectedField, answer: string, kind?: string, allowFallback = false): Promise<boolean> {
+    // Operate inside the frame that actually owns the field (iframe ATS forms).
+    const frame = this.frameByKey(field.frameKey);
+
     if (field.type === "select") {
-      const options = await this.page!.$$eval(
+      const options = await frame.$$eval(
         `${field.selector} option`,
         (opts) => opts.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent?.trim() || "" }))
-      ).catch(() => []);
+      ).catch(() => [] as { value: string; text: string }[]);
 
       // Phase 5: scored, deterministic match (state/country/degree/yesno aware).
       // Never type blindly — match against the REAL options, and pause when the
-      // best match is weak or ambiguous between two options.
-      const m = matchDropdownOptionScored(answer, options, kind);
+      // best match is weak or ambiguous between two options. For non-sensitive
+      // fields, allowFallback lets a substring/token-overlap resolve a tie.
+      const m = matchDropdownOptionScored(answer, options, kind, { allowFallback });
       if (!m.value || m.ambiguous) {
         await Logger.warn(
           "APPLY",
@@ -2116,10 +2280,10 @@ export class ApplyEngine {
         );
         return false;
       }
-      await this.page!.selectOption(field.selector, m.value).catch(() => {});
+      await frame.selectOption(field.selector, m.value).catch(() => {});
       return true;
     } else if (field.type === "radio") {
-      const radios = await this.page!.$$(field.selector);
+      const radios = await frame.$$(field.selector);
       // Read each radio's label, then reuse the same scored matcher (options
       // keyed by index) so radios get identical synonym/ambiguity handling.
       const labels: string[] = [];
@@ -2127,13 +2291,14 @@ export class ApplyEngine {
         labels.push(
           await radio.evaluate((el) => {
             const id = (el as HTMLInputElement).id;
-            const lbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim() : "";
+            const r = el.getRootNode() as Document | ShadowRoot;
+            const lbl = id ? r.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim() : "";
             return (lbl || (el as HTMLInputElement).value || "").trim();
           }).catch(() => "")
         );
       }
       const opts = labels.map((t, i) => ({ value: String(i), text: t }));
-      const m = matchDropdownOptionScored(answer, opts, kind);
+      const m = matchDropdownOptionScored(answer, opts, kind, { allowFallback });
       if (m.value === null || m.ambiguous) {
         await Logger.warn(
           "APPLY",
@@ -2143,15 +2308,71 @@ export class ApplyEngine {
       }
       await this.toggleCheckable(radios[Number(m.value)], true);
       return true;
+    } else if (field.type === "aria-radio") {
+      // div[role=radiogroup] with [role=radio] children — no native input to
+      // toggle, so match by accessible label and click the chosen option.
+      const radios = await frame.$$(`${field.selector} [role="radio"]`);
+      const labels: string[] = [];
+      for (const r of radios) {
+        labels.push(
+          await r.evaluate((el) => (el.getAttribute("aria-label") || el.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "")
+        );
+      }
+      const opts = labels.map((t, i) => ({ value: String(i), text: t }));
+      const m = matchDropdownOptionScored(answer, opts, kind, { allowFallback });
+      if (m.value === null || m.ambiguous) {
+        await Logger.warn("APPLY", `  ⚠ ${m.ambiguous ? "ambiguous" : "no"} ARIA-radio match for "${answer.slice(0, 30)}" in "${field.label.slice(0, 40)}" — leaving for you`);
+        return false;
+      }
+      await radios[Number(m.value)].click({ timeout: 3000 }).catch(() => {});
+      return true;
+    } else if (field.type === "aria-combobox") {
+      return this.fillAriaCombobox(frame, field, answer, kind, allowFallback);
     } else if (field.type === "checkbox") {
       const shouldCheck = /yes|true|agree|accept|authorize|confirm|check|i certify|acknowledge/i.test(answer);
-      const cb = await this.page!.$(field.selector);
+      const cb = await frame.$(field.selector);
       if (!cb) return false;
       await this.toggleCheckable(cb, shouldCheck);
       return true;
+    } else if (field.inputType === "range") {
+      // A slider has no safe deterministic mapping from a text answer — never
+      // guess a position; pause for the human.
+      return false;
     } else {
-      await this.page!.fill(field.selector, answer).catch(() => {});
+      await frame.fill(field.selector, answer).catch(() => {});
       return true;
+    }
+  }
+
+  // Fill a pure-ARIA combobox (button + popup listbox, no backing <input>):
+  // open it, read the now-visible options, scored-match, and click — or pause.
+  // Custom widgets vary wildly, so anything uncertain returns false (human).
+  private async fillAriaCombobox(frame: Frame, field: DetectedField, answer: string, kind?: string, allowFallback = false): Promise<boolean> {
+    try {
+      const control = await frame.$(field.selector);
+      if (!control) return false;
+      await control.click({ timeout: 3000 }).catch(() => {});
+      await this.delay(300, 650);
+
+      const raw = await frame.$$('[role="option"]');
+      const visible: { handle: import("playwright").ElementHandle<Element>; text: string }[] = [];
+      for (const o of raw) {
+        if (!(await o.isVisible().catch(() => false))) continue;
+        const text = await o.evaluate((e) => (e.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "");
+        if (text) visible.push({ handle: o, text });
+      }
+      if (!visible.length) return false;
+
+      const opts = visible.map((v, i) => ({ value: String(i), text: v.text }));
+      const m = matchDropdownOptionScored(answer, opts, kind, { allowFallback });
+      if (m.value === null || m.ambiguous) {
+        await Logger.warn("APPLY", `  ⚠ ${m.ambiguous ? "ambiguous" : "no"} combobox match for "${answer.slice(0, 30)}" in "${field.label.slice(0, 40)}" — leaving for you`);
+        return false;
+      }
+      await visible[Number(m.value)].handle.click({ timeout: 2000 }).catch(() => {});
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -2181,7 +2402,8 @@ export class ApplyEngine {
     try {
       const id = await handle.evaluate((el) => (el as HTMLInputElement).id).catch(() => "");
       if (id) {
-        const lbl = await this.page!.$(`label[for="${id}"]`);
+        const owner = (await handle.ownerFrame().catch(() => null)) || this.page!.mainFrame();
+        const lbl = await owner.$(`label[for="${id}"]`);
         if (lbl) {
           await lbl.click({ timeout: 3000 }).catch(() => {});
           if ((await isChecked()) === target) return;
@@ -2278,18 +2500,27 @@ export class ApplyEngine {
   // navigates. Used to detect when the human has finished helping.
   private async combinedFormState(scope: string): Promise<string> {
     try {
-      const url = this.page!.url().split("?")[0];
-      const fill = await this.page!.evaluate((sel: string) => {
-        const root = document.querySelector(sel) || document.body;
-        const els = root.querySelectorAll("input, textarea, select");
-        let s = "";
-        els.forEach((el) => {
-          const e = el as HTMLInputElement;
-          if (e.type === "checkbox" || e.type === "radio") s += e.checked ? "1" : "0";
-          else s += `${(e.value || "").length}:`; // length only — keeps PII out of logs
-        });
-        return s;
-      }, scope);
+      const page = this.page!;
+      const url = page.url().split("?")[0];
+      const frames = page.frames();
+      const snap = async (frame: Frame, sel: string): Promise<string> =>
+        frame.evaluate((s: string) => {
+          const root = document.querySelector(s) || document.body;
+          if (!root) return "";
+          const els = root.querySelectorAll("input, textarea, select");
+          let out = "";
+          els.forEach((el) => {
+            const e = el as HTMLInputElement;
+            if (e.type === "checkbox" || e.type === "radio") out += e.checked ? "1" : "0";
+            else out += `${(e.value || "").length}:`; // length only — keeps PII out of logs
+          });
+          return out;
+        }, sel).catch(() => "");
+      let fill = "";
+      for (let i = 0; i < frames.length; i++) {
+        if (i > 0 && this.isThirdPartyFrame(frames[i].url())) continue;
+        fill += await snap(frames[i], i === 0 ? scope : "body");
+      }
       return `${url}||${fill}`;
     } catch {
       return Math.random().toString();
@@ -2307,14 +2538,15 @@ export class ApplyEngine {
       let saved = 0;
       for (const f of fields) {
         if (/^field_\d+$/i.test(f.label)) continue; // unlabeled — can't reuse meaningfully
-        if (f.type === "checkbox" || f.type === "radio") continue;
+        if (["checkbox", "radio", "aria-radio", "aria-combobox"].includes(f.type)) continue;
         // Never memorize one-time / email verification codes — they're single-use,
         // so a captured "Security code" → "B" would only poison future applies.
         if (OTP_LABEL_RE.test(f.label) && !OTP_EXCLUDE_RE.test(f.label)) continue;
 
+        const frame = this.frameByKey(f.frameKey);
         let value = "";
         if (f.type === "select") {
-          value = await this.page!.$eval(
+          value = await frame.$eval(
             f.selector,
             (el) => {
               const s = el as HTMLSelectElement;
@@ -2322,7 +2554,7 @@ export class ApplyEngine {
             }
           ).catch(() => "");
         } else {
-          value = (await this.page!.inputValue(f.selector).catch(() => "")) || "";
+          value = (await frame.inputValue(f.selector).catch(() => "")) || "";
         }
 
         value = value.trim();
