@@ -286,18 +286,27 @@ export class ApplyEngine {
 
       if (success) {
         this.logAction("submitted");
+        const receipt = await this.captureReceipt(application.folderPath);
+        const now = new Date();
         await prisma.application.update({
           where: { id: applicationId },
           data: {
             status: "SUBMITTED",
-            appliedAt: new Date(),
-            recoveryState: { phase: "submitted", ts: new Date().toISOString() } as object,
+            appliedAt: now,
+            confirmedAt: now,
+            confirmationText: receipt.confirmationText,
+            confirmationId: receipt.confirmationId,
+            screenshotPath: receipt.screenshotPath,
+            recoveryState: { phase: "submitted", ts: now.toISOString() } as object,
             actionLog: this.actionLog as object,
             fieldDecisions: this.fieldDecisions as object,
           },
         });
         await prisma.job.update({ where: { id: job.id }, data: { status: "APPLIED" } });
-        await Logger.success("APPLY", `✓✓✓ Application submitted: ${job.companyName} — ${job.jobTitle}`);
+        await Logger.success(
+          "APPLY",
+          `✓✓✓ Application submitted: ${job.companyName} — ${job.jobTitle}${receipt.confirmationId ? ` (ref ${receipt.confirmationId})` : ""}`
+        );
         return true;
       } else {
         throw new Error("Application submission did not complete");
@@ -2674,6 +2683,42 @@ export class ApplyEngine {
       const safe = label.replace(/[^a-z0-9_\-.]/gi, "_");
       saveFile(folderPath, `${safe}.html`, html);
     } catch { /* ignore */ }
+  }
+
+  // ─── Submission receipt ───────────────────────────────────────────────────────
+  // Tsenta-style proof of submission: on a confirmed apply, capture the
+  // confirmation sentence, any reference/confirmation number on the page, and a
+  // full-page screenshot. Persisted into the Application's existing receipt
+  // fields so the UI can show "submitted, here's the proof".
+  private async captureReceipt(
+    folderPath: string | null
+  ): Promise<{ confirmationText: string | null; confirmationId: string | null; screenshotPath: string | null }> {
+    const empty = { confirmationText: null, confirmationId: null, screenshotPath: null };
+    if (!this.page) return empty;
+    try {
+      const body = await this.page
+        .evaluate(() => (document.body.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 2000))
+        .catch(() => "");
+
+      // A confirmation/reference number if the page shows one.
+      const idMatch = body.match(
+        /(?:confirmation|reference|application|tracking|req(?:uisition)?)\s*(?:#|number|no\.?|id)?\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{4,})/i
+      );
+      // A short confirmation sentence, else the first slice of the page text.
+      const sentence = body.match(
+        /[^.!?]*\b(?:thank you for applying|application (?:submitted|received|complete)|successfully submitted|we (?:have )?received your application)\b[^.!?]*[.!?]/i
+      );
+      const confirmationText = (sentence?.[0] || body.slice(0, 240)).trim() || null;
+
+      let screenshotPath: string | null = null;
+      if (folderPath) {
+        const buf = await this.page.screenshot({ fullPage: true }).catch(() => null);
+        if (buf) screenshotPath = saveScreenshot(folderPath, buf, "receipt.png");
+      }
+      return { confirmationText, confirmationId: idMatch?.[1] ?? null, screenshotPath };
+    } catch {
+      return empty;
+    }
   }
 }
 

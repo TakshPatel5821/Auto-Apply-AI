@@ -12,11 +12,13 @@ import { ashbySource } from "./ashby";
 import { smartRecruitersSource } from "./smartrecruiters";
 import { workableSource } from "./workable";
 import { recruiteeSource } from "./recruitee";
+import { workdaySource } from "./workday";
 import { remoteOkSource } from "./remoteok";
 import { remotiveSource } from "./remotive";
 import { weWorkRemotelySource } from "./weworkremotely";
 import { hackerNewsSource } from "./hackernews-hiring";
 import { genericSource } from "./generic-jsonld";
+import { companiesFor } from "./company-catalog";
 
 // Adapter over the existing Greenhouse class so it fits the ScraperSource shape.
 const greenhouseSource: ScraperSource = {
@@ -48,6 +50,7 @@ export const SOURCES: ScraperSource[] = [
   smartRecruitersSource,
   workableSource,
   recruiteeSource,
+  workdaySource,
   remoteOkSource,
   remotiveSource,
   weWorkRemotelySource,
@@ -93,6 +96,12 @@ export async function searchAllSources(cfg: SourceSearchConfig, opts: SearchAllO
   const searchable = selected.filter((s) => typeof s.search === "function");
   const concurrency = Math.max(1, opts.concurrency ?? 4);
 
+  // When the caller didn't pin specific companies, draw each ATS source's board
+  // tokens from the catalog (built-in ∪ imported) rather than its tiny inline
+  // default — this is what lets discovery scale as the catalog grows.
+  const cfgFor = (src: ScraperSource): SourceSearchConfig =>
+    cfg.companies?.length ? cfg : { ...cfg, companies: companiesFor(src.id) };
+
   const results: ScrapedJob[] = [];
   let idx = 0;
   const worker = async (): Promise<void> => {
@@ -100,7 +109,7 @@ export async function searchAllSources(cfg: SourceSearchConfig, opts: SearchAllO
       const src = searchable[idx++];
       try {
         await Logger.info("SCRAPER", `▶ ${src.label} search…`);
-        const jobs = await src.search!(cfg);
+        const jobs = await src.search!(cfgFor(src));
         results.push(...jobs);
         await Logger.success("SCRAPER", `✓ ${src.label}: ${jobs.length} job(s)`);
       } catch (e) {
