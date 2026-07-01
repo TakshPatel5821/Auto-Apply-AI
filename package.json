@@ -14,10 +14,13 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
+    "agent": "tsx scripts/agent-cli.ts",
+    "mcp": "tsx scripts/mcp-server.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@monaco-editor/react": "^4.7.0",
     "@prisma/client": "^5.22.0",
     "@radix-ui/react-accordion": "^1.2.1",

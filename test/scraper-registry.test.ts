@@ -12,6 +12,7 @@ describe("registry — URL routing (supports)", () => {
     ["https://jobs.ashbyhq.com/openai/role", "ashby"],
     ["https://acme.recruitee.com/o/backend-engineer", "recruitee"],
     ["https://apply.workable.com/acme/j/ABC123/", "workable"],
+    ["https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite", "workday"],
     ["https://jobs.smartrecruiters.com/Visa/74000-engineer", "smartrecruiters"],
     ["https://remoteok.com/remote-jobs/123-dev", "remoteok"],
     ["https://remotive.com/remote-jobs/software-dev/x-123", "remotive"],
@@ -40,7 +41,7 @@ describe("registry — catalog", () => {
     const ids = listSources().map((s) => s.id);
     for (const id of [
       "greenhouse", "lever", "ashby", "smartrecruiters", "workable",
-      "recruitee", "remoteok", "remotive", "weworkremotely", "hackernews", "generic",
+      "recruitee", "workday", "remoteok", "remotive", "weworkremotely", "hackernews", "generic",
     ]) {
       expect(ids).toContain(id);
     }

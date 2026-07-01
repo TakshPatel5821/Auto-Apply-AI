@@ -57,6 +57,25 @@ export async function politeGet<T = unknown>(url: string, opts: PoliteGetOptions
     }
   }
 
+  return politeRequest<T>(url, "get", undefined, opts);
+}
+
+/**
+ * POST a URL politely with a JSON body, sharing the same per-domain throttling,
+ * backoff, and UA rotation as politeGet. Used by sources whose listing API is a
+ * POST endpoint (e.g. Workday's CXS `/jobs` search). Returns null on failure.
+ */
+export async function politePost<T = unknown>(url: string, body: unknown, opts: PoliteGetOptions = {}): Promise<T | null> {
+  return politeRequest<T>(url, "post", body, opts);
+}
+
+async function politeRequest<T>(
+  url: string,
+  method: "get" | "post",
+  body: unknown,
+  opts: PoliteGetOptions
+): Promise<T | null> {
+  const host = hostOf(url);
   const maxRetries = opts.maxRetries ?? 3;
   let attempt = 0;
   let backoff = 1000;
@@ -64,17 +83,20 @@ export async function politeGet<T = unknown>(url: string, opts: PoliteGetOptions
   while (attempt <= maxRetries) {
     await throttle(host);
     try {
-      const res: AxiosResponse<T> = await axios.get(url, {
+      const config = {
         headers: {
           "User-Agent": randomUA(),
           "Accept-Language": "en-US,en;q=0.9",
+          ...(method === "post" ? { "Content-Type": "application/json", Accept: "application/json" } : {}),
           ...(opts.headers || {}),
         },
         timeout: opts.timeout ?? 15000,
-        responseType: opts.responseType === "text" ? "text" : "json",
+        responseType: (opts.responseType === "text" ? "text" : "json") as "text" | "json",
         // We handle 4xx ourselves; only let 5xx (except 503) throw.
-        validateStatus: (s) => s < 500 || s === 503,
-      });
+        validateStatus: (s: number) => s < 500 || s === 503,
+      };
+      const res: AxiosResponse<T> =
+        method === "post" ? await axios.post(url, body, config) : await axios.get(url, config);
 
       if (res.status === 429 || res.status === 403 || res.status === 503) {
         const retryAfter = Number(res.headers?.["retry-after"]);
@@ -90,7 +112,7 @@ export async function politeGet<T = unknown>(url: string, opts: PoliteGetOptions
     } catch (e) {
       attempt++;
       if (attempt > maxRetries) {
-        await Logger.warn("SCRAPER", `GET failed ${url}: ${String(e).slice(0, 120)}`);
+        await Logger.warn("SCRAPER", `${method.toUpperCase()} failed ${url}: ${String(e).slice(0, 120)}`);
         return null;
       }
       await new Promise((r) => setTimeout(r, backoff + Math.random() * 500));
