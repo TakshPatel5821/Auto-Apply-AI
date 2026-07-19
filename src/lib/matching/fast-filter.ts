@@ -30,6 +30,16 @@ export function extractRequiredYears(text: string): number {
   return maxYears;
 }
 
+// Does `token` appear in `text` as a distinct term? Alphanumeric tokens use a
+// word boundary so "go" can't match inside "good"; tokens with special chars
+// (c++, c#, ci/cd, node.js) fall back to substring — they're distinctive enough
+// not to false-match, and word boundaries don't behave around punctuation.
+function tokenInText(token: string, text: string): boolean {
+  if (/[^a-z0-9 ]/i.test(token)) return text.includes(token);
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+}
+
 export function fastFilter(
   jobTitle: string,
   jobDescription: string,
@@ -130,12 +140,29 @@ export function fastFilter(
   const matchedSkills: string[] = [];
 
   for (const tech of techKeywords) {
-    if (jobText.includes(tech)) {
+    if (tokenInText(tech, jobText)) {
       techMentioned++;
       if (candidateSet.has(tech)) {
         skillMatches++;
         matchedSkills.push(tech);
       }
+    }
+  }
+
+  // Also credit the candidate's OWN skills that literally appear in the job text
+  // but aren't in the canned tech list — otherwise niche stacks (Kotlin, Scala,
+  // .NET, Elixir, Swift, Snowflake…) never count and the match % understates a
+  // real fit. Same term-boundary matching, and only for tokens ≥3 chars so short
+  // names like "go"/"c" (handled by the canned list) can't false-match.
+  const cannedSet = new Set(techKeywords);
+  const alreadyMatched = new Set(matchedSkills);
+  for (const skill of candidateSet) {
+    if (skill.length < 3 || cannedSet.has(skill) || alreadyMatched.has(skill)) continue;
+    if (tokenInText(skill, jobText)) {
+      skillMatches++;
+      techMentioned++;
+      matchedSkills.push(skill);
+      alreadyMatched.add(skill);
     }
   }
 

@@ -116,7 +116,21 @@ export async function findAnswer(
   return findAnswerSemantic(question);
 }
 
-async function findAnswerSemantic(question: string): Promise<string | null> {
+// Cosine recall threshold for serving a paraphrased question's answer. Raised
+// from 0.85 → 0.88 so genuinely DIFFERENT questions that merely share wording
+// ("years with React" vs "years with Java") are less likely to merge, while
+// real paraphrases still hit.
+const SEMANTIC_RECALL = 0.88;
+// Higher bar for *propagating* a human correction/rejection to a near-duplicate
+// — only touch rows that are almost certainly the same question.
+const SEMANTIC_PROPAGATE = 0.92;
+
+// Best semantic match for `question` among stored memories (with a non-empty
+// answer). Returns the row id, its answer, and the cosine score, or null. Shared
+// by findAnswer and suggestAnswer so they can't drift apart.
+async function semanticBest(
+  question: string
+): Promise<{ id: string; answerText: string; score: number } | null> {
   if (embeddingsDisabled) return null;
   try {
     const all = await prisma.applicationMemory.findMany({
@@ -128,9 +142,10 @@ async function findAnswerSemantic(question: string): Promise<string | null> {
 
     const queryEmb = await generateEmbedding(question);
 
-    let best: { id: string; answerText: string; questionText: string } | null = null;
+    let best: { id: string; answerText: string } | null = null;
     let bestScore = 0;
     for (const m of all) {
+      if (!m.answerText.trim()) continue; // shell rows hold only rejections
       let emb = embeddingCache.get(m.questionHash);
       if (!emb) {
         emb = await generateEmbedding(m.questionText);
@@ -139,21 +154,56 @@ async function findAnswerSemantic(question: string): Promise<string | null> {
       const score = cosineSimilarity(queryEmb, emb);
       if (score > bestScore) {
         bestScore = score;
-        best = m;
+        best = { id: m.id, answerText: m.answerText };
       }
     }
-
-    // 0.85+ cosine on nomic-embed-text reliably means "same intent".
-    if (best && bestScore >= 0.85 && isPlausibleAnswer(question, best.answerText)) {
-      await bumpUsage(best.id);
-      return best.answerText;
-    }
-    return null;
+    return best ? { ...best, score: bestScore } : null;
   } catch {
     // Embed model missing or Ollama down — disable to avoid repeated failures.
     embeddingsDisabled = true;
     return null;
   }
+}
+
+async function findAnswerSemantic(question: string): Promise<string | null> {
+  const best = await semanticBest(question);
+  if (best && best.score >= SEMANTIC_RECALL && isPlausibleAnswer(question, best.answerText)) {
+    await bumpUsage(best.id);
+    return best.answerText;
+  }
+  return null;
+}
+
+// ─── suggest API ──────────────────────────────────────────────────────────────
+// One place for the apply engine to ask "what would you fill here, and how sure
+// are you?" — exact hits are high confidence, semantic hits carry their cosine
+// score (clamped) so the engine's confidence gates can decide autofill vs pause.
+export interface MemorySuggestion {
+  answer: string;
+  confidence: number;             // 0-1
+  source: "exact" | "semantic";
+}
+
+export async function suggestAnswer(question: string): Promise<MemorySuggestion | null> {
+  const hash = hashQuestion(question);
+  const exact = await prisma.applicationMemory.findFirst({
+    where: { userId: DEFAULT_USER_ID, questionHash: hash },
+    orderBy: { usageCount: "desc" },
+  });
+  if (exact && exact.answerText.trim() && isPlausibleAnswer(question, exact.answerText)) {
+    await bumpUsage(exact.id);
+    return { answer: exact.answerText, confidence: 0.9, source: "exact" };
+  }
+
+  const best = await semanticBest(question);
+  if (best && best.score >= SEMANTIC_RECALL && isPlausibleAnswer(question, best.answerText)) {
+    await bumpUsage(best.id);
+    // Map cosine [0.88, 1.0] → confidence [0.8, 0.9] so even a strong paraphrase
+    // stays in fill-and-verify territory, never blind autofill.
+    const confidence = Math.min(0.9, 0.8 + (best.score - SEMANTIC_RECALL) * (0.1 / (1 - SEMANTIC_RECALL)));
+    return { answer: best.answerText, confidence, source: "semantic" };
+  }
+  return null;
 }
 
 async function bumpUsage(id: string): Promise<void> {
@@ -249,9 +299,9 @@ export async function saveHumanAnswer(
         emb = await generateEmbedding(m.questionText);
         embeddingCache.set(m.questionHash, emb);
       }
-      // Higher threshold (0.90) than lookup (0.85) — only correct what is almost
-      // certainly the SAME question, to avoid clobbering a genuinely different one.
-      if (cosineSimilarity(queryEmb, emb) >= 0.9) {
+      // Higher threshold than lookup — only correct what is almost certainly the
+      // SAME question, to avoid clobbering a genuinely different one.
+      if (cosineSimilarity(queryEmb, emb) >= SEMANTIC_PROPAGATE) {
         await prisma.applicationMemory.update({
           where: { id: m.id },
           data: { answerText: answer, lastUsed: new Date() },
@@ -281,16 +331,21 @@ export async function recordRejection(
     });
     if (existing) {
       const have = (existing.rejectedAnswers || []);
-      if (have.some((a) => normalizeAns(a) === normalizeAns(bad))) return; // already known-bad
-      // Keep the most recent 20; clear answerText if it WAS the rejected value.
-      const clearAnswer = normalizeAns(existing.answerText) === normalizeAns(bad);
-      await prisma.applicationMemory.update({
-        where: { id: existing.id },
-        data: {
-          rejectedAnswers: [...have, bad].slice(-20),
-          ...(clearAnswer ? { answerText: "" } : {}),
-        },
-      });
+      if (!have.some((a) => normalizeAns(a) === normalizeAns(bad))) {
+        // Keep the most recent 20; clear answerText if it WAS the rejected value.
+        const clearAnswer = normalizeAns(existing.answerText) === normalizeAns(bad);
+        await prisma.applicationMemory.update({
+          where: { id: existing.id },
+          data: {
+            rejectedAnswers: [...have, bad].slice(-20),
+            ...(clearAnswer ? { answerText: "" } : {}),
+          },
+        });
+      }
+      // Propagate: a rephrased version of THIS question must not keep serving the
+      // value the human just rejected. Invalidate near-duplicate memories whose
+      // answer equals the bad value (mirrors saveHumanAnswer's correction pass).
+      await propagateRejection(question, bad, hash);
     } else {
       // Shell row that only records the rejection (no good answer yet).
       await prisma.applicationMemory.create({
@@ -306,6 +361,43 @@ export async function recordRejection(
     }
   } catch {
     /* best-effort — negative memory must never break an apply run */
+  }
+}
+
+// Clear a rejected value from near-duplicate memories so a rephrased question
+// can't re-serve it. Only touches rows whose stored answer IS the bad value and
+// that are an almost-certain match (>= SEMANTIC_PROPAGATE). Best-effort.
+async function propagateRejection(question: string, bad: string, selfHash: string): Promise<void> {
+  if (embeddingsDisabled) return;
+  try {
+    const all = await prisma.applicationMemory.findMany({
+      where: { userId: DEFAULT_USER_ID },
+      take: 300,
+    });
+    if (all.length <= 1) return;
+    const queryEmb = await generateEmbedding(question);
+    for (const m of all) {
+      if (m.questionHash === selfHash) continue;
+      if (m.locked) continue; // never clobber a locked memory
+      if (normalizeAns(m.answerText) !== normalizeAns(bad)) continue; // only the bad value
+      let emb = embeddingCache.get(m.questionHash);
+      if (!emb) {
+        emb = await generateEmbedding(m.questionText);
+        embeddingCache.set(m.questionHash, emb);
+      }
+      if (cosineSimilarity(queryEmb, emb) >= SEMANTIC_PROPAGATE) {
+        const have = m.rejectedAnswers || [];
+        await prisma.applicationMemory.update({
+          where: { id: m.id },
+          data: {
+            answerText: "",
+            rejectedAnswers: have.some((a) => normalizeAns(a) === normalizeAns(bad)) ? have : [...have, bad].slice(-20),
+          },
+        }).catch(() => {});
+      }
+    }
+  } catch {
+    embeddingsDisabled = true;
   }
 }
 

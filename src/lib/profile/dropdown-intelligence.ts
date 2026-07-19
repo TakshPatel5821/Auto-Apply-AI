@@ -82,10 +82,38 @@ function isPlaceholder(text: string): boolean {
   return /^(select|choose|please|--|\.\.\.|none|n\/a)\b/.test(norm(text));
 }
 
+// Last-resort resolver for NON-sensitive dropdowns where strict scoring was
+// ambiguous or found nothing: take the first option that shares a substring with
+// the value, else the option with the most token overlap. Deterministic (first
+// wins) so the choice is reproducible. Returns an option.value or null.
+function fallbackResolve(value: string, options: DropdownOption[], kind?: string): string | null {
+  const cands = candidatesFor(value, kind).map(norm).filter((c) => c.length >= 3);
+  if (cands.length === 0) return null;
+  const real = options.filter((o) => !isPlaceholder(o.text));
+
+  // 1) First option whose text contains (or is contained by) a candidate.
+  for (const o of real) {
+    const ot = norm(o.text);
+    if (ot && cands.some((c) => ot.includes(c) || c.includes(ot))) return o.value;
+  }
+
+  // 2) Token overlap: the option sharing the most ≥3-char tokens with the value.
+  const valTokens = new Set(cands.flatMap((c) => c.split(" ")).filter((t) => t.length >= 3));
+  let best: { value: string; overlap: number } | null = null;
+  for (const o of real) {
+    const otTokens = norm(o.text).split(" ").filter((t) => t.length >= 3);
+    let overlap = 0;
+    for (const t of otTokens) if (valTokens.has(t)) overlap++;
+    if (overlap > 0 && (!best || overlap > best.overlap)) best = { value: o.value, overlap };
+  }
+  return best?.value ?? null;
+}
+
 export function matchDropdownOptionScored(
   value: string,
   options: DropdownOption[],
-  kind?: string
+  kind?: string,
+  opts?: { allowFallback?: boolean }
 ): DropdownMatch {
   if (!value || options.length === 0) return { value: null, score: 0, ambiguous: false };
   const cands = candidatesFor(value, kind).map(norm).filter((c) => c.length >= 2);
@@ -107,9 +135,21 @@ export function matchDropdownOptionScored(
     else if (s > secondScore) { secondScore = s; }
   }
 
-  if (!best || best.score === 0) return { value: null, score: 0, ambiguous: false };
+  // Nothing scored — optionally fall back (non-sensitive callers only).
+  if (!best || best.score === 0) {
+    if (opts?.allowFallback) {
+      const fb = fallbackResolve(value, options, kind);
+      if (fb) return { value: fb, score: 0.55, ambiguous: false };
+    }
+    return { value: null, score: 0, ambiguous: false };
+  }
+
   // Ambiguous when not an exact hit and the runner-up is within 0.15.
   const ambiguous = best.score < 1.0 && best.score - secondScore < 0.15;
+  if (ambiguous && opts?.allowFallback) {
+    const fb = fallbackResolve(value, options, kind);
+    if (fb) return { value: fb, score: Math.max(best.score, 0.55), ambiguous: false };
+  }
   return { value: best.value, score: best.score, ambiguous };
 }
 

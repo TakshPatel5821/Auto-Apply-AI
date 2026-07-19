@@ -1,9 +1,9 @@
-import { chromium, BrowserContext, Page, ElementHandle } from "playwright";
-import { mkdirSync, existsSync } from "fs";
-import { join, isAbsolute } from "path";
+import { chromium, BrowserContext, Page, Frame } from "playwright";
+import { mkdirSync } from "fs";
+import { join } from "path";
 import { homedir } from "os";
 import { prisma } from "@/lib/db/prisma";
-import { findAnswer, saveAnswer, saveHumanAnswer, recordRejection, isRejected } from "@/lib/storage/memory";
+import { findAnswer, suggestAnswer, saveAnswer, saveHumanAnswer, recordRejection, isRejected } from "@/lib/storage/memory";
 import { Profile, resolveField } from "@/lib/profile/profile";
 import { loadProfile } from "@/lib/profile/profile-store";
 import { matchDropdownOptionScored } from "@/lib/profile/dropdown-intelligence";
@@ -13,17 +13,6 @@ import { claudeAnswerQuestion } from "@/lib/ai/claude";
 import { saveScreenshot, saveFile } from "@/lib/storage/file-manager";
 import { fetchLatestOtp } from "@/lib/gmail/otp";
 import { gmailStatus } from "@/lib/gmail/client";
-
-// Résumé PDF paths are stored relative to the project root ("applications/..").
-// existsSync on a relative path is cwd-dependent, so resolve to absolute first.
-function resolveResumePath(p?: string | null): string | null {
-  if (!p) return null;
-  const abs = isAbsolute(p) ? p : join(process.cwd(), p);
-  return existsSync(abs) ? abs : null;
-}
-
-// Field classification + value validation now live in ./field-classifier
-// (Phase 1). The engine consumes classifyField/validateValue/decideFill below.
 import { Logger } from "@/lib/logging/logger";
 import { scraperStatus } from "./scraper-status";
 import { detectAts, AtsAdapter, GENERIC_VALIDATION_ERROR_SELECTORS } from "./ats-adapters";
@@ -34,88 +23,24 @@ import {
   isSensitive,
   aiMayAnswer,
 } from "./field-classifier";
-
-// Element handle type as returned by page.$$ — used for OTP input detection.
-type OtpHandle = ElementHandle<SVGElement | HTMLElement>;
-
-type ApplicationWithRelations = Awaited<ReturnType<typeof getApplicationWithRelations>>;
-
-async function getApplicationWithRelations(id: string) {
-  return prisma.application.findUnique({
-    where: { id },
-    include: {
-      job: true,
-      tailoredResume: { select: { pdfPath: true, texPath: true } },
-      coverLetter: { select: { pdfPath: true, content: true } },
-      resume: { select: { parsedData: true } },
-    },
-  });
-}
-
-interface DetectedField {
-  type: string;
-  label: string;
-  name?: string;
-  required: boolean;
-  options?: string[];
-  selector: string;
-  // Phase 3: richer context signals so the classifier understands the blank.
-  placeholder?: string;
-  ariaLabel?: string;
-  sectionHeading?: string;
-  // Phase 6: the field's character limit (maxlength), for open-ended answers.
-  maxLength?: number;
-}
-
-// Phase 9: a single per-field decision for the debug/replay view.
-interface FieldDecisionRecord {
-  t: string;
-  step: number;
-  label: string;
-  category: string;
-  domKind: string;
-  source: string | null;       // profile[x] | memory | resume | AI | consent | prefilled
-  confidence: number | null;
-  decision: string;            // filled | verified | pause | reject | skip | consent | prefilled
-  valuePreview: string | null; // truncated; "‹hidden›" for sensitive categories
-  reason: string | null;
-}
-
-const STEALTH_SCRIPT = () => {
-  Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-  (window as unknown as Record<string, unknown>).chrome = {
-    app: { isInstalled: false, InstallState: {}, RunningState: {} },
-    runtime: { id: "x", connect: () => ({ onMessage: { addListener: () => {} }, postMessage: () => {}, disconnect: () => {} }), sendMessage: () => {}, onMessage: { addListener: () => {}, removeListener: () => {}, hasListeners: () => false }, onConnect: { addListener: () => {}, removeListener: () => {}, hasListeners: () => false }, lastError: undefined },
-    loadTimes: () => ({}), csi: () => ({}),
-  };
-  const fakePlugins = [
-    { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer", description: "Portable Document Format" },
-    { name: "Chrome PDF Viewer", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai", description: "" },
-    { name: "Native Client", filename: "internal-nacl-plugin", description: "" },
-  ] as unknown as PluginArray;
-  Object.defineProperty(navigator, "plugins", { get: () => fakePlugins });
-  Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-  Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8 });
-  try { Object.defineProperty(navigator, "deviceMemory", { get: () => 8 }); } catch { /* ignore */ }
-  Object.defineProperty(navigator, "maxTouchPoints", { get: () => 0 });
-  try {
-    const origQuery = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (params) =>
-      (params as PermissionDescriptor).name === "notifications"
-        ? Promise.resolve({ state: Notification.permission, onchange: null } as PermissionStatus)
-        : origQuery(params);
-  } catch { /* ignore */ }
-  try {
-    const origGetParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (p: number) {
-      if (p === 37445) return "Intel Inc.";
-      if (p === 37446) return "Intel Iris OpenGL Engine";
-      return origGetParam.call(this, p);
-    };
-  } catch { /* ignore */ }
-  try { Object.defineProperty(screen, "colorDepth", { get: () => 24 }); } catch { /* ignore */ }
-  try { Object.defineProperty(screen, "pixelDepth", { get: () => 24 }); } catch { /* ignore */ }
-};
+import { STEALTH_SCRIPT } from "./apply/stealth";
+import {
+  type OtpHandle,
+  type DetectedField,
+  type FieldDecisionRecord,
+  type ApplicationWithRelations,
+  getApplicationWithRelations,
+  resolveResumePath,
+} from "./apply/types";
+import {
+  FINAL_SUBMIT_SELECTORS,
+  ADVANCE_SELECTORS,
+  DISMISS_SELECTORS,
+  OTP_LABEL_RE,
+  OTP_EXCLUDE_RE,
+  intentTextPatterns,
+} from "./apply/selectors";
+import { scanDetectFields, scanLinkedInApplyButton, scanHealClick } from "./apply/dom-scripts";
 
 export class ApplyEngine {
   private context: BrowserContext | null = null;
@@ -232,6 +157,8 @@ export class ApplyEngine {
       decision: outcome.decision,
       valuePreview: outcome.value ? (sensitive ? "‹hidden›" : outcome.value.slice(0, 80)) : null,
       reason: outcome.reason ?? null,
+      labelConfidence: field.labelConfidence ?? null,
+      frame: field.frameKey || null,
     });
     if (this.fieldDecisions.length > 500) this.fieldDecisions.shift();
   }
@@ -359,18 +286,27 @@ export class ApplyEngine {
 
       if (success) {
         this.logAction("submitted");
+        const receipt = await this.captureReceipt(application.folderPath);
+        const now = new Date();
         await prisma.application.update({
           where: { id: applicationId },
           data: {
             status: "SUBMITTED",
-            appliedAt: new Date(),
-            recoveryState: { phase: "submitted", ts: new Date().toISOString() } as object,
+            appliedAt: now,
+            confirmedAt: now,
+            confirmationText: receipt.confirmationText,
+            confirmationId: receipt.confirmationId,
+            screenshotPath: receipt.screenshotPath,
+            recoveryState: { phase: "submitted", ts: now.toISOString() } as object,
             actionLog: this.actionLog as object,
             fieldDecisions: this.fieldDecisions as object,
           },
         });
         await prisma.job.update({ where: { id: job.id }, data: { status: "APPLIED" } });
-        await Logger.success("APPLY", `✓✓✓ Application submitted: ${job.companyName} — ${job.jobTitle}`);
+        await Logger.success(
+          "APPLY",
+          `✓✓✓ Application submitted: ${job.companyName} — ${job.jobTitle}${receipt.confirmationId ? ` (ref ${receipt.confirmationId})` : ""}`
+        );
         return true;
       } else {
         throw new Error("Application submission did not complete");
@@ -460,48 +396,7 @@ export class ApplyEngine {
       { timeout: 12000 }
     ).catch(() => null);
 
-    return this.page!.evaluate(() => {
-      const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim();
-      const els = Array.from(document.querySelectorAll("button, a")) as HTMLElement[];
-
-      for (const b of els) {
-        if ((b as HTMLButtonElement).disabled) continue;
-        // Visible only (skip 0-size / hidden controls).
-        const rect = b.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-
-        const aria = b.getAttribute("aria-label") || "";
-        const text = norm(b.innerText + " " + aria);
-        const lower = text.toLowerCase();
-
-        const isApplyClass =
-          b.classList.contains("jobs-apply-button") || !!b.closest(".jobs-apply-button");
-        // Accessible name starts with "apply"/"easy apply", or it's the apply-button widget.
-        const looksApply =
-          isApplyClass || lower.startsWith("apply") || /\beasy apply\b/.test(lower);
-        if (!looksApply) continue;
-        // Exclude look-alikes (counts, AI helpers, save/share/alerts).
-        if (/(save|share|follow|set alert|clicked apply|tailor|cover letter|match details|stand out|report)/.test(lower)) {
-          continue;
-        }
-
-        // Build a usable selector.
-        const tag = b.tagName.toLowerCase();
-        const id = b.id ? `#${CSS.escape(b.id)}` : "";
-        let selector = id;
-        if (!selector && aria) selector = `${tag}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
-        if (!selector && isApplyClass) selector = ".jobs-apply-button";
-        if (!selector) {
-          const all = Array.from(document.querySelectorAll(tag));
-          const idx = all.indexOf(b);
-          if (idx >= 0) selector = `${tag}:nth-of-type(${idx + 1})`;
-        }
-        if (!selector) continue;
-
-        return { selector, text: text.slice(0, 80), isEasyApply: /\beasy apply\b/.test(lower) };
-      }
-      return null;
-    });
+    return this.page!.evaluate(scanLinkedInApplyButton);
   }
 
   // ─── Easy Apply modal flow ──────────────────────────────────────────────────
@@ -951,6 +846,15 @@ export class ApplyEngine {
 
     if (await this.workdayIsAuthed()) return true;
 
+    // ── Recovery: account exists but the password is wrong/forgotten ─────────
+    // Recover it automatically (forgot-password + emailed code) instead of
+    // creating a duplicate, so the candidate is never stranded mid-apply.
+    const wrongPassword = await this.page!.evaluate(() => {
+      const t = (document.body.innerText || "").toLowerCase();
+      return t.includes("incorrect") || t.includes("does not match") || t.includes("password you entered");
+    }).catch(() => false);
+    if (wrongPassword && (await this.workdayPasswordRecovery(email, password))) return true;
+
     // ── Attempt 2: CREATE ACCOUNT ───────────────────────────────────────────
     await Logger.info("APPLY", "Workday: sign-in didn't take — trying to create an account");
     // Switch to the create-account view if there's a toggle link.
@@ -984,6 +888,12 @@ export class ApplyEngine {
 
     if (await this.workdayIsAuthed()) return true;
 
+    // Create-account rejected because the email is already registered → recover.
+    const alreadyExists = await this.page!.evaluate(() =>
+      (document.body.innerText || "").toLowerCase().includes("already exists")
+    ).catch(() => false);
+    if (alreadyExists && (await this.workdayPasswordRecovery(email, password))) return true;
+
     // Workday usually emails a verification code on account creation — if Gmail
     // is connected, fetch + enter it automatically, then re-check auth.
     if (await this.handleEmailVerificationIfPresent()) {
@@ -992,6 +902,70 @@ export class ApplyEngine {
     }
 
     return this.workdayIsAuthed();
+  }
+
+  // Workday password recovery: when an account exists but sign-in fails (wrong /
+  // forgotten password), run the "Forgot password" flow — request a reset email,
+  // read the emailed code via Gmail (reusing the OTP gate handler), set a new
+  // password (the stored one), and continue. Returns true only if it ends
+  // authenticated; otherwise the caller falls back to human takeover. Needs
+  // Gmail connected — there's no way to read the reset code without it.
+  private async workdayPasswordRecovery(email: string, newPassword: string): Promise<boolean> {
+    const status = await gmailStatus().catch(() => null);
+    if (!status?.connected) {
+      await Logger.warn("APPLY", "Workday password reset needs Gmail connected to read the code — handing to you");
+      return false;
+    }
+    await Logger.info("APPLY", "Workday: account exists — attempting automated password recovery");
+    this.logAction("workday_recovery", email);
+
+    // 1) Open the forgot-password form.
+    const opened = await this.clickFirstVisible(
+      ['[data-automation-id="forgotPasswordLink"]', 'a:has-text("Forgot")', 'button:has-text("Forgot")'],
+      "Workday → Forgot Password"
+    );
+    if (!opened) return false;
+    await this.delay(1200, 2200);
+
+    // 2) Enter the email + submit the reset request.
+    const emailEl = await this.page!
+      .$('input[data-automation-id="email"], input[data-automation-id="userName"], input[type="email"]')
+      .catch(() => null);
+    if (emailEl) { await emailEl.fill(email).catch(() => {}); await this.delay(300, 600); }
+    await this.clickFirstVisible(
+      ['[data-automation-id="email-form-submit-button"]', 'button:has-text("Reset")', 'button:has-text("Send")', 'button:has-text("Submit")', 'button[type="submit"]'],
+      "Workday Reset Request"
+    );
+    await this.delay(3500, 5500);
+
+    // 3) Fetch + enter the emailed reset code (reuses the OTP gate handler).
+    if (!(await this.handleEmailVerificationIfPresent())) {
+      await Logger.warn("APPLY", "Workday reset code didn't arrive / couldn't be entered — handing to you");
+      return false;
+    }
+    await this.delay(2000, 3500);
+
+    // 4) Set a new password (the stored one) on the reset form.
+    const newPassEl = await this.page!
+      .$('input[data-automation-id="newPassword"], input[data-automation-id="password"], input[type="password"]:not([data-automation-id="verifyNewPassword"]):not([data-automation-id="verifyPassword"])')
+      .catch(() => null);
+    if (newPassEl && (await newPassEl.isVisible().catch(() => false))) {
+      await newPassEl.fill(newPassword).catch(() => {});
+      const verifyEl = await this.page!
+        .$('input[data-automation-id="verifyNewPassword"], input[data-automation-id="verifyPassword"]')
+        .catch(() => null);
+      if (verifyEl) await verifyEl.fill(newPassword).catch(() => {});
+      await this.delay(300, 600);
+      await this.clickFirstVisible(
+        ['[data-automation-id="submitButton"]', 'button:has-text("Change Password")', 'button:has-text("Submit")', 'button:has-text("Save")', 'button[type="submit"]'],
+        "Workday Set New Password"
+      );
+      await this.delay(3000, 4500);
+    }
+
+    const ok = await this.workdayIsAuthed();
+    if (ok) await Logger.success("APPLY", "Workday password recovery succeeded — continuing");
+    return ok;
   }
 
   // Fill Workday email/password (+ verify-password on the create-account form).
@@ -1087,11 +1061,7 @@ export class ApplyEngine {
   // email"). When Gmail is connected, fetch the freshly-emailed code and enter
   // it automatically; otherwise return false so the existing human-takeover path
   // handles it. Returns true only when a code was filled + submitted.
-  private OTP_LABEL_RE =
-    /(?:verification|one[\s-]?time|security|confirmation|passcode|otp|auth(?:entication)?)\s*code|^\s*(?:otp|passcode)\s*$|enter\s+(?:the\s+)?(?:code|otp)|code\s+we\s+(?:sent|emailed)/i;
-  private OTP_EXCLUDE_RE =
-    /(?:zip|postal|post|area|country|dial|promo|coupon|discount|gift|referral|invite|sort)\s*code|postcode/i;
-
+  // OTP_LABEL_RE / OTP_EXCLUDE_RE now live in ./apply/selectors.
   private async handleEmailVerificationIfPresent(scope: string = "body"): Promise<boolean> {
     // Cheap pre-check: any code-ish input or one-time-code field on the page?
     const quick = await this.page!
@@ -1237,9 +1207,9 @@ export class ApplyEngine {
     // Single field whose label/attrs look like a verification code.
     const score = (v: { meta: Meta }): number => {
       const hay = `${v.meta.label} ${v.meta.name} ${v.meta.id} ${v.meta.placeholder} ${v.meta.aria}`;
-      if (this.OTP_EXCLUDE_RE.test(hay)) return -1;
+      if (OTP_EXCLUDE_RE.test(hay)) return -1;
       if (v.meta.autocomplete === "one-time-code") return 3;
-      if (this.OTP_LABEL_RE.test(hay)) return 2;
+      if (OTP_LABEL_RE.test(hay)) return 2;
       if (verifyContext && /\bcode\b|otp|pin/i.test(hay)) return 1;
       return 0;
     };
@@ -1367,24 +1337,7 @@ export class ApplyEngine {
   // The selectors that identify a genuine FINAL submit button (shared by the
   // clicker and the pre-submit probe).
   private finalSubmitCandidates(ats?: AtsAdapter | null): string[] {
-    return [
-      ...(ats?.submitButtons || []),
-      'button[aria-label="Submit application"]',
-      'button:has-text("Submit application")',
-      'button:has-text("Submit Application")',
-      'button:has-text("Submit your application")',
-      'button:has-text("Submit Your Application")',
-      'button:has-text("Send application")',
-      'button:has-text("Send Application")',
-      'button:has-text("Complete application")',
-      'button:has-text("Complete Application")',
-      'input[type="submit"][value*="Submit application" i]',
-      'a:has-text("Submit application")',
-      // Plain "Submit"/"Send" — last, and only as a final action.
-      'button:has-text("Submit")',
-      'button:has-text("Send")',
-      'input[type="submit"][value*="submit" i]',
-    ];
+    return [...(ats?.submitButtons || []), ...FINAL_SUBMIT_SELECTORS];
   }
 
   // Is a final-submit button visible right now (without clicking it)? Used to
@@ -1407,30 +1360,7 @@ export class ApplyEngine {
 
   // Click a button that ADVANCES to the next step of a multi-step form.
   private async clickAdvance(ats?: AtsAdapter | null): Promise<boolean> {
-    const candidates = [
-      ...(ats?.advanceButtons || []),
-      'button:has-text("Save & Go to Next Section")',
-      'button:has-text("Save and Go to Next Section")',
-      'button:has-text("Save & Continue")',
-      'button:has-text("Save and Continue")',
-      'button:has-text("Save & Next")',
-      'button:has-text("Continue to next step")',
-      'button[aria-label*="Continue to next step"]',
-      'button:has-text("Review your application")',
-      'button[aria-label*="Review"]',
-      'button:has-text("Review")',
-      'button:has-text("Continue")',
-      'button:has-text("Next")',
-      'button:has-text("Proceed")',
-      'button:has-text("Save and continue")',
-      '[data-automation-id="bottom-navigation-next-button"]',
-      'a:has-text("Continue")',
-      'a:has-text("Next")',
-      // Generic form-submit as a last resort (advances single-form steps).
-      'button[type="submit"]',
-      'input[type="submit"]',
-      '.btn-primary[type="submit"]',
-    ];
+    const candidates = [...(ats?.advanceButtons || []), ...ADVANCE_SELECTORS];
     return this.clickFirstVisible(candidates, "Next");
   }
 
@@ -1470,64 +1400,14 @@ export class ApplyEngine {
     return healed;
   }
 
-  // Intent → text patterns used by the self-healing fallback scan.
-  private intentTextPatterns(kind: string): RegExp {
-    const k = kind.toLowerCase();
-    if (k.includes("submit"))
-      return /\b(submit|send) (application|app)\b|submit$|send application|complete application/i;
-    if (k.includes("next") || k.includes("continue"))
-      return /\b(next|continue|save (and|&) (continue|next)|review|proceed|save (and|&) go)\b/i;
-    if (k.includes("sign in") || k.includes("login"))
-      return /\bsign in\b|\blog in\b|\blogin\b/i;
-    if (k.includes("create account"))
-      return /create account|sign up|register/i;
-    if (k.includes("apply"))
-      return /\bapply\b|easy apply|quick apply/i;
-    return new RegExp(kind.replace(/[^a-z0-9]+/gi, "\\s*"), "i");
-  }
-
   // Find + click the best-matching visible button/link by text for `kind`.
-  // Returns true and learns a stable selector if it succeeds.
+  // Returns true and learns a stable selector if it succeeds. The DOM scan +
+  // intent→text patterns now live in ./apply/dom-scripts + ./apply/selectors.
   private async healClick(kind: string): Promise<boolean> {
-    const rxSource = this.intentTextPatterns(kind).source;
-    const rxFlags = this.intentTextPatterns(kind).flags;
-
-    const found = await this.page!.evaluate(
-      ({ src, flags }) => {
-        const rx = new RegExp(src, flags);
-        const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim();
-        const els = Array.from(
-          document.querySelectorAll<HTMLElement>(
-            "button, a, input[type=submit], input[type=button], [role=button]"
-          )
-        );
-        for (const el of els) {
-          const r = el.getBoundingClientRect();
-          if (r.width === 0 || r.height === 0) continue;
-          if ((el as HTMLButtonElement).disabled) continue;
-          const label = norm(
-            el.innerText ||
-              (el as HTMLInputElement).value ||
-              el.getAttribute("aria-label") ||
-              ""
-          );
-          if (!label || !rx.test(label)) continue;
-          // Build a durable selector for this element.
-          let selector = "";
-          const id = el.id;
-          const aria = el.getAttribute("aria-label");
-          const auto = el.getAttribute("data-automation-id");
-          if (id) selector = `#${CSS.escape(id)}`;
-          else if (auto) selector = `[data-automation-id="${auto}"]`;
-          else if (aria) selector = `${el.tagName.toLowerCase()}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
-          // Mark the element so the caller can click it even without a selector.
-          el.setAttribute("data-jobagent-heal", "1");
-          return { selector, label: label.slice(0, 60) };
-        }
-        return null;
-      },
-      { src: rxSource, flags: rxFlags }
-    ).catch(() => null);
+    const rx = intentTextPatterns(kind);
+    const found = await this.page!
+      .evaluate(scanHealClick, { src: rx.source, flags: rx.flags })
+      .catch(() => null);
 
     if (!found) return false;
 
@@ -1627,18 +1507,21 @@ export class ApplyEngine {
     const valueToLabels = new Map<string, string[]>();
     for (const f of fields) {
       if (/^field_\d+$/i.test(f.label)) continue;
+      // Choice/ARIA controls have no readable text value here; their state is
+      // trusted (apply self-verifies) and required-but-empty is handled below.
+      const isChoice = ["checkbox", "radio", "aria-radio", "aria-combobox"].includes(f.type);
+      const frame = this.frameByKey(f.frameKey);
       let value = "";
       try {
-        if (f.type === "checkbox" || f.type === "radio") {
-          // Required single checkbox unchecked is caught below; skip value read.
+        if (isChoice) {
           value = "";
         } else if (f.type === "select") {
-          value = await this.page!.$eval(f.selector, (el) => {
+          value = await frame.$eval(f.selector, (el) => {
             const s = el as HTMLSelectElement;
             return s.options[s.selectedIndex]?.text?.trim() || "";
           }).catch(() => "");
         } else {
-          value = (await this.page!.inputValue(f.selector).catch(() => "")) || "";
+          value = (await frame.inputValue(f.selector).catch(() => "")) || "";
         }
       } catch { /* ignore unreadable field */ }
       value = value.trim();
@@ -1649,8 +1532,8 @@ export class ApplyEngine {
         sectionHeading: f.sectionHeading, options: f.options, required: f.required,
       });
 
-      // Required but empty (text/select only — checkboxes handled separately).
-      if (f.required && !value && f.type !== "checkbox" && f.type !== "radio") {
+      // Required but empty (text/select only — choice controls handled separately).
+      if (f.required && !value && !isChoice) {
         issues.push(`required field empty: "${f.label.slice(0, 40)}"`);
         continue;
       }
@@ -1659,7 +1542,7 @@ export class ApplyEngine {
         issues.push(`dropdown not chosen: "${f.label.slice(0, 40)}"`);
       }
       // A value that doesn't fit the field (email in name box, prose in yes/no…).
-      if (value && f.type !== "checkbox" && f.type !== "radio") {
+      if (value && !isChoice) {
         const v = validateValue(cls, value, f.options);
         if (!v.ok) issues.push(`"${f.label.slice(0, 40)}": ${v.reason}`);
       }
@@ -1671,7 +1554,7 @@ export class ApplyEngine {
         }
       }
       // Collect non-trivial values to detect the same answer repeated everywhere.
-      if (value && value.length > 3 && f.type !== "checkbox" && f.type !== "radio") {
+      if (value && value.length > 3 && !isChoice) {
         const k = value.toLowerCase();
         (valueToLabels.get(k) ?? valueToLabels.set(k, []).get(k)!).push(f.label);
       }
@@ -1757,21 +1640,7 @@ export class ApplyEngine {
   // ─── Popup dismissal ────────────────────────────────────────────────────────
 
   private async dismissPopups(): Promise<void> {
-    const dismissSelectors = [
-      'button[aria-label="Dismiss"]',
-      'button[aria-label="Close"]',
-      'button.contextual-sign-in-modal__modal-dismiss-icon',
-      '.modal__dismiss',
-      '#onetrust-accept-btn-handler',
-      'button[id*="accept-cookies"]',
-      'button:has-text("Accept all")',
-      'button:has-text("Accept")',
-      'button:has-text("I agree")',
-      'button:has-text("Got it")',
-      'button:has-text("Continue")',
-      '[data-testid="close-button"]',
-    ];
-    for (const sel of dismissSelectors) {
+    for (const sel of DISMISS_SELECTORS) {
       try {
         const btn = await this.page!.$(sel);
         if (btn && await btn.isVisible().catch(() => false)) {
@@ -2037,185 +1906,55 @@ export class ApplyEngine {
     return unfilled;
   }
 
+  // Detect fields across EVERY frame, not just the top document. Workday,
+  // iCIMS, and embedded Greenhouse render their forms inside iframes — the old
+  // top-frame-only scan literally couldn't see those fields, which is the main
+  // cause of "left blank" failures. Each field is tagged with its owning frame
+  // so the fill path targets the right document. The main frame uses the caller
+  // `scope`; child frames are scanned whole (their document IS the form).
   private async detectFields(scope: string): Promise<DetectedField[]> {
-    return this.page!.evaluate((scopeSel: string) => {
-      const root = document.querySelector(scopeSel) || document.body;
-      const results: Array<{
-        type: string;
-        label: string;
-        name?: string;
-        required: boolean;
-        options?: string[];
-        selector: string;
-        placeholder?: string;
-        ariaLabel?: string;
-        sectionHeading?: string;
-        maxLength?: number;
-      }> = [];
+    const page = this.page!;
+    const frames = page.frames();
+    const out: DetectedField[] = [];
+    for (let i = 0; i < frames.length; i++) {
+      const frame = frames[i];
+      const url = frame.url();
+      if (i > 0 && this.isThirdPartyFrame(url)) continue; // skip ads / captcha / analytics noise
+      const frameScope = i === 0 ? scope : "body";
+      let fields: DetectedField[] = [];
+      try {
+        fields = (await frame.evaluate(scanDetectFields, frameScope)) as DetectedField[];
+      } catch {
+        continue; // detached / navigating frame — skip this pass
+      }
+      const key = i === 0 ? "" : `${i}|${url}`;
+      for (const f of fields) {
+        f.frameKey = key;
+        out.push(f);
+      }
+    }
+    return out;
+  }
 
-      const clean = (s?: string | null) => (s || "").replace(/\s+/g, " ").trim();
+  // Resolve a field's owning frame from its key ("idx|url"); fall back to the
+  // main frame. Detect→fill happens in the same tick, so frame order is stable;
+  // we still match on url to survive the rare reorder.
+  private frameByKey(key?: string): Frame {
+    const page = this.page!;
+    if (!key) return page.mainFrame();
+    const frames = page.frames();
+    const sep = key.indexOf("|");
+    const idx = Number(key.slice(0, sep));
+    const url = key.slice(sep + 1);
+    const atIdx = frames[idx];
+    if (atIdx && atIdx.url() === url) return atIdx;
+    return frames.find((f) => f.url() === url) || atIdx || page.mainFrame();
+  }
 
-      // Resolve aria-labelledby → concatenated text of the referenced nodes.
-      const ariaLabelledByText = (el: Element): string => {
-        const ids = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
-        if (!ids.length) return "";
-        return ids
-          .map((id) => document.getElementById(id)?.textContent || "")
-          .map(clean)
-          .filter(Boolean)
-          .join(" ");
-      };
-
-      const getLabel = (el: Element): string => {
-        const elId = (el as HTMLInputElement).id;
-        if (elId) {
-          const lbl = document.querySelector(`label[for="${CSS.escape(elId)}"]`);
-          if (lbl) return clean(lbl.textContent);
-        }
-        const wrap = el.closest("label");
-        if (wrap) return clean(wrap.textContent);
-        const byId = ariaLabelledByText(el);
-        if (byId) return byId;
-        const parent = el.closest(
-          ".form-group, .jobs-easy-apply-form-element, [class*='field'], [class*='question'], fieldset, [data-automation-id]"
-        );
-        if (parent) {
-          const lbl = parent.querySelector("label, legend, .label, h3, h4, [class*='label'], [class*='title']");
-          if (lbl && lbl !== el) return clean(lbl.textContent);
-        }
-        return clean(
-          (el as HTMLInputElement).getAttribute("aria-label") ||
-          (el as HTMLInputElement).placeholder ||
-          (el as HTMLInputElement).name ||
-          ""
-        );
-      };
-
-      // Nearest section heading ABOVE the field — only consulted by the
-      // classifier when the field's own text is inconclusive, so it can't
-      // override a clear label. Conservative: search within the closest
-      // section-like ancestor and its preceding siblings.
-      const getSectionHeading = (el: Element): string => {
-        const HEAD = /^(H[1-4]|LEGEND)$/;
-        let node: Element | null = el;
-        for (let depth = 0; depth < 6 && node; depth++) {
-          let sib: Element | null = node.previousElementSibling;
-          while (sib) {
-            if (HEAD.test(sib.tagName)) {
-              const t = clean(sib.textContent);
-              if (t && t.length < 120) return t;
-            }
-            const h = sib.querySelector?.("h1,h2,h3,h4,legend");
-            const ht = clean(h?.textContent);
-            if (ht && ht.length < 120) return ht;
-            sib = sib.previousElementSibling;
-          }
-          node = node.parentElement;
-        }
-        return "";
-      };
-
-      const makeSelector = (el: Element): string => {
-        const elId = (el as HTMLInputElement).id;
-        if (elId) return `#${CSS.escape(elId)}`;
-        const name = (el as HTMLInputElement).name;
-        if (name) return `[name="${name}"]`;
-        return "";
-      };
-
-      const inputs = root.querySelectorAll(
-        'input:not([type="hidden"]):not([type="submit"]):not([type="file"]):not([type="button"]):not([type="image"]), textarea, select'
-      );
-
-      inputs.forEach((el) => {
-        const htmlEl = el as HTMLElement;
-        // Skip completely invisible (display:none, visibility:hidden)
-        const style = window.getComputedStyle(htmlEl);
-        if (style.display === "none" || style.visibility === "hidden") return;
-
-        // Allow elements that might be scrolled out of view (still need width/height)
-        const rect = htmlEl.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-
-        const label = getLabel(el);
-        const selector = makeSelector(el);
-        if (!selector) return;
-
-        const type = el.tagName === "SELECT"
-          ? "select"
-          : el.tagName === "TEXTAREA"
-          ? "textarea"
-          : (el as HTMLInputElement).type || "text";
-
-        const options = el.tagName === "SELECT"
-          ? Array.from((el as HTMLSelectElement).options).map((o) => o.text.trim()).filter(Boolean)
-          : undefined;
-
-        results.push({
-          type,
-          label: label || `field_${results.length}`,
-          name: (el as HTMLInputElement).name || undefined,
-          required: (el as HTMLInputElement).required || false,
-          options,
-          selector,
-          placeholder: clean((el as HTMLInputElement).placeholder) || undefined,
-          ariaLabel: clean((el as HTMLInputElement).getAttribute("aria-label")) || undefined,
-          sectionHeading: getSectionHeading(el) || undefined,
-          maxLength: (el as HTMLInputElement).maxLength > 0 ? (el as HTMLInputElement).maxLength : undefined,
-        });
-      });
-
-      // Radio groups
-      const fieldsets = root.querySelectorAll("fieldset");
-      fieldsets.forEach((fs) => {
-        const legend = clean(fs.querySelector("legend")?.textContent);
-        const radios = Array.from(fs.querySelectorAll('input[type="radio"]'));
-        if (radios.length === 0) return;
-
-        const label = legend || clean(fs.querySelector("[class*='label']")?.textContent) || "";
-        if (!label) return;
-
-        const options = radios.map((r) => {
-          const rid = (r as HTMLInputElement).id;
-          const lbl = rid ? document.querySelector(`label[for="${CSS.escape(rid)}"]`)?.textContent?.trim() : "";
-          return lbl || (r as HTMLInputElement).value;
-        }).filter(Boolean);
-
-        const firstRadio = radios[0] as HTMLInputElement;
-        const groupSelector = firstRadio.name ? `input[type="radio"][name="${firstRadio.name}"]` : "";
-
-        if (groupSelector) {
-          results.push({
-            type: "radio",
-            label,
-            name: firstRadio.name,
-            required: false,
-            options,
-            selector: groupSelector,
-            // The legend IS the question; surface it as section heading too.
-            sectionHeading: getSectionHeading(fs) || undefined,
-          });
-        }
-      });
-
-      // Standalone checkboxes (e.g., "I agree to terms")
-      const checkboxes = root.querySelectorAll('input[type="checkbox"]');
-      checkboxes.forEach((cb) => {
-        const label = getLabel(cb);
-        const selector = makeSelector(cb);
-        if (!selector || !label) return;
-        results.push({
-          type: "checkbox",
-          label,
-          name: (cb as HTMLInputElement).name,
-          required: false,
-          selector,
-          sectionHeading: getSectionHeading(cb) || undefined,
-        });
-      });
-
-      return results;
-    }, scope) as Promise<DetectedField[]>;
+  // Frames we never want to fill into — third-party widgets that show up as
+  // iframes on application pages but never contain the application form.
+  private isThirdPartyFrame(url: string): boolean {
+    return /recaptcha|hcaptcha|gstatic\.com|google\.com\/recaptcha|doubleclick|googletagmanager|google-analytics|youtube\.com|facebook\.com|twitter\.com|linkedin\.com\/(li\/|px\/)|datadoghq|segment\.|hotjar|intercom|drift\.com|optimizely/i.test(url);
   }
 
   // Fills one field. Returns true if it was filled (or safely skippable),
@@ -2235,9 +1974,9 @@ export class ApplyEngine {
     }
 
     // Skip pre-filled text fields
-    if (!["radio", "checkbox", "select"].includes(field.type)) {
+    if (!["radio", "checkbox", "select", "aria-radio", "aria-combobox"].includes(field.type)) {
       try {
-        const cur = await this.page!.inputValue(field.selector).catch(() => "");
+        const cur = await this.frameByKey(field.frameKey).inputValue(field.selector).catch(() => "");
         if (cur.trim().length > 0) {
           await Logger.info("APPLY", `  ✓ pre-filled: "${field.label}" = "${cur.slice(0, 50)}"`);
           return true;
@@ -2306,15 +2045,20 @@ export class ApplyEngine {
 
     // 1) Memory (exact + semantic) — never for sensitive categories. Ignore a
     //    stored value that fails validation (protects against poisoned memory).
+    //    suggestAnswer returns a calibrated confidence (exact > semantic) which
+    //    we cap by category trust so an unknown-category memory still pauses.
     if (!answer && !isSensitive(cls.category)) {
-      const mem = await findAnswer(field.label);
-      if (mem && accept(mem)) {
-        answer = mem;
-        confidence = cls.category === "unknown" ? 0.6 : 0.9;
-        source = cls.category === "unknown" ? "memory-unverified" : "memory";
-        await Logger.info("APPLY", `  💾 memory: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
-      } else if (mem) {
-        await Logger.warn("APPLY", `  ✗ ignoring memory "${mem.slice(0, 40)}…" — fails [${cls.category}/${cls.domKind}] validation`);
+      const sug = await suggestAnswer(field.label);
+      if (sug && accept(sug.answer)) {
+        answer = sug.answer;
+        // Known category: trust the suggestion's confidence (≤0.9, so it stays
+        // in fill-and-verify, never blind autofill). Unknown category: cap low
+        // so it pauses for review.
+        confidence = cls.category === "unknown" ? Math.min(0.6, sug.confidence) : sug.confidence;
+        source = cls.category === "unknown" ? `memory-unverified(${sug.source})` : `memory(${sug.source})`;
+        await Logger.info("APPLY", `  💾 memory[${sug.source} ${Math.round(sug.confidence * 100)}%]: "${field.label.slice(0, 60)}" → "${answer.slice(0, 60)}"`);
+      } else if (sug) {
+        await Logger.warn("APPLY", `  ✗ ignoring memory "${sug.answer.slice(0, 40)}…" — fails [${cls.category}/${cls.domKind}] validation`);
       }
     }
 
@@ -2393,7 +2137,28 @@ export class ApplyEngine {
       return false;
     }
 
-    const applied = await this.applyAnswer(field, answer, resolution?.spec.kind);
+    let applied = await this.applyAnswer(field, answer, resolution?.spec.kind, !isSensitive(cls.category));
+
+    // Retry loop: a choice field (select/radio/aria) may list the answer under
+    // different wording than the profile value (e.g. profile "Master's" vs the
+    // dropdown's "Graduate Degree"). For NON-sensitive fields only, try one
+    // alternative phrasing from memory before giving up.
+    if (
+      !applied &&
+      !isSensitive(cls.category) &&
+      ["select", "radio", "aria-radio", "aria-combobox"].includes(field.type)
+    ) {
+      const alt = await findAnswer(field.label).catch(() => null);
+      if (alt && alt !== answer && accept(alt)) {
+        await Logger.info("APPLY", `  ↻ retrying "${field.label.slice(0, 40)}" with alternative "${alt.slice(0, 30)}"`);
+        applied = await this.applyAnswer(field, alt, resolution?.spec.kind, true);
+        if (applied) {
+          answer = alt;
+          source = source ? `${source}→memory-alt` : "memory-alt";
+        }
+      }
+    }
+
     if (!applied) {
       // Couldn't confidently apply (e.g. no/ambiguous dropdown option) — pause.
       await Logger.warn("APPLY", `  ⚠ couldn't apply a clear value to "${field.label.slice(0, 50)}" (${cls.domKind}) — leaving blank for your review`);
@@ -2424,17 +2189,20 @@ export class ApplyEngine {
   // Read back a text/select field to confirm our value actually applied.
   // Radios/checkboxes are trusted (toggleCheckable already self-verifies).
   private async verifyFieldValue(field: DetectedField, expected: string): Promise<boolean> {
-    if (field.type === "radio" || field.type === "checkbox") return true;
+    // Checkables (native + ARIA) self-verify on apply; the click either took or
+    // it didn't, and there's no readable text value to compare against.
+    if (["radio", "checkbox", "aria-radio", "aria-combobox"].includes(field.type)) return true;
+    const frame = this.frameByKey(field.frameKey);
     try {
       if (field.type === "select") {
-        const text = await this.page!.$eval(field.selector, (el) => {
+        const text = await frame.$eval(field.selector, (el) => {
           const s = el as HTMLSelectElement;
           return s.options[s.selectedIndex]?.text?.trim().toLowerCase() || "";
         }).catch(() => "");
         // A non-empty, non-placeholder selection counts as success.
         return !!text && !/^(select|choose|--|please)/.test(text);
       }
-      const cur = (await this.page!.inputValue(field.selector).catch(() => "")) || "";
+      const cur = (await frame.inputValue(field.selector).catch(() => "")) || "";
       if (!cur.trim()) return false;
       // Field-shortening (truncation/formatting) is fine — check overlap.
       const a = cur.toLowerCase().trim(), b = expected.toLowerCase().trim();
@@ -2499,17 +2267,21 @@ export class ApplyEngine {
   // Apply a value to a field. Returns false when it could NOT confidently set
   // the value (no dropdown/radio option matched, or the match was ambiguous) so
   // the caller can pause for the human instead of leaving a wrong/blank choice.
-  private async applyAnswer(field: DetectedField, answer: string, kind?: string): Promise<boolean> {
+  private async applyAnswer(field: DetectedField, answer: string, kind?: string, allowFallback = false): Promise<boolean> {
+    // Operate inside the frame that actually owns the field (iframe ATS forms).
+    const frame = this.frameByKey(field.frameKey);
+
     if (field.type === "select") {
-      const options = await this.page!.$$eval(
+      const options = await frame.$$eval(
         `${field.selector} option`,
         (opts) => opts.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent?.trim() || "" }))
-      ).catch(() => []);
+      ).catch(() => [] as { value: string; text: string }[]);
 
       // Phase 5: scored, deterministic match (state/country/degree/yesno aware).
       // Never type blindly — match against the REAL options, and pause when the
-      // best match is weak or ambiguous between two options.
-      const m = matchDropdownOptionScored(answer, options, kind);
+      // best match is weak or ambiguous between two options. For non-sensitive
+      // fields, allowFallback lets a substring/token-overlap resolve a tie.
+      const m = matchDropdownOptionScored(answer, options, kind, { allowFallback });
       if (!m.value || m.ambiguous) {
         await Logger.warn(
           "APPLY",
@@ -2517,10 +2289,10 @@ export class ApplyEngine {
         );
         return false;
       }
-      await this.page!.selectOption(field.selector, m.value).catch(() => {});
+      await frame.selectOption(field.selector, m.value).catch(() => {});
       return true;
     } else if (field.type === "radio") {
-      const radios = await this.page!.$$(field.selector);
+      const radios = await frame.$$(field.selector);
       // Read each radio's label, then reuse the same scored matcher (options
       // keyed by index) so radios get identical synonym/ambiguity handling.
       const labels: string[] = [];
@@ -2528,13 +2300,14 @@ export class ApplyEngine {
         labels.push(
           await radio.evaluate((el) => {
             const id = (el as HTMLInputElement).id;
-            const lbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim() : "";
+            const r = el.getRootNode() as Document | ShadowRoot;
+            const lbl = id ? r.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim() : "";
             return (lbl || (el as HTMLInputElement).value || "").trim();
           }).catch(() => "")
         );
       }
       const opts = labels.map((t, i) => ({ value: String(i), text: t }));
-      const m = matchDropdownOptionScored(answer, opts, kind);
+      const m = matchDropdownOptionScored(answer, opts, kind, { allowFallback });
       if (m.value === null || m.ambiguous) {
         await Logger.warn(
           "APPLY",
@@ -2544,15 +2317,71 @@ export class ApplyEngine {
       }
       await this.toggleCheckable(radios[Number(m.value)], true);
       return true;
+    } else if (field.type === "aria-radio") {
+      // div[role=radiogroup] with [role=radio] children — no native input to
+      // toggle, so match by accessible label and click the chosen option.
+      const radios = await frame.$$(`${field.selector} [role="radio"]`);
+      const labels: string[] = [];
+      for (const r of radios) {
+        labels.push(
+          await r.evaluate((el) => (el.getAttribute("aria-label") || el.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "")
+        );
+      }
+      const opts = labels.map((t, i) => ({ value: String(i), text: t }));
+      const m = matchDropdownOptionScored(answer, opts, kind, { allowFallback });
+      if (m.value === null || m.ambiguous) {
+        await Logger.warn("APPLY", `  ⚠ ${m.ambiguous ? "ambiguous" : "no"} ARIA-radio match for "${answer.slice(0, 30)}" in "${field.label.slice(0, 40)}" — leaving for you`);
+        return false;
+      }
+      await radios[Number(m.value)].click({ timeout: 3000 }).catch(() => {});
+      return true;
+    } else if (field.type === "aria-combobox") {
+      return this.fillAriaCombobox(frame, field, answer, kind, allowFallback);
     } else if (field.type === "checkbox") {
       const shouldCheck = /yes|true|agree|accept|authorize|confirm|check|i certify|acknowledge/i.test(answer);
-      const cb = await this.page!.$(field.selector);
+      const cb = await frame.$(field.selector);
       if (!cb) return false;
       await this.toggleCheckable(cb, shouldCheck);
       return true;
+    } else if (field.inputType === "range") {
+      // A slider has no safe deterministic mapping from a text answer — never
+      // guess a position; pause for the human.
+      return false;
     } else {
-      await this.page!.fill(field.selector, answer).catch(() => {});
+      await frame.fill(field.selector, answer).catch(() => {});
       return true;
+    }
+  }
+
+  // Fill a pure-ARIA combobox (button + popup listbox, no backing <input>):
+  // open it, read the now-visible options, scored-match, and click — or pause.
+  // Custom widgets vary wildly, so anything uncertain returns false (human).
+  private async fillAriaCombobox(frame: Frame, field: DetectedField, answer: string, kind?: string, allowFallback = false): Promise<boolean> {
+    try {
+      const control = await frame.$(field.selector);
+      if (!control) return false;
+      await control.click({ timeout: 3000 }).catch(() => {});
+      await this.delay(300, 650);
+
+      const raw = await frame.$$('[role="option"]');
+      const visible: { handle: import("playwright").ElementHandle<Element>; text: string }[] = [];
+      for (const o of raw) {
+        if (!(await o.isVisible().catch(() => false))) continue;
+        const text = await o.evaluate((e) => (e.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "");
+        if (text) visible.push({ handle: o, text });
+      }
+      if (!visible.length) return false;
+
+      const opts = visible.map((v, i) => ({ value: String(i), text: v.text }));
+      const m = matchDropdownOptionScored(answer, opts, kind, { allowFallback });
+      if (m.value === null || m.ambiguous) {
+        await Logger.warn("APPLY", `  ⚠ ${m.ambiguous ? "ambiguous" : "no"} combobox match for "${answer.slice(0, 30)}" in "${field.label.slice(0, 40)}" — leaving for you`);
+        return false;
+      }
+      await visible[Number(m.value)].handle.click({ timeout: 2000 }).catch(() => {});
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -2582,7 +2411,8 @@ export class ApplyEngine {
     try {
       const id = await handle.evaluate((el) => (el as HTMLInputElement).id).catch(() => "");
       if (id) {
-        const lbl = await this.page!.$(`label[for="${id}"]`);
+        const owner = (await handle.ownerFrame().catch(() => null)) || this.page!.mainFrame();
+        const lbl = await owner.$(`label[for="${id}"]`);
         if (lbl) {
           await lbl.click({ timeout: 3000 }).catch(() => {});
           if ((await isChecked()) === target) return;
@@ -2679,18 +2509,27 @@ export class ApplyEngine {
   // navigates. Used to detect when the human has finished helping.
   private async combinedFormState(scope: string): Promise<string> {
     try {
-      const url = this.page!.url().split("?")[0];
-      const fill = await this.page!.evaluate((sel: string) => {
-        const root = document.querySelector(sel) || document.body;
-        const els = root.querySelectorAll("input, textarea, select");
-        let s = "";
-        els.forEach((el) => {
-          const e = el as HTMLInputElement;
-          if (e.type === "checkbox" || e.type === "radio") s += e.checked ? "1" : "0";
-          else s += `${(e.value || "").length}:`; // length only — keeps PII out of logs
-        });
-        return s;
-      }, scope);
+      const page = this.page!;
+      const url = page.url().split("?")[0];
+      const frames = page.frames();
+      const snap = async (frame: Frame, sel: string): Promise<string> =>
+        frame.evaluate((s: string) => {
+          const root = document.querySelector(s) || document.body;
+          if (!root) return "";
+          const els = root.querySelectorAll("input, textarea, select");
+          let out = "";
+          els.forEach((el) => {
+            const e = el as HTMLInputElement;
+            if (e.type === "checkbox" || e.type === "radio") out += e.checked ? "1" : "0";
+            else out += `${(e.value || "").length}:`; // length only — keeps PII out of logs
+          });
+          return out;
+        }, sel).catch(() => "");
+      let fill = "";
+      for (let i = 0; i < frames.length; i++) {
+        if (i > 0 && this.isThirdPartyFrame(frames[i].url())) continue;
+        fill += await snap(frames[i], i === 0 ? scope : "body");
+      }
       return `${url}||${fill}`;
     } catch {
       return Math.random().toString();
@@ -2708,14 +2547,15 @@ export class ApplyEngine {
       let saved = 0;
       for (const f of fields) {
         if (/^field_\d+$/i.test(f.label)) continue; // unlabeled — can't reuse meaningfully
-        if (f.type === "checkbox" || f.type === "radio") continue;
+        if (["checkbox", "radio", "aria-radio", "aria-combobox"].includes(f.type)) continue;
         // Never memorize one-time / email verification codes — they're single-use,
         // so a captured "Security code" → "B" would only poison future applies.
-        if (this.OTP_LABEL_RE.test(f.label) && !this.OTP_EXCLUDE_RE.test(f.label)) continue;
+        if (OTP_LABEL_RE.test(f.label) && !OTP_EXCLUDE_RE.test(f.label)) continue;
 
+        const frame = this.frameByKey(f.frameKey);
         let value = "";
         if (f.type === "select") {
-          value = await this.page!.$eval(
+          value = await frame.$eval(
             f.selector,
             (el) => {
               const s = el as HTMLSelectElement;
@@ -2723,7 +2563,7 @@ export class ApplyEngine {
             }
           ).catch(() => "");
         } else {
-          value = (await this.page!.inputValue(f.selector).catch(() => "")) || "";
+          value = (await frame.inputValue(f.selector).catch(() => "")) || "";
         }
 
         value = value.trim();
@@ -2843,6 +2683,42 @@ export class ApplyEngine {
       const safe = label.replace(/[^a-z0-9_\-.]/gi, "_");
       saveFile(folderPath, `${safe}.html`, html);
     } catch { /* ignore */ }
+  }
+
+  // ─── Submission receipt ───────────────────────────────────────────────────────
+  // Tsenta-style proof of submission: on a confirmed apply, capture the
+  // confirmation sentence, any reference/confirmation number on the page, and a
+  // full-page screenshot. Persisted into the Application's existing receipt
+  // fields so the UI can show "submitted, here's the proof".
+  private async captureReceipt(
+    folderPath: string | null
+  ): Promise<{ confirmationText: string | null; confirmationId: string | null; screenshotPath: string | null }> {
+    const empty = { confirmationText: null, confirmationId: null, screenshotPath: null };
+    if (!this.page) return empty;
+    try {
+      const body = await this.page
+        .evaluate(() => (document.body.innerText ?? "").replace(/\s+/g, " ").trim().slice(0, 2000))
+        .catch(() => "");
+
+      // A confirmation/reference number if the page shows one.
+      const idMatch = body.match(
+        /(?:confirmation|reference|application|tracking|req(?:uisition)?)\s*(?:#|number|no\.?|id)?\s*[:#]?\s*([A-Z0-9][A-Z0-9-]{4,})/i
+      );
+      // A short confirmation sentence, else the first slice of the page text.
+      const sentence = body.match(
+        /[^.!?]*\b(?:thank you for applying|application (?:submitted|received|complete)|successfully submitted|we (?:have )?received your application)\b[^.!?]*[.!?]/i
+      );
+      const confirmationText = (sentence?.[0] || body.slice(0, 240)).trim() || null;
+
+      let screenshotPath: string | null = null;
+      if (folderPath) {
+        const buf = await this.page.screenshot({ fullPage: true }).catch(() => null);
+        if (buf) screenshotPath = saveScreenshot(folderPath, buf, "receipt.png");
+      }
+      return { confirmationText, confirmationId: idMatch?.[1] ?? null, screenshotPath };
+    } catch {
+      return empty;
+    }
   }
 }
 

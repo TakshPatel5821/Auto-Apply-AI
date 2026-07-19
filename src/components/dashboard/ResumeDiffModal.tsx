@@ -27,6 +27,7 @@ interface DiffData {
   sectionsModified: string[];
   tailoringNotes: string | null;
   hasBaseline: boolean;
+  coverLetter: string | null;
 }
 
 export function ResumeDiffModal({
@@ -38,6 +39,7 @@ export function ResumeDiffModal({
 }) {
   const [data, setData] = useState<DiffData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<"resume" | "cover">("resume");
 
   useEffect(() => {
     let cancelled = false;
@@ -74,11 +76,32 @@ export function ResumeDiffModal({
         <div className="flex items-start justify-between px-5 py-3 border-b border-gray-800">
           <div>
             <h3 className="text-white font-semibold">
-              Résumé diff{data ? ` — ${data.jobTitle} @ ${data.companyName}` : ""}
+              Review before submitting{data ? ` — ${data.jobTitle} @ ${data.companyName}` : ""}
             </h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              Left: base résumé · Right: tailored for this job
+              {view === "resume" ? "Left: base résumé · Right: tailored for this job" : "Cover letter to be submitted"}
             </p>
+            {/* Tabs — both artifacts being submitted are reviewable here. */}
+            <div className="mt-2 flex gap-1">
+              <button
+                onClick={() => setView("resume")}
+                className={`px-2.5 py-1 rounded-md text-xs transition-colors ${
+                  view === "resume" ? "bg-purple-500/20 text-purple-200" : "text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                Résumé diff
+              </button>
+              <button
+                onClick={() => setView("cover")}
+                disabled={!data?.coverLetter}
+                className={`px-2.5 py-1 rounded-md text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  view === "cover" ? "bg-purple-500/20 text-purple-200" : "text-gray-500 hover:text-gray-300"
+                }`}
+                title={data?.coverLetter ? "" : "No cover letter generated for this job"}
+              >
+                Cover letter
+              </button>
+            </div>
           </div>
           <button
             onClick={onClose}
@@ -122,6 +145,12 @@ export function ResumeDiffModal({
           ) : !data ? (
             <div className="flex items-center justify-center h-full text-gray-500 gap-2">
               <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+            </div>
+          ) : view === "cover" ? (
+            <div className="h-full overflow-auto px-6 py-4">
+              <pre className="whitespace-pre-wrap font-sans text-sm text-gray-200 leading-relaxed">
+                {data.coverLetter || "No cover letter was generated for this application."}
+              </pre>
             </div>
           ) : !data.hasBaseline ? (
             <div className="flex items-center justify-center h-full text-gray-500 text-center px-8">

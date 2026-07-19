@@ -9,7 +9,8 @@ export default defineConfig({
     alias: { "@": path.resolve(__dirname, "src") },
   },
   test: {
-    include: ["test/**/*.test.ts"],
+    // Top-level unit tests plus the colocated tailoring suite (src/lib/tailoring/__tests__).
+    include: ["test/**/*.test.ts", "src/**/*.test.ts"],
     environment: "node",
   },
 });

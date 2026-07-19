@@ -132,22 +132,22 @@ const CATEGORY_PATTERNS: { cat: FieldCategory; rx: RegExp }[] = [
   { cat: "disability", rx: /disab(led|ility)|accommodation|section\s*503/i },
 
   // Salary / compensation.
-  { cat: "salary", rx: /salary|compensation|expected\s*pay|desired\s*pay|pay\s*expectation|hourly\s*rate|ctc|expected\s*ctc|rate\s*expectation|minimum.*(salary|pay|rate)/i },
+  { cat: "salary", rx: /salary|compensation|expected\s*pay|desired\s*pay|pay\s*expectation|hourly\s*rate|ctc|expected\s*ctc|rate\s*expectation|minimum.*(salary|pay|rate)|\bwage\b|remuneration|stipend/i },
 
   // Availability / logistics.
-  { cat: "availability", rx: /start\s*date|available.*start|notice\s*period|when\s*can\s*you\s*(start|begin)|willing\s*to\s*relocate|relocat|willing\s*to\s*travel|work\s*from\s*(the\s*)?office|onsite|remote\s*preference|preferred\s*(office\s*)?location/i },
+  { cat: "availability", rx: /start\s*date|available.*start|notice\s*period|when\s*can\s*you\s*(start|begin)|willing\s*to\s*relocate|relocat|willing\s*to\s*travel|work\s*from\s*(the\s*)?office|onsite|remote\s*preference|preferred\s*(office\s*)?location|over\s*time\b|overtime|weekends?|night\s*shift|shift\s*work|able\s*to\s*commute|\bcommute\b|earliest\s*(available|start|date)|how\s*soon|available\s*to\s*(start|begin|join)|date\s*available|join(ing)?\s*date/i },
 
   // Education.
   { cat: "education", rx: /degree|qualification|major|field\s*of\s*study|concentration|\bgpa\b|grade\s*point|university|college|school|institution|alma\s*mater|graduat(e|ion)|education\s*level/i },
 
   // Work experience (years / current role) — NOT essays.
-  { cat: "work_experience", rx: /years?\s*of\s*experience|years?\s*experience|total\s*experience|relevant\s*experience|current\s*(employer|company|title|role|position)|present\s*(employer|company|title|role|position)|most\s*recent\s*(employer|company|title|role|position)|employment\s*history|work\s*history/i },
+  { cat: "work_experience", rx: /years?\s*of\s*experience|years?\s*experience|total\s*experience|relevant\s*experience|how\s*many\s*years|number\s*of\s*years|seniority\s*level|current\s*(employer|company|title|role|position)|present\s*(employer|company|title|role|position)|most\s*recent\s*(employer|company|title|role|position)|employment\s*history|work\s*history/i },
 
   // Skills.
-  { cat: "skills", rx: /\bskills?\b|technolog(y|ies)|programming\s*languages?|tools?\s*you|tech\s*stack|proficienc/i },
+  { cat: "skills", rx: /\bskills?\b|technolog(y|ies)|programming\s*languages?|tools?\s*you|tech\s*stack|proficienc|core\s*competenc|areas?\s*of\s*expertise/i },
 
   // Contact — BEFORE address so "Email Address" is contact, not address.
-  { cat: "contact", rx: /e-?mail|phone|mobile|telephone|\bcell\b|contact\s*number|linkedin|github|portfolio|website|personal\s*site|profile\s*url|profile\s*link|\burl\b/i },
+  { cat: "contact", rx: /e-?mail|phone|mobile|telephone|\bcell\b|contact\s*number|linkedin|github|gitlab|portfolio|website|personal\s*site|profile\s*url|profile\s*link|\burl\b|stack\s*overflow|behance|dribbble|twitter/i },
 
   // Address.
   { cat: "address", rx: /street|address|\bcity\b|town|\bstate\b|province|\bzip\b|postal\s*code|post\s*code|\bcountry\b|location/i },
@@ -357,9 +357,18 @@ export function validateValue(
       if (looksLikeEmail(v) || looksLikeUrl(v)) return { ok: false, reason: "email/URL in a work-history field" };
       if (PROSE_RX.test(v) || wordCount(v) > 12) return { ok: false, reason: "prose in a work-history field" };
       return { ok: true };
-    case "salary":
-      if (digitCount(v) === 0) return { ok: false, reason: "salary with no number" };
+    case "salary": {
+      // Amount fields want a number; but a currency-code dropdown ("USD"), a
+      // currency symbol, or a deliberate non-numeric placeholder ("Negotiable",
+      // "Competitive", "Market rate") are all legitimate salary answers too.
+      const okCurrencyCode = /^(usd|eur|gbp|inr|cad|aud|chf|jpy|sgd|aed|nzd|zar)$/i.test(v);
+      const okSymbol = /[$€£₹¥]/.test(v);
+      const okPlaceholder = /^(negotiable|competitive|market(\s*rate)?|open|flexible|as\s*per\s*(company\s*)?standards?|doe|tbd|n\/?a)$/i.test(v);
+      if (digitCount(v) === 0 && !okCurrencyCode && !okSymbol && !okPlaceholder) {
+        return { ok: false, reason: "salary with no number" };
+      }
       return { ok: true };
+    }
     case "work_authorization":
     case "sponsorship":
       // These are yes/no — never a paragraph.

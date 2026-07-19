@@ -2,7 +2,7 @@ import { writeFileSync } from "fs";
 import { join } from "path";
 import { prisma } from "@/lib/db/prisma";
 import { scrapingOrchestrator } from "@/lib/scraping/scraping-orchestrator";
-import { tailorResumeForJob } from "./resume-tailor";
+import { tailorJob, EligibilityError } from "@/lib/tailoring";
 import { claudeMatchJobToResume } from "@/lib/ai/claude";
 import { atsKeywordPct } from "@/lib/ai/ats-analyzer";
 import { extractRequiredYears } from "@/lib/matching/fast-filter";
@@ -337,7 +337,7 @@ class AutomationEngine {
       // is left for a later run rather than blocking everything behind it.
       const tailorMs = Number(process.env.TAILOR_TIMEOUT_MS) || 240000;
       const { tailoredResumeId, coverLetterId } = (await Promise.race([
-        tailorResumeForJob(this.runResumeId, jobId),
+        tailorJob(this.runResumeId, jobId),
         new Promise((_, rej) => setTimeout(() => rej(new Error("tailor timeout — AI not responding")), tailorMs)),
       ])) as { tailoredResumeId: string; coverLetterId: string };
       const folderPath = getApplicationFolder(job.companyName, job.jobTitle);
@@ -376,6 +376,11 @@ class AutomationEngine {
 
       await saveExcelTracker();
     } catch (e) {
+      if (e instanceof EligibilityError) {
+        await prisma.job.update({ where: { id: jobId }, data: { status: "SKIPPED" } }).catch(() => {});
+        await Logger.info("ENGINE", `Skipped ${job.companyName}: ${e.reason}`);
+        return;
+      }
       await Logger.error("ENGINE", `Tailoring failed for ${job.companyName}: ${e}`);
     }
   }
