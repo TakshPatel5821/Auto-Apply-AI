@@ -106,7 +106,7 @@
     document.getElementById(OVERLAY_ID)?.remove();
   }
   const COLORS = {
-    profile: { bg: "#064e3b", fg: "#6ee7b7", txt: "from profile" },
+    profile: { bg: "#064e3b", fg: "#6ee7b7", txt: "from profile" }, 
     ai: { bg: "#1e3a8a", fg: "#93c5fd", txt: "AI draft" },
     pause: { bg: "#78350f", fg: "#fcd34d", txt: "asks you" },
   };
