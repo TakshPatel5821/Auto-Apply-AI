@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth/session";
 import { prisma } from "@/lib/db/prisma";
-import { tailorResumeForJob } from "@/lib/automation/resume-tailor";
+import { tailorJob, EligibilityError } from "@/lib/tailoring";
 import { ApplyEngine } from "@/lib/automation/apply-engine";
 import { getApplicationFolder } from "@/lib/storage/file-manager";
 import { Logger } from "@/lib/logging/logger";
@@ -42,10 +42,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No active resume found" }, { status: 400 });
     }
 
-    const { tailoredResumeId, coverLetterId } = await tailorResumeForJob(
-      activeResume,
-      jobId
-    );
+    let tailored;
+    try {
+      tailored = await tailorJob(activeResume, jobId);
+    } catch (e) {
+      if (e instanceof EligibilityError) {
+        // Soft-skip: not a fit for this candidate. 200 so the UI can show the reason.
+        return NextResponse.json({ success: false, skipped: true, reason: e.reason });
+      }
+      throw e;
+    }
+    const { tailoredResumeId, coverLetterId } = tailored;
 
     const job = await prisma.job.findUnique({ where: { id: jobId } });
     if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });

@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   if (!(await getSession())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { id, enabled, jobsUrl } = await req.json();
+  const { id, enabled, jobsUrl, selectors } = await req.json();
   const settings = await prisma.userSettings.findUnique({ where: { userId: "local" } });
   const sites = getSites(settings).map((s) => {
     if (s.id !== id) return s;
@@ -63,6 +63,7 @@ export async function PUT(req: NextRequest) {
       ...s,
       ...(enabled !== undefined && { enabled }),
       ...(jobsUrl !== undefined && { jobsUrl }),
+      ...(selectors !== undefined && { selectors }),
     };
   });
 

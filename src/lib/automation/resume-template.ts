@@ -98,6 +98,7 @@ export interface ResumeOverrides {
   experienceBullets?: string[][]; // per experience entry, in order
   projectBullets?: string[][];    // per project entry, in order
   skills?: string[][];            // per skill group, reordered items
+  projects?: ResumeEntry[];       // full replacement of the Projects section (e.g. selected GitHub projects + canonical)
 }
 
 function renderBullets(bullets: string[]): string {
@@ -143,7 +144,7 @@ export function buildResumeLatex(summary: string, overrides?: ResumeOverrides): 
 % HEADER
 {\\centering
 {\\Large\\bfseries Patel Takshkumar Girishbhai}\\\\[2pt]
-{\\small +1~(214)-883-2966 ~|~ \\href{mailto:takshpatel051102@gmail.com}{takshpatel051102@gmail.com} ~|~ Arlington, TX ~|~ \\href{https://github.com/TakshPatel5821}{github.com/TakshPatel5821}}\\\\
+{\\small +1~(214)-883-2966 ~|~ \\href{mailto:takshpatel051102@gmail.com}{takshpatel051102@gmail.com} ~|~ Arlington, TX ~|~ \\href{https://github.com/TakshPatel5821}{github.com/TakshPatel5821} ~|~ \\href{https://www.linkedin.com/in/taksh-patel-672b3a2a6/}{linkedin.com/in/taksh-patel-672b3a2a6}}\\\\
 \\par}
 \\vspace{4pt}
 
@@ -164,7 +165,7 @@ ${renderEntries(RESUME_EXPERIENCE, overrides?.experienceBullets)}
 
 % PROJECTS
 \\section*{Projects}
-${renderEntries(RESUME_PROJECTS, overrides?.projectBullets)}
+${renderEntries(overrides?.projects ?? RESUME_PROJECTS, overrides?.projectBullets)}
 
 % SKILLS
 \\section*{Technical Skills}

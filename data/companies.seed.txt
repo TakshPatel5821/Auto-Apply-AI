@@ -1,0 +1,159 @@
+# Starter company list for the board prober.
+#   npm run agent -- import-companies --file data/companies.seed.txt --concurrency 6
+# One company name per line. Lines starting with # are ignored. Names are
+# slugified (lowercased, punctuation stripped) before probing, so single-token
+# brand names resolve best. Misses are harmless — only validated boards are kept.
+# This is a seed, not the ceiling: append your own names (YC batch, Crunchbase
+# export, target companies) to grow the catalog toward 50k.
+
+# ── AI / ML ──────────────────────────────────────────────────────────────────
+openai
+anthropic
+mistral
+cohere
+perplexityai
+runway
+replicate
+huggingface
+scale
+modal
+together
+contextual
+adept
+cursor
+sierra
+glean
+harvey
+abridge
+cresta
+writer
+
+# ── Dev tools / infra ────────────────────────────────────────────────────────
+vercel
+netlify
+gitlab
+hashicorp
+snyk
+sentry
+postman
+posthog
+supabase
+render
+railway
+planetscale
+cockroachlabs
+temporal
+pulumi
+grafana
+datadog
+circleci
+launchdarkly
+sourcegraph
+linear
+retool
+warp
+browserbase
+neon
+turso
+clickhouse
+confluent
+dbt
+fivetran
+airbyte
+databricks
+
+# ── Fintech ──────────────────────────────────────────────────────────────────
+stripe
+plaid
+ramp
+brex
+mercury
+deel
+wise
+revolut
+monzo
+chime
+robinhood
+affirm
+gusto
+checkr
+marqeta
+moderntreasury
+column
+unit
+nala
+gohenry
+
+# ── Consumer / marketplace ───────────────────────────────────────────────────
+airbnb
+doordash
+instacart
+coinbase
+reddit
+pinterest
+lyft
+dropbox
+discord
+figma
+notion
+canva
+faire
+whatnot
+deliveroo
+gohenry
+hopin
+gocardless
+typeform
+miro
+
+# ── SaaS / B2B ───────────────────────────────────────────────────────────────
+asana
+airtable
+twilio
+samsara
+benchling
+flexport
+amplitude
+segment
+gong
+rippling
+lattice
+vanta
+drata
+ironclad
+ashby
+clari
+pendo
+productboard
+loom
+zapier
+calendly
+
+# ── Security ─────────────────────────────────────────────────────────────────
+cloudflare
+1password
+okta
+crowdstrike
+wiz
+abnormalsecurity
+huntress
+tailscale
+
+# ── Health / bio ─────────────────────────────────────────────────────────────
+benchling
+devoted
+cityblock
+ roon
+commure
+maven
+spring
+hims
+
+# ── Enterprise / large (often Workday/SmartRecruiters — may not resolve here) ─
+visa
+square
+spotify
+netflix
+shopify
+atlassian
+gitlab

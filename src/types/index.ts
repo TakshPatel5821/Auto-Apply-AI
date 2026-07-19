@@ -234,6 +234,19 @@ export interface ScraperOptions {
   onJob?: (job: ScrapedJob) => Promise<void>;
 }
 
+// Visual selector-picker config: CSS selectors the user points at (or that
+// suggestCustomSelectors heuristically generates) so a custom site can be
+// scraped without code. All optional — the scraper falls back to its built-in
+// selector chain for anything left unset.
+export interface CustomSiteSelectors {
+  card?: string;      // each job card/row
+  title?: string;     // job title within a card
+  company?: string;   // company within a card
+  location?: string;  // location within a card
+  link?: string;      // the job-detail anchor within a card
+  nextPage?: string;  // pagination "next" control
+}
+
 export interface CustomSite {
   id: string;
   name: string;
@@ -242,6 +255,7 @@ export interface CustomSite {
   password: string;
   jobsUrl?: string;
   enabled: boolean;
+  selectors?: CustomSiteSelectors;
 }
 
 export interface ScraperConfig {

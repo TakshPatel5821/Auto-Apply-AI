@@ -16,6 +16,8 @@ import { ResumeCard } from "@/components/dashboard/ResumeCard";
 import { LogsConsole } from "@/components/dashboard/LogsConsole";
 import { QuickSetupPanel } from "@/components/dashboard/QuickSetupPanel";
 import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
+import { AtsCheckerModal } from "@/components/dashboard/AtsCheckerModal";
+import { GithubProjectsPanel } from "@/components/dashboard/GithubProjectsPanel";
 import {
   Briefcase,
   Send,
@@ -222,6 +224,7 @@ export default function DashboardPage() {
           </div>
 
           <div className="ml-auto flex items-center gap-2">
+            <AtsCheckerModal />
             <button
               onClick={fetchAll}
               className="p-2 text-gray-500 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
@@ -337,6 +340,7 @@ export default function DashboardPage() {
 
               {activeTab === "resume" && (
                 <div className="space-y-6">
+                  <GithubProjectsPanel />
                   {resumes.map((resume) => (
                     <ResumeCard key={resume.id} resume={resume} onSaved={fetchAll} />
                   ))}

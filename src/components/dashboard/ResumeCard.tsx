@@ -136,8 +136,8 @@ export function ResumeCard({ resume, onSaved }: { resume: ResumeCardData; onSave
           <div className="space-y-2">
             <div className="text-xs text-gray-600 uppercase tracking-wider">Skills</div>
             <div className="flex flex-wrap gap-1">
-              {resume.skills.slice(0, 20).map((skill) => (
-                <span key={skill} className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">
+              {resume.skills.slice(0, 20).map((skill, i) => (
+                <span key={`${skill}-${i}`} className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded">
                   {skill}
                 </span>
               ))}

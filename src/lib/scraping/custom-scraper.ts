@@ -40,15 +40,15 @@ export class CustomScraper {
       await this.delay(2000, 4000);
       await this.humanScroll(2, 4);
 
-      const pageJobs = await this.extractJobs(site.name, site.url);
+      const pageJobs = await this.extractJobs(site);
       jobs.push(...pageJobs);
 
       // Try up to 2 more pages
       for (let p = 2; p <= 3; p++) {
-        const next = await this.clickNextPage();
+        const next = await this.clickNextPage(site.selectors?.nextPage);
         if (!next) break;
         await this.delay(2500, 4000);
-        const more = await this.extractJobs(site.name, site.url);
+        const more = await this.extractJobs(site);
         if (more.length === 0) break;
         jobs.push(...more);
       }
@@ -184,11 +184,17 @@ export class CustomScraper {
     return null;
   }
 
-  private async extractJobs(siteName: string, baseUrl: string): Promise<ScrapedJob[]> {
+  private async extractJobs(site: CustomSite): Promise<ScrapedJob[]> {
+    const siteName = site.name;
+    const baseUrl = site.url;
+    const sel = site.selectors || {};
     const jobs: ScrapedJob[] = [];
     const origin = new URL(baseUrl).origin;
 
+    // Configured card selector (from the visual picker) is tried first, then the
+    // built-in fallback chain.
     const cardSelectors = [
+      ...(sel.card ? [sel.card] : []),
       ".job-listing", ".job-item", ".job-card", ".job-post",
       ".opening", ".posting",
       "[data-automation-id='jobItem']",
@@ -196,8 +202,8 @@ export class CustomScraper {
     ];
 
     let cards: ElementHandle[] = [];
-    for (const sel of cardSelectors) {
-      const found = await this.page!.$$(sel).catch(() => []);
+    for (const cardSel of cardSelectors) {
+      const found = await this.page!.$$(cardSel).catch(() => []);
       if (found.length > 0) { cards = found; break; }
     }
 
@@ -216,12 +222,12 @@ export class CustomScraper {
 
     for (const card of cards.slice(0, 25)) {
       try {
-        const title = await this.extractText(card, ["h1","h2","h3","h4",".title","[class*='title']","a","strong"]);
+        const title = await this.extractText(card, [...(sel.title ? [sel.title] : []), "h1","h2","h3","h4",".title","[class*='title']","a","strong"]);
         if (!title) continue;
 
-        const company = await this.extractText(card, [".company","[class*='company']"]) || siteName;
-        const location = await this.extractText(card, [".location","[class*='location']","[class*='city']"]);
-        const linkEl = await card.$("a").catch(() => null);
+        const company = await this.extractText(card, [...(sel.company ? [sel.company] : []), ".company","[class*='company']"]) || siteName;
+        const location = await this.extractText(card, [...(sel.location ? [sel.location] : []), ".location","[class*='location']","[class*='city']"]);
+        const linkEl = (sel.link ? await card.$(sel.link).catch(() => null) : null) || await card.$("a").catch(() => null);
         const href = (await linkEl?.getAttribute("href").catch(() => "")) || "";
         const url = href ? (href.startsWith("http") ? href : `${origin}${href}`) : this.page!.url();
 
@@ -257,8 +263,12 @@ export class CustomScraper {
     return (await el.textContent().catch(() => ""))?.trim() || "";
   }
 
-  private async clickNextPage(): Promise<boolean> {
-    for (const sel of ["a[aria-label='Next']", "button:has-text('Next')", "a:has-text('Next')", ".pagination__next"]) {
+  private async clickNextPage(configured?: string): Promise<boolean> {
+    const selectors = [
+      ...(configured ? [configured] : []),
+      "a[aria-label='Next']", "button:has-text('Next')", "a:has-text('Next')", ".pagination__next",
+    ];
+    for (const sel of selectors) {
       const btn = await this.page!.$(sel).catch(() => null);
       if (btn) {
         const disabled = await btn.getAttribute("disabled").catch(() => null);

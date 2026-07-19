@@ -19,9 +19,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Tailored resume not found" }, { status: 404 });
   }
 
-  const [job, resume] = await Promise.all([
+  const [job, resume, coverLetter] = await Promise.all([
     prisma.job.findUnique({ where: { id: tailored.jobId } }),
     prisma.resume.findUnique({ where: { id: tailored.resumeId } }),
+    // The cover letter is the other artifact being submitted — surface it in the
+    // same review gate so the user approves EVERYTHING before anything is sent.
+    prisma.coverLetter.findFirst({ where: { jobId: tailored.jobId }, orderBy: { createdAt: "desc" } }),
   ]);
 
   // Baseline: the stored base LaTeX; fall back to the earliest tailored version
@@ -45,5 +48,6 @@ export async function GET(req: NextRequest) {
     sectionsModified: tailored.sectionsModified ?? [],
     tailoringNotes: tailored.tailoringNotes ?? null,
     hasBaseline: original.length > 0,
+    coverLetter: coverLetter?.content ?? null,
   });
 }
