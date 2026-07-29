@@ -79,6 +79,8 @@
     "@types/react-dom": "^19.0.0",
     "@types/uuid": "^10.0.0",
     "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^15.5.22",
     "linkedom": "^0.18.12",
     "postcss": "^8.4.49",
     "prisma": "^5.22.0",

@@ -10,6 +10,45 @@
 // explainable, not a black-box number.
 
 import { claudeAnalyzeJob } from "./claude";
+import { extractKeywords, tokenInText } from "@/lib/matching/keywords";
+import { extractRequiredYears } from "@/lib/matching/fast-filter";
+
+interface JobAnalysisLite {
+  requiredSkills?: string[];
+  niceToHaveSkills?: string[];
+  technologies?: string[];
+  atsKeywords?: string[];
+  yearsRequired?: number;
+}
+
+// Deterministic JD keyword extraction — the graceful fallback when the LLM
+// keyword pass is unavailable (no AI provider / offline). It reads the JD with
+// the shared tech dictionary and splits required vs. nice-to-have by section:
+// terms appearing under a "nice to have / preferred / bonus / plus" heading are
+// demoted. This keeps the ATS checker working with a real, explainable score
+// even with no AI configured.
+export function heuristicJobAnalysis(jobDescription: string): JobAnalysisLite {
+  const found = extractKeywords(jobDescription);
+  const lower = jobDescription.toLowerCase();
+  const niceIdx = lower.search(/nice[-\s]to[-\s]haves?|preferred|bonus|a plus|plusses|good to have/);
+
+  let requiredSkills = found;
+  let niceToHaveSkills: string[] = [];
+  if (niceIdx > 0) {
+    const before = lower.slice(0, niceIdx);
+    const after = lower.slice(niceIdx);
+    requiredSkills = found.filter((k) => tokenInText(k, before));
+    niceToHaveSkills = found.filter((k) => !requiredSkills.includes(k) && tokenInText(k, after));
+  }
+
+  return {
+    requiredSkills,
+    niceToHaveSkills,
+    technologies: [],
+    atsKeywords: found,
+    yearsRequired: extractRequiredYears(jobDescription),
+  };
+}
 
 export interface FitBreakdown {
   technical: number; // keyword/skill coverage
@@ -127,14 +166,41 @@ function corpusFromResume(resumeData: Record<string, unknown>): string {
   return parts.join(" \n ").toLowerCase();
 }
 
-// Is the keyword present in the résumé corpus? Substring match, with a couple of
-// common normalizations (e.g. "node.js" vs "nodejs", "c#"/"c++" kept literal).
-function present(keyword: string, corpus: string): boolean {
+// Match `term` inside `text` bounded by non-alphanumeric edges — but only on the
+// side where the term itself ends in an alphanumeric, so punctuated tech names
+// ("c++", "c#", ".net") still match. Falls back to substring if the regex can't
+// be built. This is what stops short tokens from matching inside longer words.
+function boundedMatch(term: string, text: string): boolean {
+  const esc = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const left = /[a-z0-9]/i.test(term[0]) ? "(?<![a-z0-9])" : "";
+  const right = /[a-z0-9]/i.test(term[term.length - 1]) ? "(?![a-z0-9])" : "";
+  try {
+    return new RegExp(`${left}${esc}${right}`, "i").test(text);
+  } catch {
+    return text.includes(term);
+  }
+}
+
+// Is the keyword present in the résumé corpus? Word-boundary matching so short
+// tokens like "go", "r", "c", "ai" don't false-match inside "category", "train",
+// or "email". Punctuated tech names ("c++", "c#", ".net") stay literal, and a
+// punctuation-insensitive pass still lets "node.js" ↔ "nodejs" match.
+// Exported for unit testing (see test/ats-analyzer.test.ts).
+export function present(keyword: string, corpus: string): boolean {
   const k = keyword.toLowerCase().trim();
   if (!k) return false;
-  if (corpus.includes(k)) return true;
-  const collapsed = k.replace(/[.\s_-]/g, "");
-  if (collapsed.length >= 3 && corpus.replace(/[.\s_-]/g, "").includes(collapsed)) return true;
+
+  if (boundedMatch(k, corpus)) return true;
+
+  // Punctuation-insensitive pass so "node.js" ↔ "nodejs" match. Strip only
+  // in-token punctuation (._-) from BOTH sides — never spaces, so words stay
+  // separated and boundaries still hold (this is what keeps "cat" out of
+  // "category"). Run it even when the keyword itself is clean, since the corpus
+  // side may be the punctuated one.
+  const nk = k.replace(/[._-]/g, "");
+  if (nk.length >= 3) {
+    return boundedMatch(nk, corpus.replace(/[._-]/g, ""));
+  }
   return false;
 }
 
@@ -165,13 +231,16 @@ export async function analyzeATS(
   resumeData: Record<string, unknown>,
   jobDescription: string
 ): Promise<AtsAnalysis> {
-  const ja = (await claudeAnalyzeJob(jobDescription)) as {
-    requiredSkills?: string[];
-    niceToHaveSkills?: string[];
-    technologies?: string[];
-    atsKeywords?: string[];
-    yearsRequired?: number;
-  };
+  // Extract JD keywords with the LLM; fall back to the deterministic dictionary
+  // extractor if no AI provider is available so the checker never hard-fails.
+  let ja: JobAnalysisLite;
+  let usedFallback = false;
+  try {
+    ja = (await claudeAnalyzeJob(jobDescription)) as JobAnalysisLite;
+  } catch {
+    ja = heuristicJobAnalysis(jobDescription);
+    usedFallback = true;
+  }
 
   const required = uniqLower([...(ja.requiredSkills || []), ...(ja.technologies || [])]);
   const requiredSet = new Set(required.map((r) => r.toLowerCase()));
@@ -197,12 +266,19 @@ export async function analyzeATS(
   const education = educationFit(resumeData, jobDescription);
   const overall = Math.round(technical * 0.5 + experience * 0.3 + education * 0.2);
 
+  const suggestions = buildSuggestions(missingReq, missingNice, score);
+  if (usedFallback) {
+    suggestions.unshift(
+      "Note: AI was unavailable, so keywords were detected with a built-in tech dictionary. Coverage of niche or non-technical terms may be understated."
+    );
+  }
+
   return {
     score,
     fit: { technical, experience, education, overall },
     strongMatches: matchedReq.slice(0, 12),
     matchedKeywords: [...matchedReq, ...matchedNice],
     missingKeywords: [...missingReq, ...missingNice].slice(0, 15),
-    suggestions: buildSuggestions(missingReq, missingNice, score),
+    suggestions,
   };
 }
