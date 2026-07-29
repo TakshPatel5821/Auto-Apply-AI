@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build
+.next/
+out/
+build/
+dist/
+
+# Environment — never commit real secrets
+.env
+.env.*
+!.env.example
+
+# Personal résumé facts (see config/resume.example.json for the template)
+config/resume.json
+
+# Application data (generated résumés/PDFs at repo root only — anchored so it
+# does NOT match the src/app/api/applications route folder)
+/applications/
+logs/
+*.pdf
+*.docx
+*.tex
+
+# Database
+*.db
+*.sqlite
+
+# Secrets & keys
+*.pem
+*.key
+!**/*.example.key
+
+# Misc
+.DS_Store
+Thumbs.db
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Testing
+coverage/
+playwright-report/
+test-results/
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Local agent/tooling state (machine-specific paths, not shareable)
+.claude/settings.local.json
+SETUP-PRIVATE-PUBLIC.md

@@ -1,0 +1,430 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  resumes      Resume[]
+  applications Application[]
+  memories     ApplicationMemory[]
+  settings     UserSettings?
+}
+
+model UserSettings {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  searchKeywords    String[] @default([])
+  searchLocations   String[] @default([])
+  remoteOnly        Boolean  @default(false)
+  requireSponsorship Boolean @default(false)
+  experienceLevels  String[] @default([])
+  enabledPlatforms  String[] @default(["linkedin", "indeed"])
+  minSalary         Int?
+  maxApplicationsPerDay Int  @default(20)
+  autoApply         Boolean  @default(false)
+  requireApproval   Boolean  @default(true)
+  blacklistCompanies String[] @default([])
+  preferredCompanies String[] @default([])
+  preferredTechStack String[] @default([])
+  customSites        Json     @default("[]")
+  profile            Json     @default("{}")  // Profile Engine V2 (structured fields)
+
+  // Encrypted credentials at rest (AES-256-GCM, "enc:v1:" prefix). Never plaintext.
+  encLinkedinEmail    String?
+  encLinkedinPassword String?
+  encAtsEmail         String?
+  encAtsPassword      String?
+
+  // Gmail integration (OAuth2, gmail.readonly). Refresh token encrypted like creds.
+  encGmailRefreshToken String?
+  gmailAddress         String?
+  gmailConnectedAt     DateTime?
+  gmailLastSyncAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Resume {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fileName    String
+  originalPath String
+  fileType    String
+  fileSize    Int
+
+  parsedData  Json
+  skills      String[]
+  experience  Json[]
+  education   Json[]
+  projects    Json[]
+  achievements String[]
+  technologies String[]
+  domains     String[]
+  atsKeywords String[]
+  yearsOfExperience Float?
+  summary     String?
+  baseLatex   String?  // Pre-tailor base LaTeX résumé — the baseline for the diff viewer
+
+  isActive    Boolean  @default(false)
+
+  tailoredVersions TailoredResume[]
+  applications     Application[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model TailoredResume {
+  id          String   @id @default(cuid())
+  resumeId    String
+  resume      Resume   @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+  jobId       String
+  job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  latexContent  String   @db.Text
+  pdfPath       String?
+  texPath       String?
+  overleafUrl   String?
+  tailoringNotes String?
+
+  atsScore    Float?
+  keywordsAdded String[]
+  sectionsModified String[]
+
+  application Application?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([resumeId])
+  @@index([jobId])
+}
+
+model CoverLetter {
+  id          String   @id @default(cuid())
+  jobId       String
+  job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  content     String   @db.Text
+  pdfPath     String?
+  texPath     String?
+
+  application Application?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([jobId])
+}
+
+model Job {
+  id          String   @id @default(cuid())
+
+  platform    String
+  platformJobId String?
+  url         String
+  applyUrl    String?
+  easyApplyUrl String?
+  isEasyApply Boolean  @default(false)
+
+  companyName String
+  jobTitle    String
+  location    String?
+  salary      String?
+  salaryMin   Int?
+  salaryMax   Int?
+  jobType     String?
+  isRemote    Boolean  @default(false)
+  isHybrid    Boolean  @default(false)
+  requiresSponsorship Boolean @default(false)
+  experienceLevel String?
+
+  description String   @db.Text
+  requirements String[]
+  responsibilities String[]
+  niceToHave  String[]
+  benefits    String[]
+
+  matchScore  Float?
+  atsScore    Float?
+  atsKeywordScore Int?
+  confidenceLevel Float?
+  requiredSkills String[]
+  missingSkills  String[]
+  matchingSkills String[]
+  matchReason String?
+
+  // Visa / international-student signals (detected from the description)
+  sponsorshipStatus String?  // "sponsors" | "no_sponsorship" | "unknown"
+  acceptsCpt        Boolean?
+  acceptsOpt        Boolean?
+  intlFriendlyScore Int?      // 0-10
+
+  status      JobStatus @default(FOUND)
+  isBlacklisted Boolean @default(false)
+  isDuplicate Boolean  @default(false)
+  isSpam      Boolean  @default(false)
+
+  tailoredResumes TailoredResume[]
+  coverLetters    CoverLetter[]
+  application     Application?
+  screenings      ScreeningResult[]
+
+  scrapedAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([platform, platformJobId])
+  @@index([companyName])
+  @@index([matchScore])
+  @@index([status])
+  @@index([scrapedAt])
+}
+
+// A project imported from the user's GitHub (cleaned from repo + README). The user
+// toggles `selected` to choose which appear on the résumé + cover letter.
+model GithubProject {
+  id          String   @id @default(cuid())
+  repo        String   @unique // owner/name
+  name        String            // cleaned, presentable title
+  bullet      String   @db.Text // one-line résumé bullet
+  stack       String[] @default([])
+  url         String
+  language    String?
+  stars       Int      @default(0)
+  topics      String[] @default([])
+  hasReadme   Boolean  @default(false)
+  selected    Boolean  @default(false)
+  pushedAt    DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([selected])
+}
+
+// Employer-side ATS screening run for a job (one row per loop run; history kept).
+model ScreeningResult {
+  id          String   @id @default(cuid())
+  jobId       String
+  job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  resumeId    String?
+
+  accepted    Boolean
+  finalScore  Int
+  reason      String?
+  learnList   String[] @default([])
+  rounds      Json     @default("[]") // LoopRound[]: per-round score / decision / gaps / comments
+
+  tailoredResumeId String?
+  coverLetterId    String?
+
+  createdAt   DateTime @default(now())
+
+  @@index([jobId])
+  @@index([createdAt])
+}
+
+enum JobStatus {
+  FOUND
+  ANALYZED
+  TAILORING
+  TAILORED
+  APPLYING
+  APPLIED
+  INTERVIEWING
+  OFFERED
+  REJECTED
+  WITHDRAWN
+  SKIPPED
+  FAILED
+}
+
+model Application {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId       String   @unique
+  job         Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  resumeId    String?
+  resume      Resume?  @relation(fields: [resumeId], references: [id])
+  tailoredResumeId String? @unique
+  tailoredResume TailoredResume? @relation(fields: [tailoredResumeId], references: [id])
+  coverLetterId String? @unique
+  coverLetter CoverLetter? @relation(fields: [coverLetterId], references: [id])
+
+  status      ApplicationStatus @default(PENDING)
+  appliedAt   DateTime?
+  confirmedAt DateTime?
+
+  screenshotPath String?
+  confirmationId String?
+  confirmationText String?
+
+  answeredQuestions Json[]
+  notes     String?
+  error     String?
+  retryCount Int     @default(0)
+
+  // Failure recovery / replay (#19): last checkpoint + full action log.
+  recoveryState Json?              // { url, phase, step, atsId, reason }
+  actionLog     Json   @default("[]") // [{ t, action, target, detail }]
+
+  // Phase 9 debug/replay: per-field decisions — why each value was chosen.
+  // [{ t, step, label, category, domKind, source, confidence, decision, valuePreview, reason }]
+  fieldDecisions Json  @default("[]")
+
+  folderPath String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([appliedAt])
+}
+
+enum ApplicationStatus {
+  PENDING
+  APPROVED
+  IN_PROGRESS
+  SUBMITTED
+  CONFIRMED
+  FAILED
+  REJECTED
+  INTERVIEW_SCHEDULED
+  OFFER_RECEIVED
+  WITHDRAWN
+}
+
+model ApplicationMemory {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  questionText String
+  questionHash String
+  answerText   String
+  platform     String?
+  category     MemoryCategory @default(GENERAL)
+
+  // Phase 7 negative memory: values the human REJECTED for this question (the
+  // agent filled them, the human corrected them). Never re-served or re-saved
+  // by automated paths.
+  rejectedAnswers String[] @default([])
+
+  usageCount  Int     @default(1)
+  lastUsed    DateTime @default(now())
+  locked      Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, questionHash])
+  @@index([userId])
+  @@index([questionHash])
+  @@index([category])
+}
+
+enum MemoryCategory {
+  GENERAL
+  VISA_SPONSORSHIP
+  WORK_AUTHORIZATION
+  SALARY
+  EXPERIENCE
+  RELOCATION
+  DEMOGRAPHICS
+  AVAILABILITY
+  REFERENCES
+  CUSTOM
+}
+
+model AutomationLog {
+  id          String   @id @default(cuid())
+  level       LogLevel @default(INFO)
+  category    String
+  message     String
+  details     Json?
+  jobId       String?
+  applicationId String?
+  error       String?
+
+  createdAt DateTime @default(now())
+
+  @@index([level])
+  @@index([category])
+  @@index([createdAt])
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+  SUCCESS
+}
+
+// Gmail-derived email events: the live inbox, processing dedupe (one row per
+// Gmail message id), and an audit trail for OTP fetches + auto status updates.
+model EmailEvent {
+  id            String   @id @default(cuid())
+  gmailId       String   @unique // Gmail message id — dedupes processing
+  threadId      String?
+
+  fromEmail     String?
+  fromName      String?
+  subject       String?
+  snippet       String?  @db.Text
+  receivedAt    DateTime
+
+  // Classification (from claudeClassifyEmail), null for pure OTP / unclassified.
+  category      String?
+  company       String?
+  detectedStatus String?
+  summary       String?  @db.Text
+  suggestedReply String? @db.Text
+
+  // OTP / verification-code retrieval.
+  isOtp         Boolean  @default(false)
+  otpCode       String?
+
+  // Matched application + whether we auto-applied the detected status.
+  applicationId String?
+  statusApplied Boolean  @default(false)
+
+  createdAt     DateTime @default(now())
+
+  @@index([receivedAt])
+  @@index([applicationId])
+}
+
+model ScrapingSession {
+  id          String   @id @default(cuid())
+  platform    String
+  searchQuery String
+  status      String   @default("running")
+  jobsFound   Int      @default(0)
+  jobsNew     Int      @default(0)
+  jobsDuplicate Int    @default(0)
+  error       String?
+
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([platform])
+  @@index([startedAt])
+}

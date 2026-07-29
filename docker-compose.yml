@@ -1,0 +1,90 @@
+# Local stack: Postgres + the app, with an optional GPU Ollama profile.
+#
+#   cp .env.example .env      # then fill in AUTH_SECRET, POSTGRES_PASSWORD, API keys
+#   docker compose up --build
+#
+# Every secret comes from the environment — there are deliberately no default
+# passwords here, so a stack cannot be brought up with credentials that are
+# published in this repository.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: job_agent_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-job_agent}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Bound to loopback so the database is not exposed on the LAN.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: job_agent_app
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-job_agent}
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env (openssl rand -base64 48)}
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AI_PROVIDER: ${AI_PROVIDER:-anthropic}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:-}
+      GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
+      GMAIL_OAUTH_REDIRECT: ${GMAIL_OAUTH_REDIRECT:-}
+      GITHUB_USERNAME: ${GITHUB_USERNAME:-}
+      STORAGE_PATH: /app/applications
+      LOGS_PATH: /app/logs
+      LINKEDIN_COOKIE: ${LINKEDIN_COOKIE:-}
+      JOB_SEARCH_KEYWORDS: ${JOB_SEARCH_KEYWORDS:-}
+      JOB_SEARCH_LOCATIONS: ${JOB_SEARCH_LOCATIONS:-}
+    volumes:
+      - ./applications:/app/applications
+      - ./logs:/app/logs
+      # Your real résumé facts (gitignored). Remove this line to run on the
+      # committed placeholder in config/resume.example.json.
+      - ./config/resume.json:/app/config/resume.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # GPU-accelerated local AI (Ollama). Opt-in — only starts with the `gpu` profile:
+  #   docker compose --profile gpu up
+  # Requires the NVIDIA Container Toolkit on the host. Point the app at it with
+  #   OLLAMA_BASE_URL=http://ollama:11434/v1  (and AI_PROVIDER=ollama to force local).
+  # Ollama auto-detects and uses the reserved GPU; pull a model once it's up:
+  #   docker compose exec ollama ollama pull qwen2.5:7b
+  ollama:
+    image: ollama/ollama:latest
+    container_name: job_agent_ollama
+    profiles: ["gpu"]
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  ollama_data:

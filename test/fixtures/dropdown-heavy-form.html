@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>Fake ATS — Dropdown heavy</title></head>
+<body>
+  <!-- Verifies dropdown intelligence: state abbreviations, country aliases,
+       degree levels, and yes/no phrasings should all match the right option. -->
+  <h1>Apply — Dropdown heavy</h1>
+
+  <label for="state">State</label>
+  <select id="state">
+    <option>Select...</option><option>California</option><option>Texas</option><option>New York</option>
+  </select>
+
+  <label for="country">Country</label>
+  <select id="country">
+    <option>Select...</option><option>United States</option><option>United Kingdom</option><option>India</option>
+  </select>
+
+  <label for="degree">Highest degree level</label>
+  <select id="degree">
+    <option>Select...</option><option>High School</option><option>Associate</option>
+    <option>Bachelor's</option><option>Master's</option><option>Doctorate</option>
+  </select>
+
+  <label for="auth">Are you authorized to work?</label>
+  <select id="auth">
+    <option>Select...</option><option>Yes, I am authorized to work</option><option>No, I am not authorized</option>
+  </select>
+
+  <fieldset>
+    <legend>Are you willing to relocate?</legend>
+    <label><input type="radio" name="reloc" value="yes" /> Yes</label>
+    <label><input type="radio" name="reloc" value="no" /> No</label>
+  </fieldset>
+</body>
+</html>

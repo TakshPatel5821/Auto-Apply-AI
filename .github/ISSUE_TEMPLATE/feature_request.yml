@@ -1,0 +1,61 @@
+name: Feature request
+description: Suggest a capability or improvement
+title: "feat: "
+labels: ["enhancement", "triage"]
+
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation you hit, not just the feature you want.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the app?
+      options:
+        - Scraping / job sources
+        - Matching & scoring
+        - Résumé tailoring
+        - PDF compilation (LaTeX/Tectonic)
+        - Apply engine (Playwright/ATS)
+        - ATS screening loop
+        - Gmail integration
+        - Dashboard UI
+        - Setup / configuration
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: |
+        This is a single-user, local-first tool. Proposals that assume
+        multi-tenancy are likely out of scope — see `docs/multi-user-spec.md`.
+      options:
+        - label: This fits a single-user, local-first tool (or I explained why it should change)
+          required: true
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd be willing to open a PR for this

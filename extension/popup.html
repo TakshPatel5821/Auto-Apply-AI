@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { width: 320px; margin: 0; font: 13px/1.5 system-ui, sans-serif; background: #0b0f17; color: #e5e7eb; }
+    header { padding: 12px 14px; border-bottom: 1px solid #1f2937; }
+    h1 { font-size: 13px; margin: 0; font-weight: 600; }
+    p.sub { margin: 2px 0 0; font-size: 11px; color: #9ca3af; }
+    .actions { display: flex; gap: 8px; padding: 12px 14px; }
+    button { flex: 1; padding: 7px 10px; font-size: 12px; font-weight: 600; border: 1px solid #374151; border-radius: 8px; cursor: pointer; background: #111827; color: #e5e7eb; }
+    button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+    button:hover { filter: brightness(1.1); }
+    button.icon { flex: 0 0 auto; width: 34px; padding: 7px 0; }
+    #settings { padding: 0 14px 10px; display: none; }
+    #settings.open { display: block; }
+    #settings label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px; }
+    #settings .row2 { display: flex; gap: 8px; }
+    #settings input { flex: 1; min-width: 0; padding: 6px 8px; font-size: 12px; border: 1px solid #374151; border-radius: 8px; background: #111827; color: #e5e7eb; }
+    #settings button { flex: 0 0 auto; }
+    #status { padding: 0 14px 8px; font-size: 11px; color: #9ca3af; }
+    #legend { display: flex; gap: 10px; padding: 0 14px 10px; font-size: 11px; }
+    .chip { display: inline-flex; align-items: center; gap: 4px; }
+    .dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+    #results { max-height: 320px; overflow: auto; padding: 0 8px 12px; }
+    .row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-bottom: 1px solid #111827; }
+    .row .cat { font: 600 10px ui-monospace, monospace; padding: 1px 5px; border-radius: 4px; white-space: nowrap; }
+    .row .lbl { flex: 1; font-size: 11px; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Field Inspector</h1>
+    <p class="sub">Read-only. Shows how the Job Agent would handle each field. It never fills or submits.</p>
+  </header>
+  <div class="actions">
+    <button class="primary" id="scan">Scan this page</button>
+    <button id="clear">Clear</button>
+    <button class="icon" id="settings-toggle" title="Settings" aria-label="Settings" aria-expanded="false">⚙</button>
+  </div>
+  <div id="settings">
+    <label for="host">Job Agent app URL</label>
+    <div class="row2">
+      <input id="host" type="url" spellcheck="false" placeholder="http://localhost:3000" />
+      <button id="save-host">Save</button>
+    </div>
+  </div>
+  <div id="legend">
+    <span class="chip"><span class="dot" style="background:#064e3b"></span>profile</span>
+    <span class="chip"><span class="dot" style="background:#1e3a8a"></span>AI draft</span>
+    <span class="chip"><span class="dot" style="background:#78350f"></span>asks you</span>
+  </div>
+  <div id="status">Ready.</div>
+  <div id="results"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

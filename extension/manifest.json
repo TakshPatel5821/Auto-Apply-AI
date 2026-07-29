@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Job Agent — Field Inspector",
+  "version": "0.1.0",
+  "description": "Read-only DOM understanding assistant. Shows how the Job Agent classifies each form field and what it would do (autofill from profile, draft with AI, or pause for you). It never fills or submits anything.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Job Agent Field Inspector",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["activeTab", "storage", "webNavigation"],
+  "host_permissions": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ]
+}

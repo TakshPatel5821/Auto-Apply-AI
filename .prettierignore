@@ -1,0 +1,20 @@
+# Generated or vendored — not ours to format.
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+package-lock.json
+prisma/migrations/
+public/
+extension/icons/
+
+# Generated application data
+applications/
+logs/
+*.pdf
+*.tex
+
+# The README's function reference is generated between FNREF markers.
+docs/function-reference.md

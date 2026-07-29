@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply text-foreground;
+    /* Subtle aurora background instead of flat near-black */
+    background-color: #060911;
+    background-image:
+      radial-gradient(60rem 60rem at 8% -10%, rgba(59, 130, 246, 0.10), transparent 60%),
+      radial-gradient(50rem 50rem at 100% 0%, rgba(139, 92, 246, 0.10), transparent 55%),
+      radial-gradient(40rem 40rem at 50% 120%, rgba(6, 182, 212, 0.06), transparent 60%);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@layer components {
+  /* Elevated glass card — frosted, subtle border + shadow, optional hover lift. */
+  .card-glass {
+    @apply rounded-xl border border-white/[0.06] bg-gray-900/60 backdrop-blur-sm
+           shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_8px_24px_-12px_rgba(0,0,0,0.6)];
+  }
+  .card-hover {
+    @apply transition-all duration-200 hover:border-white/[0.12]
+           hover:shadow-[0_1px_0_0_rgba(255,255,255,0.06)_inset,0_12px_32px_-12px_rgba(0,0,0,0.7)]
+           hover:-translate-y-0.5;
+  }
+  /* Gradient brand text */
+  .text-gradient {
+    @apply bg-gradient-to-r from-blue-400 via-indigo-400 to-violet-400 bg-clip-text text-transparent;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-out;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+/* Slimmer, themed scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.18);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.32);
+  background-clip: content-box;
+}
+
+.log-entry {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+}

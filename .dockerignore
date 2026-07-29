@@ -1,0 +1,46 @@
+# Keep the build context small and — more importantly — keep secrets and local
+# state out of the image. Anything listed here is never sent to the Docker daemon.
+
+# Dependencies & build output (reinstalled/rebuilt inside the image)
+node_modules
+.next
+out
+build
+dist
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+config/resume.json
+*.pem
+*.key
+
+# Local application data
+applications/
+logs/
+data/*.local.json
+
+# Version control & CI
+.git
+.gitignore
+.github
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Tests & docs (not needed at runtime)
+test
+docs
+*.md
+!README.md
+
+# Local agent/tooling state
+.claude
+coverage
+playwright-report
+test-results
+*.tsbuildinfo

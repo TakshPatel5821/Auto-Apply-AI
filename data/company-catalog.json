@@ -1,0 +1,70 @@
+{
+  "ashby": [
+    "cohere",
+    "sierra",
+    "harvey",
+    "abridge",
+    "sentry",
+    "writer",
+    "render",
+    "temporal",
+    "railway",
+    "warp",
+    "neon",
+    "confluent",
+    "airbyte",
+    "plaid",
+    "clickhouse",
+    "moderntreasury",
+    "gohenry",
+    "unit",
+    "column",
+    "benchling",
+    "amplitude",
+    "commure",
+    "maven"
+  ],
+  "greenhouse": [
+    "anthropic",
+    "netlify",
+    "vercel",
+    "cresta",
+    "cockroachlabs",
+    "postman",
+    "datadog",
+    "circleci",
+    "planetscale",
+    "warp",
+    "launchdarkly",
+    "mercury",
+    "fivetran",
+    "clickhouse",
+    "chime",
+    "monzo",
+    "marqeta",
+    "gocardless",
+    "typeform",
+    "amplitude",
+    "lattice",
+    "pendo",
+    "calendly",
+    "okta",
+    "abnormalsecurity",
+    "huntress",
+    "tailscale"
+  ],
+  "lever": [
+    "neon"
+  ],
+  "smartrecruiters": [
+    "together",
+    "glean",
+    "wise",
+    "canva",
+    "gong"
+  ],
+  "recruitee": [
+    "gong",
+    "spring"
+  ]
+}
