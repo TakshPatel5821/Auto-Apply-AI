@@ -1,6 +1,8 @@
 // Instant keyword-based pre-filter — runs BEFORE any AI or embedding call.
 // Eliminates obvious mismatches in microseconds.
 
+import { TECH_KEYWORDS, tokenInText } from "./keywords";
+
 export interface FilterResult {
   score: number;
   skip: boolean;
@@ -28,16 +30,6 @@ export function extractRequiredYears(text: string): number {
     }
   }
   return maxYears;
-}
-
-// Does `token` appear in `text` as a distinct term? Alphanumeric tokens use a
-// word boundary so "go" can't match inside "good"; tokens with special chars
-// (c++, c#, ci/cd, node.js) fall back to substring — they're distinctive enough
-// not to false-match, and word boundaries don't behave around punctuation.
-function tokenInText(token: string, text: string): boolean {
-  if (/[^a-z0-9 ]/i.test(token)) return text.includes(token);
-  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
 }
 
 export function fastFilter(
@@ -118,22 +110,16 @@ export function fastFilter(
   const internBonus = isInternPosting ? 25 : 0;
 
   // ─── Search keyword matching ────────────────────────────────────────────────
+  // Word-boundary matching so a search term like "go" or "ai" can't match inside
+  // an unrelated word in the posting.
   const matchedKeywords: string[] = [];
   const missingKeywords: string[] = [];
   for (const kw of searchKeywords) {
-    (jobText.includes(kw.toLowerCase()) ? matchedKeywords : missingKeywords).push(kw);
+    (tokenInText(kw, jobText) ? matchedKeywords : missingKeywords).push(kw);
   }
 
-  // ─── Tech skill matching ────────────────────────────────────────────────────
-  const techKeywords = [
-    "react", "typescript", "javascript", "python", "node", "nodejs",
-    "java", "go", "golang", "rust", "c++", "c#", "sql", "postgresql",
-    "mongodb", "redis", "aws", "gcp", "azure", "docker", "kubernetes",
-    "graphql", "rest", "api", "git", "ci/cd", "agile", "next.js", "nextjs",
-    "vue", "angular", "django", "fastapi", "spring", "rails", "flutter",
-    "tensorflow", "pytorch", "machine learning", "ml", "data science",
-    "devops", "linux", "bash", "terraform", "ansible",
-  ];
+  // ─── Tech skill matching (shared dictionary) ────────────────────────────────
+  const techKeywords = TECH_KEYWORDS;
 
   let skillMatches = 0;
   let techMentioned = 0;
@@ -170,10 +156,12 @@ export function fastFilter(
     ? Math.round((skillMatches / Math.min(techMentioned, 8)) * 100)
     : 50;
 
-  // Title relevance: check if search keyword root appears in title
-  const titleRelevant = searchKeywords.some((kw) =>
-    titleLower.includes(kw.toLowerCase().split(" ")[0])
-  );
+  // Title relevance: does the first word of a search keyword appear in the title
+  // as a distinct word (not a substring of a larger word)?
+  const titleRelevant = searchKeywords.some((kw) => {
+    const root = kw.toLowerCase().split(" ")[0];
+    return root.length > 0 && tokenInText(root, titleLower);
+  });
   const titleBonus = titleRelevant ? 20 : 0;
 
   const finalScore = Math.min(100, skillScore + titleBonus + internBonus);

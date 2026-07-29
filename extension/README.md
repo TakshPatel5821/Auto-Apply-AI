@@ -14,11 +14,17 @@ is asking. This extension surfaces that understanding so you can trust (or corre
 the automation before relying on it.
 
 ## Install (load unpacked)
-1. Start the Job Agent app locally: `npm run dev` (must be on `localhost:3000`).
+1. Start the Job Agent app locally: `npm run dev` (defaults to `localhost:3000`).
 2. Open `edge://extensions` (or `chrome://extensions`).
 3. Turn on **Developer mode**.
 4. Click **Load unpacked** and select this `extension/` folder.
 5. Pin the extension, open a job-application page, click the icon → **Scan this page**.
+
+### Pointing at a different app URL
+The extension talks to `localhost:3000` out of the box. To use another host or
+port, open the popup, click **⚙**, enter the full app URL (e.g.
+`http://localhost:4000`), and **Save**. Non-loopback hosts prompt for a one-time
+permission grant. The setting syncs across your signed-in browsers.
 
 ## What the badges mean
 | Color  | Outlook      | Meaning                                                        |
@@ -31,3 +37,6 @@ the automation before relying on it.
 - **No autofill, no submit.** This is an inspector only (Phase 3).
 - Only field *metadata* (labels, types, options) is sent to your local app —
   never values you've typed.
+- **Coverage:** scans the top page, open shadow DOM, and **all iframes**
+  (same- and cross-origin — the script runs in every frame and the popup merges
+  the results), including `about:blank`/`srcdoc` frames used by some ATS embeds.
