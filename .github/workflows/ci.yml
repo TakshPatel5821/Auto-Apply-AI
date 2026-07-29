@@ -18,6 +18,11 @@ permissions:
 env:
   NEXT_TELEMETRY_DISABLED: "1"
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+  # `next build` peaks just under Node's ~2 GB default heap on this codebase and
+  # OOMs intermittently on the runner ("Ineffective mark-compacts near heap
+  # limit"). Runners have far more RAM than that, so lift the ceiling rather
+  # than leaving the build to fail on a coin flip.
+  NODE_OPTIONS: "--max-old-space-size=4096"
 
 jobs:
   verify:

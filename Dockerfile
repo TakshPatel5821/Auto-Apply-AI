@@ -30,6 +30,10 @@ COPY . .
 
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# `next build` peaks just under Node's ~2 GB default heap and OOMs
+# intermittently. Raise the ceiling for the build stage only — the runtime
+# stage below does not inherit this.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 
 RUN npx prisma generate && npm run build
 
