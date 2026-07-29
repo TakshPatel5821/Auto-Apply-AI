@@ -10,7 +10,6 @@
 // CRITICAL: MCP stdio uses STDOUT for the JSON-RPC protocol. The engine's Logger
 // writes via console.log — route that to stderr so it can't corrupt the stream.
 // This must run before any engine module is imported.
-// eslint-disable-next-line no-console
 console.log = (...args: unknown[]) => console.error(...args);
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

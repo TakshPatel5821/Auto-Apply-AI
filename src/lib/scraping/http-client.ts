@@ -47,7 +47,6 @@ export interface PoliteGetOptions {
  * single bad source never throws and aborts a whole multi-source search.
  */
 export async function politeGet<T = unknown>(url: string, opts: PoliteGetOptions = {}): Promise<T | null> {
-  const host = hostOf(url);
 
   if (opts.respectRobots) {
     const allowed = await isAllowedByRobots(url).catch(() => true);

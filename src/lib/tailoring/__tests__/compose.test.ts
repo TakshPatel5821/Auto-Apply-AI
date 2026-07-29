@@ -3,14 +3,21 @@ import { buildFactBook, defaultCandidate } from "@/lib/tailoring/facts/load-fact
 import { composeSummary, LEVEL_PHRASE } from "@/lib/tailoring/composition/summary-builder";
 import { composeLetter } from "@/lib/tailoring/composition/letter-builder";
 import type { AchievementId, EmployerId, FactBook, FactSelection, JobAnalysis, SkillId } from "@/lib/tailoring/types";
+import { firstTwoEmployers } from "./fixtures";
 
 function selection(fb: FactBook): FactSelection {
+  const [first, second] = firstTwoEmployers(fb);
   return {
     summarySkills: ["skill:python", "skill:sql"] as SkillId[],
-    summaryEmployerOrProject: "employer:brainy-bean-info-tech" as EmployerId,
+    summaryEmployerOrProject: first.id as EmployerId,
     letterParagraphs: {
       hook: { skills: ["skill:python", "skill:sql"] as SkillId[] },
-      evidence: { achievements: ["achievement:brainy-bean-info-tech-1", "achievement:shubhkey-infotech-1"] as [AchievementId, AchievementId] },
+      evidence: {
+        achievements: [first.achievementIds[0], second.achievementIds[0]] as [
+          AchievementId,
+          AchievementId,
+        ],
+      },
       close: { companyDetail: "real-time payment processing" },
     },
     presentRequiredSkills: ["skill:python", "skill:mysql", "skill:sql"] as SkillId[],
@@ -50,7 +57,8 @@ describe("composeLetter", () => {
   });
 
   it("names both selected employers in the evidence paragraph", () => {
-    expect(paragraphs[1]).toContain("Brainy Bean Info Tech");
-    expect(paragraphs[1]).toContain("Shubhkey Infotech");
+    const [first, second] = firstTwoEmployers(fb);
+    expect(paragraphs[1]).toContain(first.name);
+    expect(paragraphs[1]).toContain(second.name);
   });
 });

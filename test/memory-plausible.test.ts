@@ -13,13 +13,13 @@ describe("isPlausibleAnswer — value must fit the field", () => {
   });
 
   it("a phone number only belongs in a phone field", () => {
-    expect(isPlausibleAnswer("Phone Number", "+1 (214) 883-2966")).toBe(true);
-    expect(isPlausibleAnswer("School", "+1 (214) 883-2966")).toBe(false);
+    expect(isPlausibleAnswer("Phone Number", "+1 (555) 010-4477")).toBe(true);
+    expect(isPlausibleAnswer("School", "+1 (555) 010-4477")).toBe(false);
   });
 
   it("a name field rejects an email or URL", () => {
     expect(isPlausibleAnswer("First Name", "https://x.com")).toBe(false);
-    expect(isPlausibleAnswer("First Name", "Takshkumar")).toBe(true);
+    expect(isPlausibleAnswer("First Name", "Jordan")).toBe(true);
   });
 
   it("an email field demands an actual email", () => {

@@ -76,7 +76,6 @@ function experienceFit(resumeData: Record<string, unknown>, yearsRequired: numbe
   return Math.max(35, Math.round(100 - gap * 15)); // -15 pts per missing year
 }
 
-const DEGREE_RANK: Record<string, number> = { phd: 4, master: 3, bachelor: 2, associate: 1 };
 
 function highestDegreeRank(resumeData: Record<string, unknown>): number {
   const edu = resumeData.education;

@@ -7,7 +7,7 @@ import { claudeCareerAdvice } from "@/lib/ai/claude";
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-export async function POST(req: NextRequest) {
+export async function POST(_req: NextRequest) {
   if (!(await getSession())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

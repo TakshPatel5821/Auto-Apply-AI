@@ -276,7 +276,9 @@ export interface ValidationResult { ok: boolean; reason?: string }
 export function validateValue(
   cls: Classification,
   value: string,
-  options?: string[]
+  // Kept for call-site symmetry with the dropdown path, which passes the option
+  // list. Plain-value validation doesn't consult it.
+  _options?: string[]
 ): ValidationResult {
   const v = (value || "").trim();
   if (!v) return { ok: false, reason: "empty" };

@@ -397,7 +397,7 @@ EDUCATION: ${edu}
 Return JSON: {"latexContent":"\\\\documentclass[10pt]{article}...FULL LATEX...\\\\end{document}","sections":["experience","skills","education"]}`,
     "LaTeX resume creator. Return JSON only.",
     3000,
-    "high"
+    TAILOR_EFFORT
   );
 }
 
