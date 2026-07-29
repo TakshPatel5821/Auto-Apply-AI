@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const { filePath, fileName } = saveUploadedResume(buffer, file.name);
+  const { filePath } = saveUploadedResume(buffer, file.name);
 
   // Step 1 — Extract text (fast, no AI)
   let rawText = "";
@@ -114,7 +114,7 @@ async function deepParseInBackground(resumeId: string, rawText: string) {
   }
 }
 
-export async function GET(req: NextRequest) {
+export async function GET(_req: NextRequest) {
   if (!(await getSession())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

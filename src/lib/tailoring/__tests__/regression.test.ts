@@ -12,6 +12,7 @@ import {
   type JobAnalysis,
   type SkillId,
 } from "@/lib/tailoring/types";
+import { firstTwoEmployers, twoEvidenceAchievements } from "./fixtures";
 
 function analysis(over: Partial<JobAnalysis>): JobAnalysis {
   return {
@@ -26,12 +27,13 @@ function analysis(over: Partial<JobAnalysis>): JobAnalysis {
 function validSelection(fb: FactBook): FactSelection {
   const order = new Map<EmployerId, AchievementId[]>();
   for (const [id, e] of fb.employers) order.set(id, [...e.achievementIds]);
+  const [first] = firstTwoEmployers(fb);
   return {
     summarySkills: ["skill:python"] as SkillId[],
-    summaryEmployerOrProject: "employer:brainy-bean-info-tech" as EmployerId,
+    summaryEmployerOrProject: first.id as EmployerId,
     letterParagraphs: {
       hook: { skills: ["skill:python"] as SkillId[] },
-      evidence: { achievements: ["achievement:brainy-bean-info-tech-1", "achievement:shubhkey-infotech-1"] as [AchievementId, AchievementId] },
+      evidence: { achievements: [...twoEvidenceAchievements(fb)] as [AchievementId, AchievementId] },
       close: { companyDetail: "x" },
     },
     presentRequiredSkills: ["skill:python"] as SkillId[],
@@ -69,7 +71,7 @@ describe("regression: unknown fact id — verifySelection", () => {
     const sel = validSelection(fb);
     sel.letterParagraphs.evidence.achievements = [
       "achievement:does-not-exist" as AchievementId,
-      "achievement:shubhkey-infotech-1" as AchievementId,
+      twoEvidenceAchievements(fb)[1],
     ];
     let caught: unknown;
     try { verifySelection(sel, fb); } catch (e) { caught = e; }

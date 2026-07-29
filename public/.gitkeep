@@ -1,0 +1,2 @@
+# Static assets served at the site root by Next.js.
+# Kept in git so the Docker build (which copies ./public) always has it.
