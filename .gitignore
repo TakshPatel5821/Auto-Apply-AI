@@ -59,3 +59,7 @@ test-results/
 
 # Local agent/tooling state (machine-specific paths, not shareable)
 .claude/settings.local.json
+
+# Personal handover/setup notes — these quote real contact details in their
+# examples and must never reach a public repository.
+SETUP-PRIVATE-PUBLIC.md
