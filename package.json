@@ -60,7 +60,7 @@
     "@radix-ui/react-tabs": "^1.1.1",
     "adm-zip": "^0.6.0",
     "axios": "^1.18.1",
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "^3.0.3",
     "cheerio": "^1.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -85,7 +85,7 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.6",
     "@types/adm-zip": "^0.5.8",
-    "@types/bcryptjs": "^2.4.6",
+    "@types/bcryptjs": "^3.0.0",
     "@types/node": "^22.9.0",
     "@types/pdf-parse": "^1.1.4",
     "@types/react": "^19.0.0",
