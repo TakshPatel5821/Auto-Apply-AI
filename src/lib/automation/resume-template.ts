@@ -1,7 +1,8 @@
 // ─── Canonical résumé template (data-driven) ─────────────────────────────────
-// The user's hand-tuned, Overleaf-tested résumé. It compiles to ONE page with
-// only standard packages. The content lives as STRUCTURED DATA below (single
-// source of truth); the renderer reproduces the exact layout.
+// Renders the hand-tuned, Overleaf-tested one-page résumé from the STRUCTURED
+// résumé config (config/resume.json — see lib/profile/resume-config.ts). The
+// config is the single source of truth for content; this module owns only the
+// LaTeX layout, which compiles to ONE page with standard packages.
 //
 // Per-job tailoring touches only:
 //   • the Professional Summary (always),
@@ -11,7 +12,9 @@
 // and the result is re-checked to still be one page — otherwise we fall back to
 // the canonical content here. So a bad tailor can never fabricate or overflow.
 //
-// To change your résumé content, edit the data below.
+// To change your résumé content, edit config/resume.json — never this file.
+
+import { loadResumeConfig } from "@/lib/profile/resume-config";
 
 // Escape characters that are special in LaTeX.
 export function escapeTex(t: string): string {
@@ -21,77 +24,39 @@ export function escapeTex(t: string): string {
   );
 }
 
-// A neutral baseline summary — diff baseline + fallback if the AI summary is empty.
-export const BASE_SUMMARY =
-  "Software Engineer pursuing an M.S. in Software Engineering at UT Arlington with hands-on experience building Python data pipelines, IoT systems, and full-stack web applications. Skilled in cloud (Azure AZ-900), Linux/UNIX, and secure, real-time software delivery.";
-
 // ── Structured résumé content (the real, canonical facts) ─────────────────────
 // Headings are raw LaTeX (they contain \textbf/\hfill/\href/\textit). Bullets and
-// skill items are PLAIN text and get escaped at render time.
+// skill items are PLAIN text and get escaped at render time. The heading shape is
+// load-bearing: facts/load-facts.ts parses name/role/dates back out of it.
 
 export interface ResumeEntry { heading: string; bullets: string[] }
 export interface SkillGroup { label: string; items: string[] }
 
-export const RESUME_EXPERIENCE: ResumeEntry[] = [
-  {
-    heading:
-      "\\textbf{Brainy Bean Info Tech}, Gujarat, India \\hfill Jan 2023 -- Apr 2023\\\\\n\\textit{Software Developer Intern}",
-    bullets: [
-      "Architected a Python-based IoT data acquisition system integrating multi-sensor hardware with real-time cloud pipelines tracking temperature, humidity, air quality, and atmospheric pressure.",
-      "Developed Python/SQL backend pipelines and Tableau/Excel dashboards for live sensor data visualization and remote monitoring.",
-      "Applied TCP/IP networking, Wireshark traffic analysis, and secure communication protocols on Linux/UNIX for reliable system operation.",
-    ],
-  },
-  {
-    heading:
-      "\\textbf{Shubhkey Infotech}, Ahmedabad, India \\hfill Jan 2024 -- Apr 2024\\\\\n\\textit{Website Developer Intern}",
-    bullets: [
-      "Developed PHP/MySQL backend modules with secure authentication, session management, and input validation; optimized database queries to improve performance and reliability.",
-      "Implemented secure user authentication to protect against common web vulnerabilities.",
-      "Collaborated with team members to review code quality and enhance overall backend performance.",
-    ],
-  },
-];
+const config = loadResumeConfig();
 
-export const RESUME_PROJECTS: ResumeEntry[] = [
-  {
-    heading: "\\textbf{Face Recognition Bot} $|$ \\textit{Python, OpenCV}",
-    bullets: [
-      "Built a real-time face detection and recognition system using Python and computer vision for security and attendance applications; implemented image processing pipelines for feature extraction and identity matching.",
-    ],
-  },
-  {
-    heading: "\\textbf{Advanced Voice Assistant} $|$ \\textit{Python, NLP, Speech APIs}",
-    bullets: [
-      "Developed an AI-powered voice assistant with speech recognition and text-to-speech APIs supporting natural language commands with low-latency real-time response.",
-    ],
-  },
-  {
-    heading: "\\textbf{OurHappyTrip} $|$ \\textit{PHP, MySQL (Independently Built)}",
-    bullets: [
-      "Independently designed and launched a full-stack car booking platform with role-based authentication, owning the full lifecycle from database schema design to deployment.",
-    ],
-  },
-  {
-    heading: "\\textbf{Live Weather App} $|$ \\textit{HTML, JavaScript -- github.com/TakshPatel5821}",
-    bullets: [
-      "Responsive weather app fetching real-time API data to display temperature, humidity, and forecasts based on user location.",
-    ],
-  },
-];
+// A neutral baseline summary — diff baseline + fallback if the AI summary is empty.
+export const BASE_SUMMARY = config.baseSummary;
 
-export const RESUME_SKILLS: SkillGroup[] = [
-  { label: "Programming", items: ["Python", "Java", "PHP", "JavaScript", "Shell Scripting", "SQL"] },
-  { label: "Web & IoT", items: ["HTML", "CSS", "MySQL", "REST APIs", "IoT Sensor Integration", "Real-Time Data Processing", "Cloud Connectivity"] },
-  { label: "Cloud (Azure)", items: ["Azure Architecture & Services", "Compute", "Storage", "Identity & Security", "IaaS", "PaaS", "SaaS (AZ-900)"] },
-  { label: "Networking & Security", items: ["TCP/IP", "Linux/UNIX", "Wireshark", "Penetration Testing", "Vulnerability Assessment", "PowerShell"] },
-  { label: "Tools", items: ["Git", "GitHub", "Tableau", "Excel", "Power Query", "Microsoft Office Suite"] },
-];
+// "Company, Location \hfill Start -- End" + italic role on the next line.
+export const RESUME_EXPERIENCE: ResumeEntry[] = config.experience.map((e) => ({
+  heading:
+    `\\textbf{${escapeTex(e.company)}}${e.location ? `, ${escapeTex(e.location)}` : ""}` +
+    ` \\hfill ${escapeTex(e.start)} -- ${escapeTex(e.end)}\\\\\n\\textit{${escapeTex(e.title)}}`,
+  bullets: e.bullets,
+}));
 
-const CERTIFICATIONS: string[] = [
-  "Microsoft Azure Fundamentals (AZ-900) --- All modules completed (May 2026): Cloud Concepts, Architecture, Compute, Storage, Identity & Access, Networking, Cost Management, Governance, Monitoring.",
-  "Microsoft Learn Achievements: Cloud Computing, Cloud Service Types, Benefits of Cloud Services, Core Azure Components, Azure Cost Management --- all passed.",
-];
+// "Project Name $|$ Tech stack".
+export const RESUME_PROJECTS: ResumeEntry[] = config.projects.map((p) => ({
+  heading: `\\textbf{${escapeTex(p.name)}}${p.tech ? ` $|$ \\textit{${escapeTex(p.tech)}}` : ""}`,
+  bullets: p.bullets,
+}));
+
+export const RESUME_SKILLS: SkillGroup[] = config.skills.map((g) => ({
+  label: g.label,
+  items: g.items,
+}));
+
+const CERTIFICATIONS: string[] = config.certifications;
 
 // Per-job overrides. Each is optional; missing entries fall back to canonical.
 export interface ResumeOverrides {
@@ -123,6 +88,36 @@ function renderSkills(overrides?: string[][]): string {
   return `\\begin{itemize}\n${lines.join("\n")}\n\\end{itemize}`;
 }
 
+// A bare URL like "github.com/foo" needs a scheme to be clickable in the PDF.
+function withScheme(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
+// The centred contact line: phone | email | location | github | linkedin.
+// Spaces inside the phone become LaTeX non-breaking spaces so it never wraps.
+function renderContactLine(): string {
+  const { phone, email, location, github, linkedin } = config.contact;
+  const parts = [
+    escapeTex(phone).replace(/ /g, "~"),
+    `\\href{mailto:${escapeTex(email)}}{${escapeTex(email)}}`,
+    escapeTex(location),
+  ];
+  if (github) parts.push(`\\href{${withScheme(github)}}{${escapeTex(github)}}`);
+  if (linkedin) parts.push(`\\href{${withScheme(linkedin)}}{${escapeTex(linkedin)}}`);
+  return parts.join(" ~|~ ");
+}
+
+// Education entries, newest first, matching the canonical two-line-per-school layout.
+function renderEducation(): string {
+  return config.education
+    .map(
+      (e) =>
+        `\\textbf{${escapeTex(e.school)}}${e.location ? `, ${escapeTex(e.location)}` : ""}` +
+        ` \\hfill ${escapeTex(e.start)} -- ${escapeTex(e.end)}\\\\\n\\textit{${escapeTex(e.degree)}}`
+    )
+    .join("\\\\[2pt]\n");
+}
+
 // Build the full résumé LaTeX from the canonical data + (optional) per-job
 // overrides. With no overrides this reproduces the hand-tuned one-page layout.
 export function buildResumeLatex(summary: string, overrides?: ResumeOverrides): string {
@@ -143,8 +138,8 @@ export function buildResumeLatex(summary: string, overrides?: ResumeOverrides): 
 
 % HEADER
 {\\centering
-{\\Large\\bfseries Patel Takshkumar Girishbhai}\\\\[2pt]
-{\\small +1~(214)-883-2966 ~|~ \\href{mailto:takshpatel051102@gmail.com}{takshpatel051102@gmail.com} ~|~ Arlington, TX ~|~ \\href{https://github.com/TakshPatel5821}{github.com/TakshPatel5821} ~|~ \\href{https://www.linkedin.com/in/taksh-patel-672b3a2a6/}{linkedin.com/in/taksh-patel-672b3a2a6}}\\\\
+{\\Large\\bfseries ${escapeTex(config.contact.fullName)}}\\\\[2pt]
+{\\small ${renderContactLine()}}\\\\
 \\par}
 \\vspace{4pt}
 
@@ -154,10 +149,7 @@ ${safeSummary}
 
 % EDUCATION
 \\section*{Education}
-\\textbf{University of Texas at Arlington}, Arlington, TX \\hfill Aug 2024 -- May 2026\\\\
-\\textit{M.S. in Software Engineering}\\\\[2pt]
-\\textbf{Gandhinagar Institute of Technology}, Gujarat, India \\hfill Aug 2020 -- Jun 2024\\\\
-\\textit{B.E. in Computer Engineering}
+${renderEducation()}
 
 % EXPERIENCE
 \\section*{Professional Experience}

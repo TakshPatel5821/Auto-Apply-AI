@@ -4,6 +4,7 @@ import {
   RESUME_PROJECTS,
   RESUME_SKILLS,
 } from "@/lib/automation/resume-template";
+import { loadResumeConfig } from "@/lib/profile/resume-config";
 import type {
   Achievement,
   AchievementId,
@@ -16,6 +17,8 @@ import type {
   Skill,
   SkillId,
 } from "../types";
+
+const resumeConfig = loadResumeConfig();
 
 // ─── Skill synonyms ──────────────────────────────────────────────────────────
 // Drive JD-skill matching (Step 4/5) so e.g. "Node" in a posting maps to the
@@ -44,21 +47,22 @@ const SKILL_SYNONYMS: Record<string, string[]> = {
 };
 
 // ─── Canonical candidate constants ───────────────────────────────────────────
-// Mirror the hand-tuned résumé header + education in resume-template.ts. The DB
-// Resume row's parsed contactInfo overrides these when present.
-const CANONICAL_CONTACT = {
-  fullName: "Patel Takshkumar Girishbhai",
-  email: "takshpatel051102@gmail.com",
-  phone: "+1 (214)-883-2966",
-  location: "Arlington, TX",
-  github: "github.com/TakshPatel5821",
-  linkedin: "linkedin.com/in/taksh-patel-672b3a2a6" as string | undefined,
-};
-const CANONICAL_EDUCATION = {
-  degree: "M.S. in Software Engineering",
-  gradMonth: "May",
-  gradYear: 2026,
-};
+// Sourced from the résumé config (config/resume.json), the same file that drives
+// the LaTeX header + education in resume-template.ts — so the two can never drift.
+// The DB Resume row's parsed contactInfo overrides these when present.
+const CANONICAL_CONTACT = resumeConfig.contact;
+
+// The most recent education entry is the graduation the candidate is judged on.
+// "May 2026" → { degree, gradMonth: "May", gradYear: 2026 }.
+const CANONICAL_EDUCATION = (() => {
+  const latest = resumeConfig.education[0];
+  const [month = "", year = ""] = latest.end.trim().split(/\s+/);
+  return {
+    degree: latest.degree,
+    gradMonth: month,
+    gradYear: parseInt(year, 10) || new Date().getFullYear(),
+  };
+})();
 
 // ─── Deterministic helpers ───────────────────────────────────────────────────
 

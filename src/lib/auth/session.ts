@@ -1,9 +1,35 @@
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
 
-const SECRET = new TextEncoder().encode(
-  process.env.AUTH_SECRET || "fallback-secret-change-in-production-minimum-32-chars"
-);
+// ─── Session secret ──────────────────────────────────────────────────────────
+// AUTH_SECRET signs the session JWT. There is deliberately NO fallback value: a
+// hardcoded default would be public in this repository, letting anyone mint a
+// valid session cookie for any deployment that forgot to set it. Missing or
+// too-short secrets fail loudly at first use instead.
+
+const MIN_SECRET_LENGTH = 32;
+
+let cachedSecret: Uint8Array | null = null;
+
+function getSecret(): Uint8Array {
+  if (cachedSecret) return cachedSecret;
+
+  const secret = process.env.AUTH_SECRET;
+  if (!secret || secret.trim().length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `AUTH_SECRET must be set to a random string of at least ${MIN_SECRET_LENGTH} characters. ` +
+        `Generate one with:  openssl rand -base64 48`
+    );
+  }
+  cachedSecret = new TextEncoder().encode(secret);
+  return cachedSecret;
+}
+
+/** True when AUTH_SECRET is configured well enough to sign sessions. */
+export function isAuthConfigured(): boolean {
+  const secret = process.env.AUTH_SECRET;
+  return !!secret && secret.trim().length >= MIN_SECRET_LENGTH;
+}
 
 const SESSION_COOKIE = "job_agent_session";
 const SESSION_DURATION = 7 * 24 * 60 * 60; // 7 days
@@ -13,12 +39,13 @@ export async function createSession(): Promise<string> {
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(`${SESSION_DURATION}s`)
-    .sign(SECRET);
+    .sign(getSecret());
 }
 
 export async function verifySession(token: string): Promise<boolean> {
   try {
-    await jwtVerify(token, SECRET);
+    // Pin the algorithm: without this, a token could declare its own `alg`.
+    await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
     return true;
   } catch {
     return false;

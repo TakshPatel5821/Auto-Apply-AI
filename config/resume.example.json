@@ -1,0 +1,141 @@
+{
+  "$schema": "./resume.schema.json",
+  "_comment": [
+    "Canonical résumé facts — the single source of truth the tailoring pipeline",
+    "builds its FactBook from. Copy this file to `config/resume.json` (gitignored)",
+    "and replace every value with your own. The tailor may REORDER and REWORD what",
+    "is here, but it can never invent a fact that is not in this file.",
+    "",
+    "Dates use the format \"Mon YYYY\" (e.g. \"Aug 2024\") or the literal \"Present\"."
+  ],
+  "contact": {
+    "fullName": "Jordan A. Rivera",
+    "email": "jordan.rivera@example.com",
+    "phone": "+1 (555) 010-4477",
+    "location": "Austin, TX",
+    "github": "github.com/example-user",
+    "linkedin": "linkedin.com/in/example-user"
+  },
+  "baseSummary": "Software Engineer pursuing an M.S. in Software Engineering with hands-on experience building Python data pipelines, IoT systems, and full-stack web applications. Skilled in cloud, Linux/UNIX, and secure, real-time software delivery.",
+  "education": [
+    {
+      "school": "Example State University",
+      "location": "Austin, TX",
+      "start": "Aug 2024",
+      "end": "May 2026",
+      "degree": "M.S. in Software Engineering"
+    },
+    {
+      "school": "Example Institute of Technology",
+      "location": "Springfield, IL",
+      "start": "Aug 2020",
+      "end": "Jun 2024",
+      "degree": "B.E. in Computer Engineering"
+    }
+  ],
+  "experience": [
+    {
+      "company": "Example IoT Labs",
+      "location": "Springfield, IL",
+      "start": "Jan 2023",
+      "end": "Apr 2023",
+      "title": "Software Developer Intern",
+      "bullets": [
+        "Architected a Python-based IoT data acquisition system integrating multi-sensor hardware with real-time cloud pipelines tracking temperature, humidity, air quality, and atmospheric pressure.",
+        "Developed Python/SQL backend pipelines and Tableau/Excel dashboards for live sensor data visualization and remote monitoring.",
+        "Applied TCP/IP networking, Wireshark traffic analysis, and secure communication protocols on Linux/UNIX for reliable system operation."
+      ]
+    },
+    {
+      "company": "Example Web Studio",
+      "location": "Springfield, IL",
+      "start": "Jan 2024",
+      "end": "Apr 2024",
+      "title": "Website Developer Intern",
+      "bullets": [
+        "Developed PHP/MySQL backend modules with secure authentication, session management, and input validation; optimized database queries to improve performance and reliability.",
+        "Implemented secure user authentication to protect against common web vulnerabilities.",
+        "Collaborated with team members to review code quality and enhance overall backend performance."
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "name": "Face Recognition Bot",
+      "tech": "Python, OpenCV",
+      "bullets": [
+        "Built a real-time face detection and recognition system using Python and computer vision for security and attendance applications; implemented image processing pipelines for feature extraction and identity matching."
+      ]
+    },
+    {
+      "name": "Advanced Voice Assistant",
+      "tech": "Python, NLP, Speech APIs",
+      "bullets": [
+        "Developed an AI-powered voice assistant with speech recognition and text-to-speech APIs supporting natural language commands with low-latency real-time response."
+      ]
+    },
+    {
+      "name": "Trip Booking Platform",
+      "tech": "PHP, MySQL (Independently Built)",
+      "bullets": [
+        "Independently designed and launched a full-stack car booking platform with role-based authentication, owning the full lifecycle from database schema design to deployment."
+      ]
+    },
+    {
+      "name": "Live Weather App",
+      "tech": "HTML, JavaScript",
+      "bullets": [
+        "Responsive weather app fetching real-time API data to display temperature, humidity, and forecasts based on user location."
+      ]
+    }
+  ],
+  "skills": [
+    {
+      "label": "Programming",
+      "items": ["Python", "Java", "PHP", "JavaScript", "Shell Scripting", "SQL"]
+    },
+    {
+      "label": "Web & IoT",
+      "items": [
+        "HTML",
+        "CSS",
+        "MySQL",
+        "REST APIs",
+        "IoT Sensor Integration",
+        "Real-Time Data Processing",
+        "Cloud Connectivity"
+      ]
+    },
+    {
+      "label": "Cloud (Azure)",
+      "items": [
+        "Azure Architecture & Services",
+        "Compute",
+        "Storage",
+        "Identity & Security",
+        "IaaS",
+        "PaaS",
+        "SaaS (AZ-900)"
+      ]
+    },
+    {
+      "label": "Networking & Security",
+      "items": [
+        "TCP/IP",
+        "Linux/UNIX",
+        "Wireshark",
+        "Penetration Testing",
+        "Vulnerability Assessment",
+        "PowerShell"
+      ]
+    },
+    {
+      "label": "Tools",
+      "items": ["Git", "GitHub", "Tableau", "Excel", "Power Query", "Microsoft Office Suite"]
+    }
+  ],
+  "certifications": [
+    "Microsoft Azure Fundamentals (AZ-900) --- All modules completed: Cloud Concepts, Architecture, Compute, Storage, Identity & Access, Networking, Cost Management, Governance, Monitoring.",
+    "Microsoft Learn Achievements: Cloud Computing, Cloud Service Types, Benefits of Cloud Services, Core Azure Components, Azure Cost Management --- all passed."
+  ]
+}
