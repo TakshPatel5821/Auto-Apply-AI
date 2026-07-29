@@ -72,7 +72,7 @@
     "next": "^15.5.22",
     "openai": "^4.71.1",
     "pdf-parse": "^1.1.1",
-    "playwright": "^1.49.0",
+    "playwright": "^1.62.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-dropzone": "^14.3.5",
