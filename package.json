@@ -94,7 +94,7 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.22",
-    "linkedom": "^0.18.12",
+    "linkedom": "^0.18.13",
     "postcss": "^8.5.24",
     "prettier": "^3.9.6",
     "prisma": "^5.22.0",
