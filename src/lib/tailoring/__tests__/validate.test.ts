@@ -3,14 +3,16 @@ import { buildFactBook, defaultCandidate } from "@/lib/tailoring/facts/load-fact
 import { composeLetter } from "@/lib/tailoring/composition/letter-builder";
 import { validateOutputs } from "@/lib/tailoring/validation/gates";
 import { ValidationError, type AchievementId, type EmployerId, type FactBook, type FactSelection, type JobAnalysis, type SkillId } from "@/lib/tailoring/types";
+import { firstTwoEmployers, twoEvidenceAchievements } from "./fixtures";
 
 function selection(fb: FactBook): FactSelection {
+  const [first] = firstTwoEmployers(fb);
   return {
     summarySkills: ["skill:python"] as SkillId[],
-    summaryEmployerOrProject: "employer:brainy-bean-info-tech" as EmployerId,
+    summaryEmployerOrProject: first.id as EmployerId,
     letterParagraphs: {
       hook: { skills: ["skill:python", "skill:sql"] as SkillId[] },
-      evidence: { achievements: ["achievement:brainy-bean-info-tech-1", "achievement:shubhkey-infotech-1"] as [AchievementId, AchievementId] },
+      evidence: { achievements: [...twoEvidenceAchievements(fb)] as [AchievementId, AchievementId] },
       close: { companyDetail: "real-time payment processing" },
     },
     presentRequiredSkills: ["skill:python", "skill:mysql", "skill:sql"] as SkillId[],

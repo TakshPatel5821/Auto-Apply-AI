@@ -150,7 +150,7 @@ export class GreenhouseScraper {
           }
         }
         await new Promise((r) => setTimeout(r, 600));
-      } catch (e) {
+      } catch {
         // 404 = not a Greenhouse board (or wrong slug) — expected, non-fatal.
         await Logger.warn("GREENHOUSE", `Skipped ${company} (no public board / bad slug)`);
       }

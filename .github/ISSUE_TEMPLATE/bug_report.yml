@@ -1,0 +1,94 @@
+name: Bug report
+description: Something isn't working as documented
+title: "bug: "
+labels: ["bug", "triage"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please **redact secrets** (API keys, cookies,
+        tokens, email addresses) from any logs you paste.
+
+        Found a security vulnerability? Do not file it here — follow
+        [SECURITY.md](../blob/main/SECURITY.md) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `npm run dev`
+        2. Paste a Greenhouse URL into "Add job by URL"
+        3. See the error
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the app?
+      options:
+        - Scraping / job sources
+        - Matching & scoring
+        - Résumé tailoring
+        - PDF compilation (LaTeX/Tectonic)
+        - Apply engine (Playwright/ATS)
+        - ATS screening loop
+        - Gmail integration
+        - Dashboard UI
+        - Setup / configuration
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Output from the console or the in-app log panel. Secrets redacted.
+      render: shell
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      placeholder: "20.11.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Docker
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: App version or commit
+      placeholder: "v1.0.0 or commit sha"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for a duplicate
+          required: true
+        - label: I removed all secrets and personal data from the details above
+          required: true

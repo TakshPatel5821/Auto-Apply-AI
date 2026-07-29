@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/TakshPatel5821/ai-job-agent/security/advisories/new
+    about: Report privately through GitHub Security Advisories — never in a public issue.
+
+  - name: Question or idea
+    url: https://github.com/TakshPatel5821/ai-job-agent/discussions
+    about: Ask setup questions and discuss ideas in Discussions.
+
+  - name: Setup & troubleshooting docs
+    url: https://github.com/TakshPatel5821/ai-job-agent#troubleshooting
+    about: Check the troubleshooting section before filing a bug.

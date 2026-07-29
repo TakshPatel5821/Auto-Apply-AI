@@ -4,7 +4,9 @@ import { importGithubProjects } from "@/lib/github/import";
 import { ghAuthInfo } from "@/lib/github/client";
 import { Logger } from "@/lib/logging/logger";
 
-const DEFAULT_USER = "TakshPatel5821";
+// Falls back to GITHUB_USERNAME so the repo ships no personal default. The UI
+// always sends an explicit username; this only covers direct API calls.
+const DEFAULT_USER = process.env.GITHUB_USERNAME || "";
 
 // POST { username?, token? } → scan the user's GitHub, clean each repo (+ README)
 // into a presentable project entry, upsert them, and return the catalog.
@@ -16,6 +18,15 @@ export async function POST(req: NextRequest) {
   const username = String(body.username || DEFAULT_USER).trim();
   const token = body.token ? String(body.token).trim() : undefined;
   const includeForks = Boolean(body.includeForks);
+
+  // GitHub usernames are alphanumeric with single hyphens, max 39 chars. Validate
+  // before it reaches the API client so a crafted value can't shape the URL path.
+  if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/.test(username)) {
+    return NextResponse.json(
+      { error: "Provide a valid GitHub username (or set GITHUB_USERNAME)." },
+      { status: 400 }
+    );
+  }
 
   try {
     let authenticatedAs: string | null = null;

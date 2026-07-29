@@ -18,7 +18,7 @@ interface GhProject {
 
 export function GithubProjectsPanel() {
   const [projects, setProjects] = useState<GhProject[]>([]);
-  const [username, setUsername] = useState("TakshPatel5821");
+  const [username, setUsername] = useState(process.env.NEXT_PUBLIC_GITHUB_USERNAME || "");
   const [token, setToken] = useState("");
   const [includeForks, setIncludeForks] = useState(false);
   const [loading, setLoading] = useState(false);

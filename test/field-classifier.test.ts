@@ -105,7 +105,7 @@ describe("validateValue — value must fit the field", () => {
     expect(validateValue(cls("Last Name"), "John 12345").ok).toBe(false);
   });
   it("accepts a normal name", () => {
-    expect(validateValue(cls("First Name"), "Takshkumar").ok).toBe(true);
+    expect(validateValue(cls("First Name"), "Jordan").ok).toBe(true);
   });
   it("email field requires an email", () => {
     expect(validateValue(cls("Email", "email"), "not an email").ok).toBe(false);
@@ -113,7 +113,7 @@ describe("validateValue — value must fit the field", () => {
   });
   it("phone field rejects an email and requires digits", () => {
     expect(validateValue(cls("Phone", "tel"), "a@b.co").ok).toBe(false);
-    expect(validateValue(cls("Phone", "tel"), "+1 (214) 883-2966").ok).toBe(true);
+    expect(validateValue(cls("Phone", "tel"), "+1 (555) 010-4477").ok).toBe(true);
   });
   it("rejects a paragraph in a yes/no dropdown", () => {
     const c = cls("Authorized to work?", "select", ["Yes", "No"]);
