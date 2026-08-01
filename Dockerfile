@@ -9,7 +9,7 @@
 # Alpine's system Chromium (see PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH below), which
 # keeps the image several hundred MB smaller.
 
-FROM node:20-alpine AS base
+FROM node:25-alpine AS base
 
 # ─── Dependencies ────────────────────────────────────────────────────────────
 FROM base AS deps
