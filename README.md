@@ -1,6 +1,6 @@
 # AI Job Application Agent
 
-[![CI](https://github.com/TakshPatel5821/ai-job-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/TakshPatel5821/ai-job-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/TakshPatel5821/Auto-Apply-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/TakshPatel5821/Auto-Apply-AI/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](.nvmrc)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](tsconfig.json)
@@ -108,8 +108,8 @@ Five core flows, the folder layout, every module's role, and the data model are 
 ### Install
 
 ```bash
-git clone https://github.com/TakshPatel5821/ai-job-agent.git
-cd ai-job-agent
+git clone https://github.com/TakshPatel5821/Auto-Apply-AI.git
+cd Auto-Apply-AI
 npm install
 npx playwright install chromium
 ```
@@ -246,7 +246,7 @@ The build emits a standalone server at `.next/standalone/server.js`.
 ## Project Structure
 
 ```
-ai-job-agent/
+Auto-Apply-AI/
 ├── config/              # Résumé facts (resume.json — gitignored; .example.json committed)
 ├── data/                # Company catalog + seed lists
 ├── docs/                # Architecture, function reference, multi-user spec
