@@ -17,10 +17,10 @@ dist/
 # Personal résumé facts (see config/resume.example.json for the template)
 config/resume.json
 
-# Application data (generated résumés/PDFs at repo root only — anchored so it
-# does NOT match the src/app/api/applications route folder)
+# Application data (generated résumés/PDFs and logs at repo root only — anchored
+# so they do NOT match the src/app/api/applications or src/app/api/logs routes)
 /applications/
-logs/
+/logs/
 *.pdf
 *.docx
 *.tex
