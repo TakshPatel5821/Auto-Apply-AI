@@ -13,7 +13,7 @@ A full-stack, **single-user, local-first** AI job-application assistant. It scra
 
 ## Table of Contents
 
-- [Screenshots](#screenshots)
+- [Demo](#demo)
 - [Features](#features)
 - [Tech Stack](#tech-stack)
 - [Architecture](#architecture)
@@ -31,12 +31,21 @@ A full-stack, **single-user, local-first** AI job-application assistant. It scra
 
 ---
 
-## Screenshots
+## Demo
 
-> _Screenshots pending. Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)._
+**[Try the interactive walkthrough →](https://claude.ai/artifact/BD7CroGkVYDfe8aZHVsuWs)** Step through one real tailoring run, then try to make the model claim a skill the résumé doesn't have.
 
-| Dashboard | Job matching |
+The run uses the placeholder résumé in `config/resume.example.json` and a sample job; every output below comes from the repo's own FactBook, composers and validation gates.
+
+| Required skills vs. the FactBook | Templates write the letter |
 | --- | --- |
+| ![FactBook match](docs/images/factbook-match.png) | ![Tailored letter](docs/images/tailored-letter.png) |
+
+| A fabricated skill is rejected | Apply with human handoff |
+| --- | --- |
+| ![Rejected fabrication](docs/images/rejected-fabrication.png) | ![Apply handoff](docs/images/apply-handoff.png) |
+
+--- | --- |
 | _`docs/images/dashboard.png`_ | _`docs/images/jobs.png`_ |
 
 | Résumé diff | Apply run |
@@ -74,7 +83,7 @@ The tailoring pipeline never lets the model free-write your résumé. Your real 
 | Automation | Playwright (Chromium) |
 | Documents | LaTeX via Tectonic (local) or Overleaf; `pdf-parse` / `mammoth` for ingest |
 | Email | Gmail API (read-only OAuth2) |
-| Testing | Vitest (222 tests), linkedom for DOM fixtures |
+| Testing | Vitest (227 tests), linkedom for DOM fixtures |
 | Tooling | ESLint 9 (flat config), Prettier, Docker, GitHub Actions |
 
 ---
