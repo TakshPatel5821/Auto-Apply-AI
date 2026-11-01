@@ -26,11 +26,25 @@ export function truncate(s: string, max: number): string {
   return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).replace(/[.,;:]+$/, "") + "...";
 }
 
+// Words that can't end a clean fragment: cutting right after one leaves a
+// dangling clause ("...integrating hardware with.").
+const DANGLING =
+  /\s+(?:a|an|the|and|or|but|nor|with|without|of|for|to|in|on|at|by|from|into|onto|over|under|via|as|using|including|across|between|through|while|that|which|who|whose|its|their|our|my|your|his|her)$/i;
+
 // Like truncate but with NO ellipsis and trailing punctuation stripped — for
 // embedding a clean fragment inside another sentence ("Recent work: <clip>.").
+// When it has to cut, it cuts at a word boundary and then drops any trailing
+// connective words, so the fragment never ends mid-clause.
 export function clip(s: string, max: number): string {
   const t = (s || "").trim();
-  const cut = t.length <= max ? t : t.slice(0, max);
-  const out = t.length <= max ? cut : cut.slice(0, Math.max(0, cut.lastIndexOf(" ")));
-  return (out || cut).replace(/[.,;:]+$/, "").trim();
+  const strip = (x: string) => x.replace(/[.,;:]+$/, "").trim();
+  if (t.length <= max) return strip(t);
+  const cut = t.slice(0, max);
+  let out = strip(cut.slice(0, Math.max(0, cut.lastIndexOf(" "))) || cut);
+  let prev = "";
+  while (out !== prev) {
+    prev = out;
+    out = strip(out.replace(DANGLING, ""));
+  }
+  return out;
 }
